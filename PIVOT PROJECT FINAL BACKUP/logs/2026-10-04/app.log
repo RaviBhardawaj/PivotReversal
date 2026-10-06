@@ -1,0 +1,16 @@
+[W 261004 13:01:32 smartWebSocketV2:318] Attempting to resubscribe/reconnect (Attempt 1)...
+[W 261004 13:10:08 smartWebSocketV2:318] Attempting to resubscribe/reconnect (Attempt 1)...
+[E 261004 15:07:51 smartWebSocketV2:212] Error occurred during subscribe: Connection is already closed.
+[W 261004 16:33:10 smartWebSocketV2:318] Attempting to resubscribe/reconnect (Attempt 1)...
+[W 261004 16:33:22 smartWebSocketV2:318] Attempting to resubscribe/reconnect (Attempt 1)...
+[W 261004 17:40:19 smartWebSocketV2:318] Attempting to resubscribe/reconnect (Attempt 1)...
+[I 261004 18:09:25 smartConnect:124] in pool
+[I 261004 18:09:52 smartConnect:124] in pool
+[I 261004 18:12:02 smartConnect:124] in pool
+[I 261004 18:12:04 smartConnect:124] in pool
+[I 261004 18:13:12 smartConnect:124] in pool
+[I 261004 18:13:47 smartConnect:124] in pool
+[I 261004 18:14:56 smartConnect:124] in pool
+[I 261004 18:15:24 smartConnect:124] in pool
+[I 261004 18:20:45 smartConnect:124] in pool
+[I 261004 18:37:32 smartConnect:124] in pool

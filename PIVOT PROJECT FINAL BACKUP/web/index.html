@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quantum Terminal — 15M & 1H Intraday Option Strategy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css?v=4.0">
+</head>
+<body>
+  <!-- TERMINAL TOP BAR -->
+  <header class="terminal-header">
+    <div class="header-brand-block">
+      <div class="brand-title">
+        <span class="live-dot"></span>
+        <span class="brand-name">QUANTUM TERMINAL</span>
+        <span class="brand-badge">15M + 1H INTRADAY</span>
+      </div>
+      <div id="market-status-pill" class="status-pill offline">
+        <span class="status-icon">●</span> <span id="market-status-text">CONNECTING</span>
+      </div>
+    </div>
+
+    <!-- SPOT & TIMERS STRIP -->
+    <div class="header-stats-block">
+      <div class="stat-box spot-box" id="spot-box">
+        <span class="stat-lbl" id="current-sym-label">NIFTY SPOT</span>
+        <span class="stat-num" id="spot-price-val">--</span>
+        <span class="stat-tag" id="spot-zone-badge">--</span>
+      </div>
+
+      <div class="stat-box clock-box" title="Indian Standard Time">
+        <span class="stat-lbl">IST TIME</span>
+        <span class="stat-num clock-num" id="live-ist-clock">--:--:--</span>
+      </div>
+
+      <div class="stat-box timer-box" title="Intraday Square-off at 3:00 PM">
+        <span class="stat-lbl">3:00 PM SQ-OFF</span>
+        <span class="stat-num timer-num" id="timer-3pm">--:--:--</span>
+      </div>
+
+      <div class="stat-box timer-box" title="Next-Day Level Calculation at 3:45 PM">
+        <span class="stat-lbl">3:45 PM LEVELS</span>
+        <span class="stat-num timer-num" id="timer-345pm">--:--:--</span>
+      </div>
+
+      <div class="header-actions">
+        <div class="mode-tag" id="execution-mode-badge">PAPER</div>
+        <button id="audio-toggle-btn" class="ctrl-btn active" title="Toggle Sound Alerts">🔔 AUDIO</button>
+        <a id="sheet-link-btn" href="https://docs.google.com/spreadsheets/d/1TNuwFBf1xtTq7xyu_d32MPoWhSp7HzMdacNSnFV6i2U/edit" target="_blank" class="ctrl-btn btn-sheet">📊 SHEET ↗</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- CLEAN PERFORMANCE STRIP (4 METRICS) -->
+  <section class="performance-strip">
+    <div class="perf-card">
+      <span class="perf-label">NET CLOSED POINTS</span>
+      <span class="perf-value text-green" id="sc-net-pts">+0.00 pts</span>
+      <span class="perf-sub" id="sc-trades-count">0 Closed Trades</span>
+    </div>
+    <div class="perf-card">
+      <span class="perf-label">WIN RATE & ACCURACY</span>
+      <span class="perf-value highlight-gold" id="sc-win-rate">0.0%</span>
+      <span class="perf-sub" id="sc-win-loss">0 W | 0 L</span>
+    </div>
+    <div class="perf-card">
+      <span class="perf-label">ACTIVE TRADES</span>
+      <span class="perf-value highlight-cyan" id="sc-live-pts">0 Active</span>
+      <span class="perf-sub" id="sc-active-trades-count">Real-time CMP Tracking</span>
+    </div>
+    <div class="perf-card">
+      <span class="perf-label">TOTAL NET INCL. LIVE</span>
+      <span class="perf-value text-green" id="sc-total-net">+0.00 pts</span>
+      <span class="perf-sub">Total Portfolio Return</span>
+    </div>
+  </section>
+
+  <!-- NAVIGATION TABS -->
+  <nav class="terminal-nav">
+    <button class="nav-tab active" data-tab="tab-scanner">
+      🎯 OPTION STRATEGY SCANNER
+    </button>
+    <button class="nav-tab" data-tab="tab-planner">
+      📅 NEXT-DAY PLAN (15M + 1H INTRADAY)
+    </button>
+    <button class="nav-tab" data-tab="tab-forward-test">
+      🧪 TRADE JOURNAL & FORWARD TEST <span class="tab-badge" id="tab-active-count">0</span>
+    </button>
+  </nav>
+
+  <!-- TAB 1: OPTION STRATEGY SCANNER -->
+  <main class="tab-pane active" id="tab-scanner">
+    <!-- Simplified Control Bar -->
+    <div class="scanner-controls-bar">
+      <div class="control-unit">
+        <label>SYMBOL</label>
+        <div class="symbol-input-group">
+          <input type="text" id="input-symbol" class="terminal-input" value="NIFTY" placeholder="NIFTY, BANKNIFTY">
+          <div class="quick-chips">
+            <button class="chip-btn" data-sym="NIFTY">NIFTY</button>
+            <button class="chip-btn" data-sym="BANKNIFTY">BANKNIFTY</button>
+            <button class="chip-btn" data-sym="RELIANCE">RELIANCE</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="control-unit">
+        <label>CONTRACT EXPIRY</label>
+        <select id="sel-expiry" class="terminal-select min-w-140">
+          <option value="">Loading expiries...</option>
+        </select>
+      </div>
+
+      <div class="control-unit">
+        <label>FEED CONTROL</label>
+        <div class="btn-group">
+          <button id="btn-start-feed" class="btn btn-primary">▶ START SCANNER</button>
+          <button id="btn-stop-feed" class="btn btn-secondary" disabled>⏹ STOP</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- COMPACT MTF METHODOLOGY SINGLE ROW -->
+    <div class="mtf-methodology-strip">
+      <div class="mtf-strip-step">
+        <span class="mtf-tag badge-15m">⭐ 15M INTRADAY</span>
+        <span class="step-desc" id="piv-pill-15m">P: -- | S1: -- | S2: -- | R1: -- | R2: --</span>
+      </div>
+      <div class="mtf-arrow">→</div>
+      <div class="mtf-strip-step">
+        <span class="mtf-tag badge-1h">⏳ 1H STRUCTURE</span>
+        <span class="step-desc" id="piv-pill-1h">P: -- | S1: -- | S2: -- | R1: -- | R2: --</span>
+      </div>
+      <div class="mtf-arrow">→</div>
+      <div class="mtf-strip-step">
+        <span class="mtf-tag badge-signal">⚡ 5M CONFIRM</span>
+        <span class="step-desc">Candle Reclaim / Rejection</span>
+      </div>
+      <div class="mtf-arrow">→</div>
+      <div class="mtf-strip-step">
+        <span class="mtf-tag badge-both">EXECUTION</span>
+        <span class="step-desc text-green font-bold">Target ≠ Entry | SL Active</span>
+      </div>
+    </div>
+
+    <!-- REFERENCE LEVELS: DAILY & WEEKLY PIVOT FIB (REFERENCE ONLY) -->
+    <div class="reference-levels-strip" id="reference-levels-strip">
+      <div class="ref-unit">
+        <span class="ref-title">📅 DAILY PIVOT FIB (REFERENCE):</span>
+        <span class="ref-content font-mono" id="daily-fib-text">PP: -- | S1: -- | S2: -- | S3: -- | R1: -- | R2: -- | R3: --</span>
+      </div>
+      <div class="ref-sep">|</div>
+      <div class="ref-unit">
+        <span class="ref-title">📆 WEEKLY PIVOT FIB (REFERENCE):</span>
+        <span class="ref-content font-mono" id="weekly-fib-text">PP: -- | S1: -- | S2: -- | S3: -- | R1: -- | R2: -- | R3: --</span>
+      </div>
+    </div>
+
+    <!-- ACTIVE STORED PLAN STATUS BANNER -->
+    <div class="active-plan-banner" id="active-plan-banner">
+      <div class="plan-banner-left">
+        <span class="plan-live-dot"></span>
+        <span class="plan-indicator">STORED NEXT-DAY PLAN:</span>
+        <span class="plan-details" id="active-plan-details">Active trading session plan loaded into Live Scanner</span>
+      </div>
+      <span class="plan-session-tag" id="active-plan-tag">AUTOMATIC DAILY CYCLE</span>
+    </div>
+
+    <!-- Filters Strip -->
+    <div class="scanner-toolbar">
+      <div class="filter-cluster">
+        <span class="cluster-label">TIMEFRAME & VIEW:</span>
+        <button class="filter-pill active" data-filter="FOCUS">🎯 15M & 1H FOCUS</button>
+        <button class="filter-pill" data-filter="15M">⭐ 15M INTRADAY ONLY</button>
+        <button class="filter-pill" data-filter="1H">⏳ 1H STRUCTURE ONLY</button>
+        <button class="filter-pill" data-filter="BUY_ONLY">🟢 BUY SETUPS</button>
+        <button class="filter-pill" data-filter="SELL_ONLY">🔴 SELL SETUPS</button>
+        <button class="filter-pill" data-filter="ALL">ALL STRIKES</button>
+      </div>
+
+      <div class="filter-cluster expiry-cluster">
+        <span class="cluster-label">EXPIRY:</span>
+        <button class="filter-pill expiry-pill active" data-expiry="CURRENT">CURRENT</button>
+        <button class="filter-pill expiry-pill" data-expiry="NEXT">NEXT</button>
+        <button class="filter-pill expiry-pill" data-expiry="ALL">ALL EXPIRIES</button>
+      </div>
+
+      <div class="max-oi-indicator" id="max-oi-text">OI Activity: Ready</div>
+    </div>
+
+    <!-- Main Scanner Table -->
+    <div class="terminal-table-container">
+      <table class="terminal-table" id="table-option-chain">
+        <thead>
+          <tr>
+            <th>TIMEFRAME</th>
+            <th>EXPIRY</th>
+            <th>STRIKE</th>
+            <th>TYPE</th>
+            <th>SIDE</th>
+            <th>OPTION LTP (₹)</th>
+            <th>TRIGGER ENTRY (₹)</th>
+            <th>TARGET 1 (₹)</th>
+            <th>TARGET 2 (₹)</th>
+            <th>TARGET 3 (₹)</th>
+            <th>TARGET 4 (₹)</th>
+            <th>STOP LOSS (₹)</th>
+            <th>R:R</th>
+            <th>5M CONFIRMATION</th>
+            <th>STRATEGY STATUS</th>
+          </tr>
+        </thead>
+        <tbody id="tbody-option-chain">
+          <tr>
+            <td colspan="15" class="empty-state">
+              Ready to stream live market data. Select symbol and click <strong>▶ START SCANNER</strong>.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- TAB 2: NEXT-DAY PLAN (15M + 1H INTRADAY) -->
+  <main class="tab-pane" id="tab-planner">
+    <div class="planner-wrapper">
+      <div class="planner-header-strip">
+        <div>
+          <h2>📅 NEXT-DAY 15M + 1H INTRADAY STRATEGY PLAN</h2>
+          <p class="planner-desc">Derived strictly from completed 15-Minute and 1-Hour Intraday price action, support/resistance, and Fibonacci levels. Zero Daily Pivot dependency.</p>
+        </div>
+        <div class="planner-actions-group" style="display:flex;gap:8px;align-items:center;">
+          <button id="btn-apply-plan-to-scanner" class="btn btn-success font-bold">
+            📥 LOAD PLAN INTO LIVE SCANNER
+          </button>
+          <button id="btn-trigger-planner" class="btn btn-primary font-bold">
+            ⚡ RE-CALCULATE 15M/1H PLAN
+          </button>
+        </div>
+      </div>
+
+      <div class="planner-deck-container" id="planner-deck-container">
+        <div class="empty-state">
+          Loading Next-Day 15M & 1H Intraday Strategy Deck...
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- TAB 3: TRADE JOURNAL & FORWARD TEST -->
+  <main class="tab-pane" id="tab-forward-test">
+    <div class="ft-toolbar">
+      <div class="filter-cluster">
+        <span class="cluster-label">TIMEFRAME FILTER:</span>
+        <button class="filter-pill active" data-ft-filter="ALL">ALL TIMEFRAMES</button>
+        <button class="filter-pill" data-ft-filter="15M">15M INTRADAY</button>
+        <button class="filter-pill" data-ft-filter="1H">1H STRUCTURE</button>
+        <button class="filter-pill" data-ft-filter="5M">5M DYNAMIC</button>
+      </div>
+      <button id="btn-manual-squareoff" class="btn btn-warning" title="Close all open intraday trades at current market price">
+        ⏰ 3:00 PM Square-off All @ CMP
+      </button>
+    </div>
+
+    <!-- Active Trades -->
+    <div class="panel-section">
+      <div class="panel-header">
+        <h3>ACTIVE POSITIONS <span class="badge badge-gold" id="ft-active-badge">0</span></h3>
+        <span class="panel-sub">Real-time P&L calculated at live option tick CMP</span>
+      </div>
+      <div class="terminal-table-container">
+        <table class="terminal-table" id="table-ft-active">
+          <thead>
+            <tr>
+              <th>DATE</th>
+              <th>TIME</th>
+              <th>TIMEFRAME</th>
+              <th>SYMBOL</th>
+              <th>TYPE</th>
+              <th>STRIKE</th>
+              <th>ACTION</th>
+              <th>ENTRY (₹)</th>
+              <th>LIVE CMP (₹)</th>
+              <th>PNL (PTS)</th>
+              <th>SL (₹)</th>
+              <th>T1 (₹)</th>
+              <th>T2 (₹)</th>
+              <th>STATUS</th>
+              <th>ACTION</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-ft-active">
+            <tr>
+              <td colspan="15" class="empty-state">No open positions currently active.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Closed Trades -->
+    <div class="panel-section mt-16">
+      <div class="panel-header">
+        <h3>CLOSED TRADES AUDIT LOG <span class="badge badge-green" id="ft-closed-badge">0</span></h3>
+        <span class="panel-sub">Historical executions from today's live market session with individual & cumulative points</span>
+      </div>
+      <div class="terminal-table-container">
+        <table class="terminal-table" id="table-ft-closed">
+          <thead>
+            <tr>
+              <th>DATE</th>
+              <th>TIME</th>
+              <th>TIMEFRAME</th>
+              <th>SYMBOL</th>
+              <th>TYPE</th>
+              <th>STRIKE</th>
+              <th>ACTION</th>
+              <th>ENTRY (₹)</th>
+              <th>EXIT (₹)</th>
+              <th>+/- POINTS</th>
+              <th>CUMULATIVE PTS</th>
+              <th>EXIT REASON</th>
+              <th>STATUS</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-ft-closed">
+            <tr>
+              <td colspan="13" class="empty-state">No trades closed yet for this session.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <div id="toast-container" class="toast-container"></div>
+  <script src="/static/app.js?v=4.0"></script>
+</body>
+</html>

@@ -2,7 +2,7 @@
 
 import os
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -31,6 +31,9 @@ class DhanAdapter(BrokerAdapter):
     name = "DHAN"
     env_keys = ["DHAN_CLIENT_ID", "DHAN_PIN", "DHAN_TOTP_SECRET", "DHAN_ACCESS_TOKEN"]
     secret_keys = ["DHAN_PIN", "DHAN_TOTP_SECRET", "DHAN_ACCESS_TOKEN"]
+    # A new PIN+TOTP token replaces the previous one, so every Dhan adapter in the app
+    # (orders and market data) shares the newest token instead of logging each other out.
+    _shared_token = ""
 
     def __init__(self, creds, log=print, cache_dir="."):
         super().__init__(creds, log)
@@ -40,6 +43,8 @@ class DhanAdapter(BrokerAdapter):
 
     # ── HTTP ────────────────────────────────────────────────
     def _headers(self):
+        if DhanAdapter._shared_token and self.creds.get("DHAN_ACCESS_TOKEN") != DhanAdapter._shared_token:
+            self.creds["DHAN_ACCESS_TOKEN"] = DhanAdapter._shared_token
         return {
             "access-token": self.creds.get("DHAN_ACCESS_TOKEN", ""),
             "client-id": self.creds.get("DHAN_CLIENT_ID", ""),
@@ -80,6 +85,7 @@ class DhanAdapter(BrokerAdapter):
         if not tok:
             raise BrokerError(f"Dhan login (PIN + TOTP) failed: {d.get('message') or d.get('errorMessage') or r.status_code}")
         self.creds["DHAN_ACCESS_TOKEN"] = tok
+        DhanAdapter._shared_token = tok
 
     def login(self):
         if not self.creds.get("DHAN_CLIENT_ID"):
@@ -104,6 +110,37 @@ class DhanAdapter(BrokerAdapter):
         d = self._req("GET", "/fundlimit")
         # Dhan spells it 'availabelBalance'; accept the correct spelling too
         return to_float(d.get("availabelBalance", d.get("availableBalance")), None)
+
+    # ── market data ─────────────────────────────────────────
+    def daily_candles(self, security_id, segment="NSE_FNO", instrument="OPTIDX", days=20, now=None):
+        """Daily candles [(YYYY-MM-DD, open, high, low, close), ...] from Dhan's historical API
+        (the exchange's official daily OHLC). Raises BrokerError with Dhan's message on failure."""
+        now = now or datetime.now()
+        body = {"securityId": str(security_id), "exchangeSegment": segment, "instrument": instrument,
+                "expiryCode": 0, "oi": False,
+                "fromDate": (now - timedelta(days=days)).strftime("%Y-%m-%d"),
+                "toDate": (now + timedelta(days=1)).strftime("%Y-%m-%d")}     # toDate is exclusive
+        try:
+            r = self._http.post(API + "/charts/historical", json=body, headers=self._headers(), timeout=15)
+        except Exception as e:
+            raise BrokerError(f"Dhan historical network error: {type(e).__name__}")
+        try:
+            d = r.json() if r.content else {}
+        except Exception:
+            d = {}
+        if not (200 <= r.status_code < 300):
+            raise BrokerError(f"Dhan historical error {d.get('errorCode', r.status_code)}: "
+                              f"{d.get('errorMessage') or d.get('remarks') or r.text[:200]}")
+        ts, o, h, l, c = (d.get(k) or [] for k in ("timestamp", "open", "high", "low", "close"))
+        ist = timezone(timedelta(hours=5, minutes=30))
+        out = []
+        for i in range(min(len(ts), len(o), len(h), len(l), len(c))):
+            try:
+                day = datetime.fromtimestamp(float(ts[i]), ist).strftime("%Y-%m-%d")
+                out.append((day, float(o[i]), float(h[i]), float(l[i]), float(c[i])))
+            except Exception:
+                continue
+        return out
 
     # ── instruments ─────────────────────────────────────────
     def _load_index(self):

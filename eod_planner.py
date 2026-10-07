@@ -252,6 +252,9 @@ def map_strike_pivots_for_symbol(symbol=SYMBOL, n_strikes=12):
         # Next-session levels have their own file: the live session's strike_pivot_cache.json
         # (what TradingView shows today) is never overwritten from here.
         cache_f = os.path.join(PLAN_DIR, "strike_pivot_cache_next.json")
+        if not mapped_pivots:
+            print("[STRIKE PLAN] No candle data from Angel One — next-session file left as it is")
+            return {}
         with open(cache_f + ".tmp", "w") as f:
             json.dump(cache_data, f, indent=2)
         os.replace(cache_f + ".tmp", cache_f)

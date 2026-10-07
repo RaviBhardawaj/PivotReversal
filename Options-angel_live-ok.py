@@ -2835,6 +2835,54 @@ def angel_daily_candles(exch: str, token: str, days: int = 20, now: datetime = N
     raise RuntimeError(last or "no candle data from Angel One")
 
 
+_DHAN_DATA = {"ad": None, "fail_at": 0.0, "why": ""}
+
+
+def dhan_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now: datetime = None) -> list:
+    """Daily candles of one contract from Dhan's historical API (same official exchange OHLC).
+    Dhan's F&O security ID is the exchange token, the same number Angel's instrument list has.
+    Logs in with the Dhan keys in .env (PIN + TOTP makes a fresh token); a failed login is not
+    retried for 5 minutes."""
+    from brokers.dhan import DhanAdapter, _SEG
+    st = _DHAN_DATA
+    if st["ad"] is None:
+        if time.time() - st["fail_at"] < 300:
+            raise RuntimeError(st["why"])
+        creds = {k: (os.getenv(k, "") or "").strip() for k in DhanAdapter.env_keys}
+        if not creds.get("DHAN_CLIENT_ID"):
+            st["fail_at"], st["why"] = time.time(), "no Dhan keys in .env"
+            raise RuntimeError(st["why"])
+        ad = DhanAdapter(creds, log=print, cache_dir=BASE_DIR)
+        try:
+            ad.login()
+        except Exception as e:
+            st["fail_at"], st["why"] = time.time(), f"Dhan login failed: {e}"
+            raise RuntimeError(st["why"])
+        st["ad"] = ad
+    try:
+        return st["ad"].daily_candles(token, _SEG.get(exch, "NSE_FNO"), instrument, now=now)
+    except Exception as e:
+        if any(k in str(e).upper() for k in ("DH-901", "DH-902", " 401", "INVALID", "EXPIRED")):
+            st["ad"] = None          # token no longer valid: log in again on the next call
+        raise
+
+
+def strike_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now: datetime = None):
+    """Official daily candles of one option: Dhan first, Angel One as the backup.
+    Returns (rows, source). Raises with both brokers' reasons when neither has data."""
+    errs = []
+    for name, fn in (("Dhan", lambda: dhan_daily_candles(exch, token, instrument, now=now)),
+                     ("Angel", lambda: angel_daily_candles(exch, token, now=now))):
+        try:
+            rows = fn()
+            if rows:
+                return rows, name
+            errs.append(f"{name}: no candles")
+        except Exception as e:
+            errs.append(f"{name}: {e}")
+    raise RuntimeError("; ".join(errs))
+
+
 def read_json_file(path: str) -> dict:
     try:
         with open(path, "r") as f:
@@ -3261,7 +3309,8 @@ class FeedEngine:
         """
         Fibonacci pivots (P, R1-R3, S1-S3) of the focus option strikes, exactly as TradingView's
         'Pivot Points Standard' (Type Fibonacci, timeframe Daily) draws them:
-        P = (H + L + C) / 3 of the previous day's official daily candle (Angel historical API).
+        P = (H + L + C) / 3 of the previous day's official daily candle (Dhan historical API,
+        Angel One's as the backup).
 
         mode="session": levels of the session TradingView shows now (pivot_session_date). Saved to
                         strike_pivot_cache.json and used by the dashboard, alerts and orders.
@@ -3338,7 +3387,8 @@ class FeedEngine:
                     'symbol': r['symbol'],
                     'strike': int(r['strike_int']),
                     'opt_type': 'CE' if r['symbol'].endswith('CE') else 'PE',
-                    'expiry': target_expiry
+                    'expiry': target_expiry,
+                    'itype': 'OPTSTK' if str(r.get('instrumenttype', '')) == 'OPTSTK' else 'OPTIDX',
                 }
 
             _now = datetime.now()
@@ -3390,7 +3440,7 @@ class FeedEngine:
             for tok in fetch_tokens:
                 m = meta_map[tok]
                 try:
-                    rows = angel_daily_candles(exch, tok, now=_now)
+                    rows, src = strike_daily_candles(exch, tok, m.get('itype', 'OPTIDX'), now=_now)
                     cndl = pick_pivot_candle(rows, mode, _now)
                     if not cndl:
                         failed[tok] = "no completed daily candle yet"
@@ -3407,6 +3457,7 @@ class FeedEngine:
                                 'strike': m['strike'],
                                 'expiry': m['expiry'],
                                 'candle_date': c_date,          # day whose H/L/C built these levels
+                                'source': src,                  # Dhan or Angel
                                 'level_date': level_date.isoformat(),
                                 'prev_h': round(h, 2),
                                 'prev_l': round(l, 2),

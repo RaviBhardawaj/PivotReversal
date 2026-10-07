@@ -186,4 +186,23 @@ try:
 except BrokerError:
     check(holder["logins"] == 2, "no login flood while Angel refuses the key")
 print("angel ok")
+# Dhan daily candles (historical API)
+from brokers.dhan import DhanAdapter as _DA
+class _R:
+    def __init__(s, code, d): s.status_code = code; s._d = d; s.content = b"x"; s.text = str(d)
+    def json(s): return s._d
+class _H:
+    def __init__(s, resp): s.resp = resp; s.body = None
+    def post(s, url, json=None, headers=None, timeout=0): s.body = (url, json); return s.resp
+dd = _DA({"DHAN_CLIENT_ID": "1", "DHAN_ACCESS_TOKEN": "t"}, log=lambda *a: None)
+dd._http = _H(_R(200, {"timestamp": [1759775400, 1759861800], "open": [10, 11], "high": [12, 13], "low": [9, 10], "close": [11, 12]}))
+rows = dd.daily_candles("44614", "NSE_FNO", "OPTIDX")
+check(rows == [("2025-10-07", 10.0, 12.0, 9.0, 11.0), ("2025-10-08", 11.0, 13.0, 10.0, 12.0)], f"dhan candles {rows}")
+check(dd._http.body[0].endswith("/charts/historical") and dd._http.body[1]["securityId"] == "44614"
+      and dd._http.body[1]["instrument"] == "OPTIDX", "dhan historical request")
+dd._http = _H(_R(400, {"errorCode": "DH-906", "errorMessage": "Data APIs not subscribed"}))
+try:
+    dd.daily_candles("1"); check(False, "dhan error")
+except BrokerError as e:
+    check("DH-906" in str(e), f"dhan error message {e}")
 print(f"ALL ADAPTER TESTS PASSED ({n} checks)")

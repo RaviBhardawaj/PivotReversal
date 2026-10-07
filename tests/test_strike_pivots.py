@@ -123,4 +123,23 @@ g.load_or_fetch_strike_pivots("NIFTY",list(m),{t:{"expiry":meta[t][0],"strike":m
 assert state["calls"]==calls and all(t in g.strike_pivots for t in m); print("G restart from cache, no refetch: OK")
 # H) flat candle = all levels P, as TradingView
 p=app.calc_fib_pivots(5,5,5); assert p["R3"]==p["S3"]==p["P"]==5
+# I) Dhan is the first source; Angel is not asked when Dhan has the candles
+class FakeDhan:
+    def __init__(s): s.calls = []
+    def daily_candles(s, sid, seg, instrument, now=None):
+        s.calls.append((sid, seg, instrument))
+        today = FakeDT.v.strftime("%Y-%m-%d")
+        return [tuple([c[0][:10]] + c[1:5]) for c in (candle(sid, d) for d in DAYS if d <= today)]
+fd = FakeDhan(); app._DHAN_DATA["ad"] = fd
+FakeDT.v = datetime(2026,10,9,8,0); f.strike_pivots.clear(); calls = state["calls"]
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+assert state["calls"] == calls and len(fd.calls) == len(r) and fd.calls[0][1:] == ("NSE_FNO", "OPTIDX")
+for t,s in r.items(): check(s,t,"2026-10-08"); assert s["source"] == "Dhan"
+# Dhan fails -> Angel fills in
+class BadDhan:
+    def daily_candles(s, *a, **k): raise RuntimeError("DH-906 no data plan")
+app._DHAN_DATA["ad"] = BadDhan(); f.strike_pivots.clear()
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+assert r and all(s["source"] == "Angel" for s in r.values())
+print("I Dhan first, Angel backup: OK")
 print("STRIKE PIVOT TESTS PASSED")

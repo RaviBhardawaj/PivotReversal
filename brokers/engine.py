@@ -130,7 +130,7 @@ def _now():
 
 class OrderEngine:
     def __init__(self, base_dir, log=print, alert=None, order_logger=None,
-                 market_open=None, session_getter=None, env_reader=None, clock=_now,
+                 market_open=None, session_getter=None, env_reader=None, session_relogin=None, clock=_now,
                  poll_s=1.0, reconcile_s=30.0, start_threads=True):
         self.base_dir = base_dir
         self.log = log
@@ -138,6 +138,7 @@ class OrderEngine:
         self.order_logger = order_logger or (lambda **k: None)
         self.market_open = market_open or (lambda: True)
         self.session_getter = session_getter
+        self.session_relogin = session_relogin
         self.env_reader = env_reader or (lambda k: os.getenv(k, ""))
         self.clock = clock
         self.poll_s = poll_s
@@ -233,6 +234,7 @@ class OrderEngine:
         creds = {k: self.env_reader(k) for k in cls.env_keys}
         if name == "ANGEL":
             creds["_session_getter"] = self.session_getter
+            creds["_session_relogin"] = self.session_relogin
         return creds
 
     def connect(self, name=None):

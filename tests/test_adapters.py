@@ -162,5 +162,23 @@ try:
     a2.login(); check(False, "no session")
 except BrokerError:
     check(True, "")
+# stale session: Angel answers AG8004 until the app logs in again
+AUTH_ERR = {"status": False, "message": "Invalid API Key", "errorCode": "AG8004", "data": ""}
+class StaleObj(FakeObj):
+    def rmsLimit(s): return AUTH_ERR
+    def placeOrderFullResponse(s, p): return AUTH_ERR
+holder = {"obj": StaleObj(), "logins": 0}
+def relogin():
+    holder["logins"] += 1; holder["obj"] = FakeObj()
+a3 = AngelAdapter({"_session_getter": lambda: holder["obj"], "_session_relogin": relogin, "ANGEL_CLIENT_ID": "C1"}, log=lambda *a: None)
+check(a3.login() == "C1" and holder["logins"] == 1, "angel logs in again after AG8004")
+holder["obj"] = StaleObj()
+check(a3.place(r, "BUY", 75, "LIMIT", price=100) == "A1" and holder["logins"] == 2
+      and len(holder["obj"].sent) == 1, "angel order retried once on the new session")
+a4 = AngelAdapter({"_session_getter": lambda: StaleObj(), "_session_relogin": lambda: None}, log=lambda *a: None)
+try:
+    a4.login(); check(False, "still refused")
+except BrokerError as e:
+    check("even after a fresh login" in str(e), f"clear message when the key is refused {e}")
 print("angel ok")
 print(f"ALL ADAPTER TESTS PASSED ({n} checks)")

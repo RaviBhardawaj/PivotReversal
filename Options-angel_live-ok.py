@@ -1378,6 +1378,7 @@ class LiveOrderManager:
             order_logger=lambda **k: self._log_order(**k),
             market_open=is_live_market_open,
             session_getter=lambda: Session.obj,
+            session_relogin=lambda: Session.login(),
             env_reader=lambda k: os.getenv(k, "") or "",
         )
 

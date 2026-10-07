@@ -46,7 +46,8 @@ DEFAULT_SETTINGS = {
     "max_trades":        6,
     "max_loss_rs":       5000,
     # strike selection: which of the strategy's strikes get real orders
-    "levels":            "R1,R2,S1,S2,P,PN",   # PN = strikes next to P
+    # pivot levels per timeframe, e.g. "15M:R1,1H:P" (PN = strikes next to P; a bare "R1" means both)
+    "levels":            "15M:R1,15M:R2,15M:S1,15M:S2,15M:P,15M:PN,1H:R1,1H:R2,1H:S1,1H:S2,1H:P,1H:PN",
     "opt_types":         "CE,PE",
     "strike_tf":         "ANY",    # ANY = a 15M or 1H strike; BOTH = must be a strike on both
     "symbols":           "",       # e.g. "NIFTY,SENSEX"; blank = all
@@ -54,6 +55,24 @@ DEFAULT_SETTINGS = {
 }
 ALL_LEVELS = ("R1", "R2", "S1", "S2", "P", "PN")
 LEVEL_LABELS = {"R1": "R1", "R2": "R2", "S1": "S1", "S2": "S2", "P": "P", "PN": "Next to P"}
+TIMEFRAMES = ("15M", "1H")
+ALL_TF_LEVELS = tuple(f"{tf}:{lv}" for tf in TIMEFRAMES for lv in ALL_LEVELS)
+
+
+def tf_levels(values):
+    """Levels qualified by timeframe: 'R1' (old form, no timeframe) counts for both 15M and 1H."""
+    out = set()
+    for x in values:
+        x = str(x).strip().upper()
+        if not x:
+            continue
+        out |= {x} if ":" in x else {f"{tf}:{x}" for tf in TIMEFRAMES}
+    return out
+
+
+def tf_level_label(x):
+    tf, _, lv = x.partition(":")
+    return f"{tf} {LEVEL_LABELS.get(lv, lv)}"
 
 
 def csv_set(v):
@@ -63,15 +82,15 @@ def csv_set(v):
 
 def strike_selection_reason(s, trade, inst):
     """Why the strike selection in settings s rules this entry out ('' = allowed)."""
-    lv_on = csv_set(s.get("levels", ""))
-    lv = {str(x).upper() for x in (inst.get("levels") or [])}
-    if lv_on != set(ALL_LEVELS):
+    lv_on = tf_levels(csv_set(s.get("levels", "")))
+    lv = tf_levels(inst.get("levels") or [])
+    if lv_on != set(ALL_TF_LEVELS):
         if not lv_on:
             return "no strike level selected"
         if not lv:
             return "strike level unknown"
         if not (lv & lv_on):
-            return f"level {'/'.join(LEVEL_LABELS.get(x, x) for x in ALL_LEVELS if x in lv) or '/'.join(sorted(lv))} not selected"
+            return f"level {' / '.join(tf_level_label(x) for x in ALL_TF_LEVELS if x in lv)} not selected"
     types = csv_set(s.get("opt_types", ""))
     ot = str(inst.get("opt_type") or trade.get("Type") or "").upper()
     if not types:

@@ -1,5 +1,7 @@
 """Angel One SmartAPI adapter. Reuses the app's existing SmartConnect session (Session.obj)."""
 
+import time
+
 from .base import (BrokerAdapter, BrokerError, OrderStatus, FILLED, PENDING, REJECTED,
                    CANCELLED, tick_round, to_float)
 
@@ -29,6 +31,7 @@ class AngelAdapter(BrokerAdapter):
         super().__init__(creds, log)
         self._get_obj = creds.get("_session_getter")      # lambda: Session.obj
         self._relogin = creds.get("_session_relogin")     # logs the app in again (new Session.obj)
+        self._relogin_at = 0.0                            # at most one fresh login per 5 minutes
         self._variety = {}                                # order_id -> NORMAL / STOPLOSS
 
     def _obj(self):
@@ -46,7 +49,8 @@ class AngelAdapter(BrokerAdapter):
             raise
         except Exception as e:
             r = e
-        if _is_auth_error(r) and self._relogin:
+        if _is_auth_error(r) and self._relogin and time.time() - self._relogin_at > 300:
+            self._relogin_at = time.time()
             self.log("[ORDERS] Angel One session expired — logging in again")
             try:
                 self._relogin()

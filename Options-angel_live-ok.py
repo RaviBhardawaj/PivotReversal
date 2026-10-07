@@ -2752,6 +2752,7 @@ STRIKE_PIVOT_NEXT_CACHE = os.path.join(BASE_DIR, "strike_pivot_cache_next.json")
 
 _ANGEL_AUTH_ERRORS = ("AG8001", "AG8002", "AG8003", "AG8004", "AB1010", "AB1011",
                       "INVALID TOKEN", "INVALID API KEY", "TOKEN EXPIRED")
+_ANGEL_RELOGIN_AT = 0.0      # when the app last logged in again because Angel refused the session
 _ANGEL_RATE_ERRORS = ("AB1004", "AB1019", "EXCEEDING ACCESS RATE", "TOO MANY REQUESTS")
 
 
@@ -2811,8 +2812,15 @@ def angel_daily_candles(exch: str, token: str, days: int = 20, now: datetime = N
         else:
             last = str(r)[:120]
         up = last.upper()
-        if any(k in up for k in _ANGEL_AUTH_ERRORS) and not relogged:
+        if any(k in up for k in _ANGEL_AUTH_ERRORS):
+            global _ANGEL_RELOGIN_AT
+            # A fresh login a moment ago did not help: Angel is refusing the key itself, so
+            # don't log in again for every strike (that only floods Angel).
+            if relogged or time.time() - _ANGEL_RELOGIN_AT < 300:
+                last += " (still refused after a fresh login: check the API key / static IP in the SmartAPI dashboard)"
+                break
             relogged = True
+            _ANGEL_RELOGIN_AT = time.time()
             try:
                 Session.login()
                 print("[STRIKE MAPPER] Angel session refreshed (it had expired)")

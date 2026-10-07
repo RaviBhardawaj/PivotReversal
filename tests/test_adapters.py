@@ -172,7 +172,7 @@ def relogin():
     holder["logins"] += 1; holder["obj"] = FakeObj()
 a3 = AngelAdapter({"_session_getter": lambda: holder["obj"], "_session_relogin": relogin, "ANGEL_CLIENT_ID": "C1"}, log=lambda *a: None)
 check(a3.login() == "C1" and holder["logins"] == 1, "angel logs in again after AG8004")
-holder["obj"] = StaleObj()
+holder["obj"] = StaleObj(); a3._relogin_at = 0.0     # 5 minutes later
 check(a3.place(r, "BUY", 75, "LIMIT", price=100) == "A1" and holder["logins"] == 2
       and len(holder["obj"].sent) == 1, "angel order retried once on the new session")
 a4 = AngelAdapter({"_session_getter": lambda: StaleObj(), "_session_relogin": lambda: None}, log=lambda *a: None)
@@ -180,5 +180,10 @@ try:
     a4.login(); check(False, "still refused")
 except BrokerError as e:
     check("even after a fresh login" in str(e), f"clear message when the key is refused {e}")
+holder["obj"] = StaleObj()
+try:
+    a3.place(r, "BUY", 75, "LIMIT", price=100); check(False, "no second login within 5 minutes")
+except BrokerError:
+    check(holder["logins"] == 2, "no login flood while Angel refuses the key")
 print("angel ok")
 print(f"ALL ADAPTER TESTS PASSED ({n} checks)")

@@ -40,7 +40,7 @@ SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
-from brokers import OrderEngine, ADAPTERS, BROKER_LABELS   # live order placement (Angel One / Dhan / XTS)
+from brokers import OrderEngine, ADAPTERS, BROKER_LABELS, ALL_LEVELS, LEVEL_LABELS, strike_selection_reason   # live orders
 
 # ── Exchange config ───────────────────────────────────────
 EXCHANGE_CONFIG = {
@@ -1035,6 +1035,25 @@ def select_focus_strikes_from_pivots(pivots: dict, step: int = 50, tf_label: str
     }
 
 
+def strike_levels(strike, *focus_dicts) -> set:
+    """Pivot levels a strike stands for in the given 15M/1H focus dicts:
+    R1/R2 (CE1/CE2), S1/S2 (PE1/PE2), P (strike nearest P) and PN (the strikes next to P)."""
+    out = set()
+    try:
+        stk = int(round(float(strike)))
+    except (TypeError, ValueError):
+        return out
+    for f in focus_dicts:
+        if not f:
+            continue
+        for key, lv in (("CE1", "R1"), ("CE2", "R2"), ("PE1", "S1"), ("PE2", "S2"), ("P_STRIKE", "P")):
+            if f.get(key) and int(f[key]) == stk:
+                out.add(lv)
+        if stk in set(f.get("p_strikes") or []) and stk != f.get("P_STRIKE"):
+            out.add("PN")
+    return out
+
+
 def select_intraday_15m_focus_strikes(mtf_pivots: dict, step: int = 50) -> dict:
     """
     Selects INTRADAY focus strikes based strictly on 15-Minute Fibonacci Pivots:
@@ -1416,11 +1435,14 @@ class LiveOrderManager:
             print(f"[ORDERS] Instrument lookup error for token {token}: {e}")
         return inst
 
-    def place_order(self, trade: dict) -> str:
-        """Send the entry for a newly recorded forward-test trade (only when auto-trading is ON)."""
+    def place_order(self, trade: dict, levels=None) -> str:
+        """Send the entry for a newly recorded forward-test trade (only when auto-trading is ON).
+        levels: the strike's pivot levels (R1/R2/S1/S2/P/PN), checked against the strike selection."""
         if not self.engine.auto_trade:
             return ""
-        return self.engine.enter(trade, self.instrument_for(trade))
+        inst = self.instrument_for(trade)
+        inst["levels"] = sorted(levels or [])
+        return self.engine.enter(trade, inst)
 
     def exit_order(self, trade: dict, reason: str, ltp: float) -> str:
         """Exit the broker position behind a forward-test trade. Safe to call more than once."""
@@ -1522,7 +1544,7 @@ class ForwardTestTracker:
                   entry_price: float, sl: float, t1: float, t2: float,
                   t3: float = 0.0, t4: float = 0.0, t5: float = 0.0,
                   opt_piv: dict = None, timeframe: str = "15M Intraday",
-                  token: str = "", exchange: str = "NFO", expiry: str = ""):
+                  token: str = "", exchange: str = "NFO", expiry: str = "", levels=None):
         """Log a new trade entry with Timeframe, Expiry, and High/Low tracking.
         opt_piv: option Fibonacci pivots at time of entry (used to record S2/R2 entry zone).
         timeframe: '15M Intraday', '1H Structure' or '15M / 1H'.
@@ -1608,7 +1630,7 @@ class ForwardTestTracker:
         # ── Live/Paper Order Placement ─────────────────────────────────
         if not self.paper_only:
             try:
-                trade['Order_ID'] = live_order_manager.place_order(trade)
+                trade['Order_ID'] = live_order_manager.place_order(trade, levels)
             except Exception as oe:
                 print(f"[ORDER] place_order error: {oe}")
 
@@ -4560,8 +4582,10 @@ class FeedEngine:
                     buy_ctx  = "Mkt Bullish ↑" if opt_type == "CE" else "Mkt Bearish ↓"
 
                     # Determine timeframe category for this strike setup
-                    f15_set = set((self.focus_15m or daily_focus.get("15M", {})).get("all_4", []))
-                    f1h_set = set((self.focus_1h or daily_focus.get("1H", {})).get("all_4", []))
+                    f15_focus = self.focus_15m or daily_focus.get("15M", {})
+                    f1h_focus = self.focus_1h or daily_focus.get("1H", {})
+                    f15_set = set(f15_focus.get("all_4", []))
+                    f1h_set = set(f1h_focus.get("all_4", []))
                     if strike in f15_set and strike in f1h_set:
                         trade_tf = "15M / 1H"
                     elif strike in f15_set:
@@ -4616,7 +4640,7 @@ class FeedEngine:
                                 st_sell.targets[4] if len(st_sell.targets) > 4 else sell_entry['T5'],
                                 opt_piv=opt_piv, timeframe=trade_tf,
                                 token=token, exchange=self.exchange,
-                                expiry=exp
+                                expiry=exp, levels=strike_levels(strike, f15_focus, f1h_focus)
                             )
                             if _new_trade:   # alert only when a trade was actually recorded
                                 self.alert_mgr.send_alert_once(
@@ -4651,7 +4675,7 @@ class FeedEngine:
                                 st_buy.targets[4] if len(st_buy.targets) > 4 else buy_entry['T5'],
                                 opt_piv=opt_piv, timeframe=trade_tf,
                                 token=token, exchange=self.exchange,
-                                expiry=exp
+                                expiry=exp, levels=strike_levels(strike, f15_focus, f1h_focus)
                             )
                             if _new_trade:   # alert only when a trade was actually recorded
                                 self.alert_mgr.send_alert_once(
@@ -7104,7 +7128,7 @@ class ControlPanel:
         self._ord_win = w
         w.title("Order Settings")
         w.configure(bg="#0d1117")
-        w.geometry("780x540")
+        w.geometry("780x580")
         nb = ttk.Notebook(w)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
         L = dict(bg="#0d1117", fg="#c9d1d9", font=(GUI_FONT, 9))
@@ -7245,6 +7269,83 @@ class ControlPanel:
         sb = tk.Frame(to, bg="#0d1117"); sb.pack(fill="x", padx=12)
         DarkButton(sb, text="Save", command=save_orders, bg="#196c2e", padx=16, pady=4).pack(side="left")
         tk.Label(sb, textvariable=save_msg, bg="#0d1117", fg="#3fb950", font=(GUI_FONT, 9)).pack(side="left", padx=10)
+
+        # ── Strikes tab: which of the strategy's strikes get real orders ──
+        tk_ = tk.Frame(nb, bg="#0d1117"); nb.add(tk_, text=" Strikes ")
+        lv_on = {x.strip().upper() for x in str(s.get("levels", "")).split(",") if x.strip()}
+        ty_on = {x.strip().upper() for x in str(s.get("opt_types", "")).split(",") if x.strip()}
+        lv_vars = {lv: tk.BooleanVar(value=lv in lv_on) for lv in ALL_LEVELS}
+        ty_vars = {t: tk.BooleanVar(value=t in ty_on) for t in ("CE", "PE")}
+        stf_var = tk.StringVar(value=str(s.get("strike_tf", "ANY")).upper())
+        sym_var = tk.StringVar(value=s.get("symbols", ""))
+        stk_var = tk.StringVar(value=s.get("strikes", ""))
+        gs = tk.Frame(tk_, bg="#0d1117"); gs.pack(fill="x", padx=12, pady=10)
+
+        def srow(i, text):
+            tk.Label(gs, text=text, anchor="w", width=22, **L).grid(row=i, column=0, sticky="nw", pady=4)
+            c = tk.Frame(gs, bg="#0d1117"); c.grid(row=i, column=1, sticky="w", pady=4)
+            return c
+        c = srow(0, "Pivot levels")
+        for lv in ALL_LEVELS:
+            tk.Checkbutton(c, text=LEVEL_LABELS[lv], variable=lv_vars[lv], command=lambda: preview(), **C).pack(side="left", padx=(0, 6))
+        c = srow(1, "Option type")
+        for t in ("CE", "PE"):
+            tk.Checkbutton(c, text=t, variable=ty_vars[t], command=lambda: preview(), **C).pack(side="left", padx=(0, 6))
+        c = srow(2, "Timeframe match")
+        for val, t in (("ANY", "Any 15M or 1H strike"), ("BOTH", "Only strikes on both 15M and 1H")):
+            tk.Radiobutton(c, text=t, value=val, variable=stf_var, command=lambda: preview(), **C).pack(side="left", padx=(0, 8))
+        c = srow(3, "Symbols")
+        tk.Entry(c, textvariable=sym_var, width=30, **E).pack(side="left")
+        tk.Label(c, text="e.g. NIFTY,SENSEX  (blank = all)", bg="#0d1117", fg="#6e7681", font=(GUI_FONT, 8)).pack(side="left", padx=6)
+        c = srow(4, "Only these strikes")
+        tk.Entry(c, textvariable=stk_var, width=30, **E).pack(side="left")
+        tk.Label(c, text="e.g. 22600,22650  (blank = all)", bg="#0d1117", fg="#6e7681", font=(GUI_FONT, 8)).pack(side="left", padx=6)
+        tk.Label(tk_, text="Today's strategy strikes (✅ gets real orders, ✖ forward test only):", anchor="w",
+                 bg="#0d1117", fg="#8b949e", font=(GUI_FONT, 9)).pack(fill="x", padx=12, pady=(6, 2))
+        prev = tk.Text(tk_, height=12, bg="#161b22", fg="#c9d1d9", relief="flat", font=("Menlo", 9))
+        prev.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+
+        def strike_sel():
+            return {"levels": ",".join(lv for lv in ALL_LEVELS if lv_vars[lv].get()),
+                    "opt_types": ",".join(t for t in ("CE", "PE") if ty_vars[t].get()),
+                    "strike_tf": stf_var.get(), "symbols": sym_var.get().strip(), "strikes": stk_var.get().strip()}
+
+        def preview(*_):
+            sel = strike_sel()
+            f15 = self.focus_15m or (getattr(self, "daily_focus", None) or {}).get("15M", {}) or {}
+            f1h = self.focus_1h or (getattr(self, "daily_focus", None) or {}).get("1H", {}) or {}
+            sym = (self.symbol_var.get() if hasattr(self, "symbol_var") else "") or ""
+            lines, seen = [], set()
+            for stk in sorted(set(f15.get("all_4", [])) | set(f1h.get("all_4", []))):
+                tfs = [t for t, f in (("15M", f15), ("1H", f1h)) if stk in set(f.get("all_4", []))]
+                lvs = strike_levels(stk, f15, f1h)
+                types = ("CE", "PE") if (lvs & {"P", "PN"}) or not lvs else \
+                        tuple(t for t in ("CE", "PE") if (t == "CE" and lvs & {"R1", "R2"}) or (t == "PE" and lvs & {"S1", "S2"}))
+                for t in types:
+                    if (stk, t) in seen:
+                        continue
+                    seen.add((stk, t))
+                    why = strike_selection_reason(sel, {"Timeframe": " / ".join(tfs), "Type": t, "Symbol": sym, "Strike": stk},
+                                                  {"levels": sorted(lvs), "opt_type": t, "symbol": sym, "strike": stk})
+                    lv_txt = "/".join(LEVEL_LABELS[x] for x in ALL_LEVELS if x in lvs) or "-"
+                    lines.append(f"{'✅' if not why else '✖'} {sym} {stk:>7} {t}  {lv_txt:<14} {'+'.join(tfs):<7} {why}")
+            prev.config(state="normal"); prev.delete("1.0", "end")
+            prev.insert("end", "\n".join(lines) if lines else "Start the feed to see today's strikes.")
+            prev.config(state="disabled")
+        for var in (sym_var, stk_var):
+            var.trace_add("write", preview)
+        preview()
+        strike_msg = tk.StringVar(value="")
+
+        def save_strikes():
+            try:
+                eng.save_settings(strike_sel())
+                strike_msg.set("✅ Saved. Applies to the next entry.")
+            except Exception as e:
+                strike_msg.set(f"❌ {e}")
+        sb2 = tk.Frame(tk_, bg="#0d1117"); sb2.pack(fill="x", padx=12, pady=(0, 8))
+        DarkButton(sb2, text="Save", command=save_strikes, bg="#196c2e", padx=16, pady=4).pack(side="left")
+        tk.Label(sb2, textvariable=strike_msg, bg="#0d1117", fg="#3fb950", font=(GUI_FONT, 9)).pack(side="left", padx=10)
 
         # ── Today's orders tab ──
         tt = tk.Frame(nb, bg="#0d1117"); nb.add(tt, text=" Today's orders ")

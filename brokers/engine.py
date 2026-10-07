@@ -45,7 +45,61 @@ DEFAULT_SETTINGS = {
     "trade_1h":          True,
     "max_trades":        6,
     "max_loss_rs":       5000,
+    # strike selection: which of the strategy's strikes get real orders
+    "levels":            "R1,R2,S1,S2,P,PN",   # PN = strikes next to P
+    "opt_types":         "CE,PE",
+    "strike_tf":         "ANY",    # ANY = a 15M or 1H strike; BOTH = must be a strike on both
+    "symbols":           "",       # e.g. "NIFTY,SENSEX"; blank = all
+    "strikes":           "",       # e.g. "22600,22650"; blank = all
 }
+ALL_LEVELS = ("R1", "R2", "S1", "S2", "P", "PN")
+LEVEL_LABELS = {"R1": "R1", "R2": "R2", "S1": "S1", "S2": "S2", "P": "P", "PN": "Next to P"}
+
+
+def csv_set(v):
+    """'a, b,c' -> {'A','B','C'}"""
+    return {x.strip().upper() for x in str(v or "").replace(";", ",").split(",") if x.strip()}
+
+
+def strike_selection_reason(s, trade, inst):
+    """Why the strike selection in settings s rules this entry out ('' = allowed)."""
+    lv_on = csv_set(s.get("levels", ""))
+    lv = {str(x).upper() for x in (inst.get("levels") or [])}
+    if lv_on != set(ALL_LEVELS):
+        if not lv_on:
+            return "no strike level selected"
+        if not lv:
+            return "strike level unknown"
+        if not (lv & lv_on):
+            return f"level {'/'.join(LEVEL_LABELS.get(x, x) for x in ALL_LEVELS if x in lv) or '/'.join(sorted(lv))} not selected"
+    types = csv_set(s.get("opt_types", ""))
+    ot = str(inst.get("opt_type") or trade.get("Type") or "").upper()
+    if not types:
+        return "no option type selected"
+    if ot not in types:
+        return f"{ot} not selected"
+    if str(s.get("strike_tf", "ANY")).upper() == "BOTH":
+        tf = str(trade.get("Timeframe", ""))
+        if not ("15M" in tf and "1H" in tf):
+            return "strike is not on both 15M and 1H"
+    syms = csv_set(s.get("symbols", ""))
+    sym = str(inst.get("symbol") or trade.get("Symbol") or "").upper()
+    if syms and sym not in syms:
+        return f"{sym} not selected"
+    only = set()
+    for x in csv_set(s.get("strikes", "")):
+        try:
+            only.add(round(float(x), 2))
+        except ValueError:
+            pass
+    if only:
+        try:
+            stk = round(float(inst.get("strike") or trade.get("Strike")), 2)
+        except (TypeError, ValueError):
+            return "strike unknown"
+        if stk not in only:
+            return f"strike {stk:g} not in your strike list"
+    return ""
 
 ENTRY_CUTOFF = dt_time(15, 0)   # no new entries from 3:00 PM (the strategy squares off then)
 OPEN_STATES = ("OPENING", "OPEN", "CLOSING")
@@ -246,6 +300,9 @@ class OrderEngine:
             return f"timeframe {tf or '-'} not enabled"
         if trade.get("Action") == "SELL" and not s["take_sell_setups"]:
             return "SELL setups are off"
+        why = strike_selection_reason(s, trade, inst)
+        if why:
+            return why
         if not self.market_open() or self.clock().time() >= ENTRY_CUTOFF:
             return "outside entry hours"
         if not inst.get("lot_size") or int(inst["lot_size"]) <= 0:

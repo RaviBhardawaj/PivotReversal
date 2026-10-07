@@ -31,7 +31,9 @@ placement through Angel One, Dhan or Jainam XTS.
 
 Orders are sent only when **AUTO-TRADE** is switched ON in the dashboard's order bar. Use ⚙ Settings to
 pick the broker, test the connection and set lots, order type and daily limits (default: max 6 trades,
-max ₹5,000 loss per day, SELL setups off, SL placed at the broker). ■ STOP exits every open position.
+max ₹5,000 loss per day, SELL setups off, SL placed at the broker). The Strikes tab picks which
+strategy strikes get real orders: pivot levels (R1, R2, S1, S2, P, next to P), CE/PE, 15M/1H match,
+symbols and an optional strike list, with a preview of today's strikes. ■ STOP exits every open position.
 
 Before the first live day, double-click `test_connections.command` (logins only), then
 `live_order_check.command` during market hours. It reads funds, the contract, order book and positions,

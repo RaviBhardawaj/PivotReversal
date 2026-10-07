@@ -1,0 +1,32 @@
+# ── Secrets: never commit ─────────────────────────
+.env
+env
+*.env
+credentials.json
+token.pickle
+config.json
+dhan_config.json
+Dhan API.txt
+dhan_token.json
+
+# ── Runtime state, caches and market data ─────────
+order_state.json
+order_settings.json
+scrip_cache.pkl
+dhan_scrip_cache.csv
+*.csv
+*.csv.bak
+next_day_plan*.json
+multi_symbol_levels.json
+multi_symbol_sheet.json
+strike_pivot_cache.json
+tv_pivot_cache.json
+last_session.json
+.sheet_reset_done
+logs/
+
+# ── Python / OS ───────────────────────────────────
+__pycache__/
+*.pyc
+.DS_Store
+_backup*/

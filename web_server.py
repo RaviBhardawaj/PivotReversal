@@ -474,13 +474,15 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
     if os.path.exists(cache_file):
         try:
             with open(cache_file, "r") as cf:
-                c_json = json.load(cf).get("strikes", {})
+                _cj = json.load(cf)
+                # only levels built for the session TradingView shows now
+                c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
                 for t_id, s_info in c_json.items():
                     ot_k = s_info.get("opt_type", "CE")
                     stk_k = int(s_info.get("strike", 0))
                     exp_k = s_info.get("expiry", "")
                     opt_piv_cache[(ot_k, stk_k, exp_k)] = s_info
-                    if exp_k == curr_exp or (ot_k, stk_k) not in opt_piv_cache:
+                    if exp_k == curr_exp:
                         opt_piv_cache[(ot_k, stk_k)] = s_info
         except Exception:
             pass
@@ -558,12 +560,14 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
                 decay = max(0.15, 1.0 - (moneyness * 0.18))
                 ltp = max(round(intrinsic + (time_val * decay), 2), 4.0)
 
-            c_info = opt_piv_cache.get((ot, stk, exp_item)) or (opt_piv_cache.get((ot, stk), {}) if exp_item == curr_exp else {})
-            opt_p = _safe_float(c_info.get("P", 0)) or _safe_float(s.get("target_1", 0))
-            opt_s1 = _safe_float(c_info.get("S1", 0)) or round(opt_p * 0.75, 2)
-            opt_s2 = _safe_float(c_info.get("S2", 0)) or round(opt_p * 0.50, 2)
-            opt_r1 = _safe_float(c_info.get("R1", 0)) or round(opt_p * 1.25, 2)
-            opt_r2 = _safe_float(c_info.get("R2", 0)) or round(opt_p * 1.50, 2)
+            c_info = opt_piv_cache.get((ot, stk, exp_item)) or {}
+            if _safe_float(c_info.get("P", 0)) <= 0:
+                continue   # no official-candle levels for this contract yet; never estimate them
+            opt_p = _safe_float(c_info.get("P", 0))
+            opt_s1 = _safe_float(c_info.get("S1", 0))
+            opt_s2 = _safe_float(c_info.get("S2", 0))
+            opt_r1 = _safe_float(c_info.get("R1", 0))
+            opt_r2 = _safe_float(c_info.get("R2", 0))
 
             planned_ep = _safe_float(s.get("entry_price", 0))
             tgt1 = _safe_float(s.get("target_1", 0))
@@ -758,7 +762,9 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
                 is_1h  = bool((ot == "CE" and stk in ce_1h)  or (ot == "PE" and stk in pe_1h))
                 strike_tag = "[⭐15M & ⏳1H]" if (is_15m and is_1h) else ("[⭐15M Focus]" if is_15m else ("[⏳1H Focus]" if is_1h else ""))
 
-                c_info = opt_piv_cache.get((ot, stk, exp_item)) or (opt_piv_cache.get((ot, stk), {}) if exp_item == curr_exp else {})
+                c_info = opt_piv_cache.get((ot, stk, exp_item)) or {}
+                if _safe_float(c_info.get("P", 0)) <= 0:
+                    continue   # no official-candle levels for this contract yet; never estimate them
                 opt_sym = f"{current_sym}{exp_item}{stk}{ot}" if exp_item else f"{current_sym} {stk} {ot}"
                 opt_tok = ""
                 if Session.scrip_df is not None and exp_item:
@@ -802,23 +808,15 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
                     hh = _safe_float(c_info.get("prev_h", 0) or (existing.get("hh", 0) if existing else 0))
                     if hh <= 0: hh = round(ltp * 1.15, 2)
 
-                    opt_p = _safe_float(c_info.get("P", 0) or (existing.get("p", 0) if existing else 0))
-                    opt_s1 = _safe_float(c_info.get("S1", 0) or (existing.get("s1", 0) if existing else 0))
-                    opt_s2 = _safe_float(c_info.get("S2", 0) or (existing.get("s2", 0) if existing else 0))
-                    opt_r1 = _safe_float(c_info.get("R1", 0) or (existing.get("r1", 0) if existing else 0))
-                    opt_r2 = _safe_float(c_info.get("R2", 0) or (existing.get("r2", 0) if existing else 0))
-
-                    if opt_p <= 0:
-                        pv = calc_fib_pivots(round(ltp * 1.08, 2), round(ltp * 0.92, 2), ltp)
-                        opt_p = pv["P"]
-                        opt_s1 = pv["S1"]
-                        opt_s2 = pv["S2"]
-                        opt_r1 = pv["R1"]
-                        opt_r2 = pv["R2"]
+                    opt_p = _safe_float(c_info.get("P", 0))
+                    opt_s1 = _safe_float(c_info.get("S1", 0))
+                    opt_s2 = _safe_float(c_info.get("S2", 0))
+                    opt_r1 = _safe_float(c_info.get("R1", 0))
+                    opt_r2 = _safe_float(c_info.get("R2", 0))
 
                     opt_sl = _safe_float(existing.get("sl", 0) if existing else 0)
-                    opt_s3 = _safe_float(c_info.get("S3", 0) or (existing.get("s3", 0) if existing else 0))
-                    opt_r3 = _safe_float(c_info.get("R3", 0) or (existing.get("r3", 0) if existing else 0))
+                    opt_s3 = _safe_float(c_info.get("S3", 0))
+                    opt_r3 = _safe_float(c_info.get("R3", 0))
 
                     if side == "BUY":
                         if opt_s2 > 0.05:
@@ -1054,7 +1052,7 @@ def background_eod_scheduler():
                     if mtf:
                         with feed.lock:
                             feed.mtf_pivots = mtf
-                        feed.fetch_and_map_all_strikes(sym, None, force_fetch=True)
+                        feed.fetch_and_map_all_strikes(sym, None, force_fetch=True, mode="next")
                     feed.sync_multi_symbol_sheet()
                     print(f"[WEB EOD 3:45PM] ✅ Next-day levels cached & synced to Google Sheets.")
                     
@@ -1475,7 +1473,9 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
     if os.path.exists(cache_file):
         try:
             with open(cache_file, "r") as cf:
-                c_json = json.load(cf).get("strikes", {})
+                _cj = json.load(cf)
+                # only levels built for the session TradingView shows now
+                c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
                 for t_id, s_info in c_json.items():
                     opt_piv_cache[(s_info.get("opt_type", "CE"), int(s_info.get("strike", 0)), s_info.get("expiry", ""))] = s_info
         except Exception:
@@ -1543,11 +1543,7 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
                 opt_r3 = _safe_float(c_info.get("R3", 0))
 
                 if opt_p <= 0:
-                    h_opt = round(ltp * 1.15, 2)
-                    l_opt = round(ltp * 0.88, 2)
-                    pv_opt = calc_fib_pivots(h_opt, l_opt, ltp)
-                    opt_p, opt_s1, opt_s2, opt_s3 = pv_opt["P"], pv_opt["S1"], pv_opt["S2"], pv_opt["S3"]
-                    opt_r1, opt_r2, opt_r3 = pv_opt["R1"], pv_opt["R2"], pv_opt["R3"]
+                    continue   # no official-candle levels for this contract yet; never estimate them
 
                 is_buy = (side == "BUY")
                 if is_buy:

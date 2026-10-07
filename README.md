@@ -41,3 +41,21 @@ and can send one 1-lot NIFTY BUY LIMIT 20% below LTP that it modifies and cancel
 
 Secrets (`.env`, `credentials.json`, `token.pickle`, `config.json`, Dhan files) are listed in
 `.gitignore` and must never be committed.
+
+## Option strike levels (match TradingView)
+
+Each focus strike's Fibonacci pivots (P, R1–R3, S1–S3) come only from that contract's official
+daily candle from Angel One's historical API, the same H/L/C TradingView uses for
+**Pivot Points Standard → Type: Fibonacci, Pivots Timeframe: Daily**.
+
+- During a session (and all evening after it) the app shows that session's levels, built from the
+  previous day's candle, which is what TradingView draws on the chart. At the weekend it shows
+  Friday's.
+- After 15:30 the next session's levels are built separately into `strike_pivot_cache_next.json`
+  (Next-Day Plan window, `eod_planner.py`); they never replace today's levels.
+- Every contract keeps its own levels per expiry. A strike with no candle data gets no levels
+  (nothing is estimated) and is retried every minute; an expired Angel session is renewed
+  automatically.
+- On TradingView, compare on a chart of the same contract and expiry, with the timeframe set to
+  Daily (on a 1H chart "Auto" switches to weekly pivots). S levels below 0.05 show as 0.05.
+- Test: `python3 tests/test_strike_pivots.py`

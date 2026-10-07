@@ -193,56 +193,48 @@ def map_strike_pivots_for_symbol(symbol=SYMBOL, n_strikes=12):
         if not sess.get("status"):
             print(f"[STRIKE PLAN] Angel login failed: {sess.get('message')}")
             return {}
-        feed_token = sc.getfeedToken()
-        jwt_token = sess['data']['jwtToken']
-
-        results = {}
-        def on_data(wsapp, msg):
-            tok = str(msg.get('token', ''))
-            if tok in meta_map:
-                results[tok] = msg
-
-        def on_open(wsapp):
-            chunk_size = 50
-            token_lists = []
-            for i in range(0, len(tokens), chunk_size):
-                token_lists.append({'exchangeType': 2 if exch=="NFO" else 4, 'tokens': tokens[i:i+chunk_size]})
-            sws.subscribe('snap', 3, token_lists)
-
-        sws = SmartWebSocketV2(jwt_token, api_key, client_id, feed_token, max_retry_attempt=0)   # one-shot snapshot: no reconnect loop after close
-        sws.on_data = on_data
-        sws.on_open = on_open
-        t = threading.Thread(target=sws.connect, daemon=True)
-        t.start()
-
-        start_t = time.time()
-        while time.sleep(0.4) is None:
-            if len(results) >= len(tokens) or time.time() - start_t > 6:
-                break
-        sws.close_connection()
-
-        mapped_pivots = {}
-        for tok, msg in results.items():
+        # Next session's levels from each contract's official daily candle (the last completed
+        # one up to today), the same data TradingView uses. Never from a snapshot / LTP.
+        now = datetime.now()
+        if now.weekday() < 5 and now.hour * 60 + now.minute < 15 * 60 + 30:
+            print("[STRIKE PLAN] Today's candle is not complete before 15:30 — strike levels skipped")
+            return {}
+        today_s = now.strftime("%Y-%m-%d")
+        mapped_pivots, failed = {}, 0
+        for tok in tokens:
             m = meta_map[tok]
-            h = msg.get('high_price_of_the_day', 0) / 100
-            l = msg.get('low_price_of_the_day', 0) / 100
-            c = msg.get('last_traded_price', 0) / 100
-            if h <= 0: h = c
-            if l <= 0: l = c
+            rows = []
+            for attempt in range(3):
+                try:
+                    r = sc.getCandleData({"exchange": exch, "symboltoken": tok, "interval": "ONE_DAY",
+                                          "fromdate": (now - timedelta(days=20)).strftime("%Y-%m-%d 09:15"),
+                                          "todate": now.strftime("%Y-%m-%d %H:%M")})
+                    if r and r.get("status") and isinstance(r.get("data"), list):
+                        rows = [x for x in r["data"] if str(x[0])[:10] <= today_s and float(x[2]) > 0 and float(x[3]) > 0 and float(x[4]) > 0]
+                        break
+                except Exception:
+                    pass
+                time.sleep(1 + attempt)
+            time.sleep(0.35)   # SmartAPI historical rate limit
+            if not rows:
+                failed += 1
+                continue
+            last = sorted(rows, key=lambda x: str(x[0]))[-1]
+            h, l, c = float(last[2]), float(last[3]), float(last[4])
             pv = calc_fib_pivots(h, l, c)
             mapped_pivots[tok] = {
                 'token': tok,
                 'symbol': m['symbol'],
                 'opt_type': m['opt_type'],
-                'strike': m['strike'],
+                'strike': int(m['strike']),
                 'expiry': m['expiry'],
+                'candle_date': str(last[0])[:10],
                 'prev_h': round(h, 2),
                 'prev_l': round(l, 2),
                 'prev_c': round(c, 2),
                 **pv
             }
 
-        # Save to strike_pivot_cache.json
         nd = date.today() + timedelta(days=1)
         if nd.weekday() == 5: nd += timedelta(days=2)
         if nd.weekday() == 6: nd += timedelta(days=1)
@@ -250,15 +242,21 @@ def map_strike_pivots_for_symbol(symbol=SYMBOL, n_strikes=12):
 
         cache_data = {
             'date': next_date,
+            'basis_key': f"{next_date}:next",
+            'level_date': next_date,
             'symbol': symbol,
             'expiry': nearest_exp,
             'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'strikes': mapped_pivots
         }
-        cache_f = os.path.join(PLAN_DIR, "strike_pivot_cache.json")
-        with open(cache_f, "w") as f:
+        # Next-session levels have their own file: the live session's strike_pivot_cache.json
+        # (what TradingView shows today) is never overwritten from here.
+        cache_f = os.path.join(PLAN_DIR, "strike_pivot_cache_next.json")
+        with open(cache_f + ".tmp", "w") as f:
             json.dump(cache_data, f, indent=2)
-        print(f"  [✓] Successfully mapped {len(mapped_pivots)} strikes to strike_pivot_cache.json")
+        os.replace(cache_f + ".tmp", cache_f)
+        print(f"  [✓] Mapped {len(mapped_pivots)} strikes for {next_date} to strike_pivot_cache_next.json"
+              + (f" ({failed} without candle data)" if failed else ""))
         return mapped_pivots
     except Exception as e:
         print(f"[STRIKE PLAN] Error mapping strikes: {e}")

@@ -219,12 +219,7 @@ def calc_fib_pivots(high: float, low: float, close: float) -> dict:
     if high < low:
         high, low = low, high
 
-    rng = high - low
-    if rng <= 0:
-        # Fallback minimal spread for flat ticks (e.g. single trade)
-        rng = max(close * 0.005, 0.05)
-        high = close + rng / 2
-        low  = close - rng / 2
+    rng = high - low   # a flat candle gives all levels = P, as on TradingView
 
     p  = (high + low + close) / 3.0
     r1 = p + 0.382 * rng
@@ -2319,11 +2314,7 @@ def calculate_symbol_option_pipeline(symbol: str, exchange: str = None) -> dict:
             ltp = round(intrinsic + time_val, 2)
 
         # Option Contract Fibonacci Pivots (TradingView Aligned)
-        sp = feed.strike_pivots.get((opt_type, strike, c_exp)) or feed.strike_pivots.get((opt_type, strike)) or feed.strike_pivots.get(token)
-        if not sp or not sp.get("P"):
-            h_opt = round(ltp * 1.15, 2)
-            l_opt = round(ltp * 0.88, 2)
-            sp = calc_fib_pivots(h_opt, l_opt, ltp)
+        sp = feed.strike_pivots.get(token) or feed.strike_pivots.get((opt_type, strike, c_exp)) or {}
 
         return opt_sym, token, lot_sz, ltp, sp
 
@@ -2752,6 +2743,106 @@ class Session:
         except Exception as e:
             print(f"   Cache save failed: {e}")
 
+# ═══════════════════════════════════════════════════════════
+# OPTION STRIKE PIVOT DATA (official daily candles)
+# ═══════════════════════════════════════════════════════════
+STRIKE_PIVOT_CACHE = os.path.join(BASE_DIR, "strike_pivot_cache.json")             # levels TradingView shows now
+STRIKE_PIVOT_NEXT_CACHE = os.path.join(BASE_DIR, "strike_pivot_cache_next.json")   # next session, built after the close
+
+_ANGEL_AUTH_ERRORS = ("AG8001", "AG8002", "AG8003", "AG8004", "AB1010", "AB1011",
+                      "INVALID TOKEN", "INVALID API KEY", "TOKEN EXPIRED")
+_ANGEL_RATE_ERRORS = ("AB1004", "AB1019", "EXCEEDING ACCESS RATE", "TOO MANY REQUESTS")
+
+
+def pivot_session_date(now: datetime = None) -> date:
+    """The session whose daily pivots TradingView draws now: today on a weekday, otherwise the
+    last weekday. Its levels come from the completed daily candle before it."""
+    d = (now or datetime.now()).date()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def pick_pivot_candle(rows, mode: str = "session", now: datetime = None):
+    """From daily candles [(YYYY-MM-DD, o, h, l, c), ...] pick the one the levels are built from:
+    session -> the last candle before pivot_session_date (what TradingView uses today);
+    next    -> the last completed candle up to today (only after 15:30 or at the weekend)."""
+    now = now or datetime.now()
+    if mode == "next":
+        if now.weekday() < 5 and now.time() < dt_time(15, 30):
+            return None
+        limit = now.date().isoformat()
+        rows = [r for r in rows if r[0] <= limit]
+    else:
+        limit = pivot_session_date(now).isoformat()
+        rows = [r for r in rows if r[0] < limit]
+    rows = [r for r in rows if r[2] > 0 and r[3] > 0 and r[4] > 0]
+    return sorted(rows)[-1] if rows else None
+
+
+def angel_daily_candles(exch: str, token: str, days: int = 20, now: datetime = None) -> list:
+    """Daily candles [(YYYY-MM-DD, open, high, low, close), ...] of one contract from Angel One's
+    historical API. When Angel refuses the session (it goes stale overnight and answers
+    AG8004 'Invalid API Key') it logs in again once; on the rate limit it waits and retries.
+    Raises with Angel's message when no data comes back."""
+    now = now or datetime.now()
+    params = {"exchange": exch, "symboltoken": str(token), "interval": "ONE_DAY",
+              "fromdate": (now - timedelta(days=days)).strftime("%Y-%m-%d 09:15"),
+              "todate": now.strftime("%Y-%m-%d %H:%M")}
+    relogged, last = False, ""
+    for attempt in range(5):
+        try:
+            if Session.obj is None:
+                Session.login()
+            r = Session.obj.getCandleData(dict(params))
+        except Exception as e:
+            r = {"status": False, "message": str(e)}
+        if isinstance(r, dict) and r.get("status") and isinstance(r.get("data"), list):
+            out = []
+            for x in r["data"]:
+                try:
+                    out.append((str(x[0])[:10], float(x[1]), float(x[2]), float(x[3]), float(x[4])))
+                except Exception:
+                    pass
+            return out
+        if isinstance(r, dict):
+            last = f"{r.get('errorcode') or r.get('errorCode') or ''} {r.get('message', '')}".strip()
+        else:
+            last = str(r)[:120]
+        up = last.upper()
+        if any(k in up for k in _ANGEL_AUTH_ERRORS) and not relogged:
+            relogged = True
+            try:
+                Session.login()
+                print("[STRIKE MAPPER] Angel session refreshed (it had expired)")
+            except Exception as le:
+                last += f" (login again failed: {le})"
+                break
+            continue
+        if any(k in up for k in _ANGEL_RATE_ERRORS) or attempt < 2:
+            time.sleep(1.0 + attempt)
+            continue
+        break
+    raise RuntimeError(last or "no candle data from Angel One")
+
+
+def read_json_file(path: str) -> dict:
+    try:
+        with open(path, "r") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_json_file(path: str, data: dict):
+    """Write through a temp file so a reader never sees half a file."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
 def load_next_day_plan(symbol: str) -> dict:
     """Load next-day plan for a symbol from next_day_plans.json or next_day_plan_*.json."""
     try:
@@ -3076,53 +3167,101 @@ class FeedEngine:
                 votes_res += 1
         return votes_sup >= votes_res
 
+    def _nearest_expiry(self, expiries) -> str:
+        """Nearest not-yet-expired expiry (DDMONYYYY) of the given list."""
+        today = datetime.now().date()
+        best = None
+        for e in set(expiries or []):
+            try:
+                d = datetime.strptime(str(e).upper(), "%d%b%Y").date()
+            except Exception:
+                continue
+            if d >= today and (best is None or d < best[0]):
+                best = (d, e)
+        return best[1] if best else ""
+
+    def _store_strike_pivot(self, s_info: dict, nearest_expiry: str):
+        """Index one strike's levels by token and (type, strike, expiry). The short (type, strike)
+        key is kept for the nearest expiry only, so one expiry's levels never show under another."""
+        self.strike_pivots[str(s_info["token"])] = s_info
+        if s_info.get("expiry"):
+            self.strike_pivots[(s_info["opt_type"], s_info["strike"], s_info["expiry"])] = s_info
+        if not s_info.get("expiry") or not nearest_expiry or s_info["expiry"] == nearest_expiry:
+            self.strike_pivots[(s_info["opt_type"], s_info["strike"])] = s_info
+
     def load_or_fetch_strike_pivots(self, symbol: str, option_tokens: list, token_to_meta: dict):
         """
-        Loads pre-calculated daily Fibonacci Pivots for all option strikes.
-        Matches TradingView 'Pivots Fibonacci Auto' resolution exactly
-        using the previous completed trading day's OHLC.
+        Loads the daily Fibonacci pivots of the option strikes for the session TradingView is
+        showing (see pivot_session_date), built from the previous day's official daily candle.
+        Anything missing is fetched, and a background check keeps retrying until every
+        focus strike has its levels and rebuilds them when the session date changes.
         """
-        cache_path = os.path.join(BASE_DIR, "strike_pivot_cache.json")
-        loaded_count = 0
-        _now = datetime.now()
-        _after_close = _now.weekday() >= 5 or _now.time() >= dt_time(15, 30)
-        _basis_key = f"{_now.strftime('%Y-%m-%d')}:{'post_close' if _after_close else 'pre_close'}"
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, "r") as f:
-                    cdata = json.load(f)
-                    # Only reuse levels built for today's session (stale caches are ignored)
-                    strikes_map = cdata.get("strikes", {}) if cdata.get("basis_key") == _basis_key else {}
-                    if not strikes_map:
-                        print("[STRIKE PIVOTS] Cache is from another session — rebuilding from last completed session")
-                    for tok, s_info in strikes_map.items():
-                        tok_str = str(tok)
-                        self.strike_pivots[tok_str] = s_info
-                        self.strike_pivots[(s_info["opt_type"], s_info["strike"])] = s_info
-                        if "expiry" in s_info:
-                            self.strike_pivots[(s_info["opt_type"], s_info["strike"], s_info["expiry"])] = s_info
-                        loaded_count += 1
-                print(f"[STRIKE PIVOTS] Loaded {loaded_count} strike pivots from {cache_path} (TradingView aligned)")
-            except Exception as e:
-                print(f"[STRIKE PIVOTS] Cache read error: {e}")
+        basis_key = f"{pivot_session_date().isoformat()}:session"
+        nearest = self._nearest_expiry(m.get("expiry") for m in token_to_meta.values())
+        cdata = read_json_file(STRIKE_PIVOT_CACHE)
+        strikes_map = cdata.get("strikes", {}) if (cdata.get("basis_key") == basis_key
+                                                    and cdata.get("symbol") == symbol) else {}
+        if cdata and not strikes_map:
+            print("[STRIKE PIVOTS] Cache is from another session — rebuilding from the official daily candles")
+        with self.lock:
+            for s_info in strikes_map.values():
+                self._store_strike_pivot(s_info, nearest)
+            self._pivot_basis = basis_key
+        print(f"[STRIKE PIVOTS] Loaded {len(strikes_map)} strike pivots for {basis_key[:10]} from {STRIKE_PIVOT_CACHE}")
 
         missing = [t for t in option_tokens if t not in self.strike_pivots]
         if missing:
-            print(f"[STRIKE PIVOTS] Notice: {len(missing)} strikes not in cache. Fetching snapshot...")
-            missing_expiries = {token_to_meta[t]["expiry"] for t in missing if t in token_to_meta and "expiry" in token_to_meta[t]}
-            if not missing_expiries:
-                self.fetch_and_map_all_strikes(symbol, force_fetch=False)
-            else:
-                for exp in missing_expiries:
-                    self.fetch_and_map_all_strikes(symbol, expiry=exp, force_fetch=False)
+            missing_expiries = {token_to_meta[t]["expiry"] for t in missing if t in token_to_meta and token_to_meta[t].get("expiry")}
+            for exp in (sorted(missing_expiries) or [None]):
+                self.fetch_and_map_all_strikes(symbol, expiry=exp, force_fetch=False)
+        self._start_pivot_watchdog()
 
-    def fetch_and_map_all_strikes(self, symbol=None, expiry=None, force_fetch=True) -> dict:
+    def _start_pivot_watchdog(self):
+        """Every minute: refetch focus strikes that still have no levels (Angel refused or had no
+        data), and rebuild all levels when a new session starts while the app keeps running."""
+        if getattr(self, "_pivot_watchdog_on", False):
+            return
+        self._pivot_watchdog_on = True
+
+        def _loop():
+            while True:
+                time.sleep(60)
+                try:
+                    now = datetime.now()
+                    in_session = is_live_market_open(now) and now.time() >= dt_time(9, 15)
+                    basis_key = f"{pivot_session_date(now).isoformat()}:session"
+                    jobs = dict(getattr(self, "_pivot_jobs", {}))   # (symbol, expiry) -> missing tokens
+                    if basis_key != getattr(self, "_pivot_basis", basis_key) and not in_session:
+                        print(f"[STRIKE PIVOTS] New session {basis_key[:10]} — rebuilding strike levels")
+                        with self.lock:
+                            self.strike_pivots.clear()
+                            self._pivot_basis = basis_key
+                        for (sym, exp) in jobs:
+                            self.fetch_and_map_all_strikes(sym, exp, force_fetch=True)
+                        continue
+                    for (sym, exp), miss in jobs.items():
+                        if miss:
+                            print(f"[STRIKE PIVOTS] Retrying {len(miss)} strike(s) without levels ({sym} {exp})")
+                            self.fetch_and_map_all_strikes(sym, exp, force_fetch=False)
+                except Exception as e:
+                    print(f"[STRIKE PIVOTS] watchdog notice: {e}")
+
+        threading.Thread(target=_loop, daemon=True, name="pivot-watchdog").start()
+
+    def fetch_and_map_all_strikes(self, symbol=None, expiry=None, force_fetch=True, mode="session") -> dict:
         """
-        Maps next-day/intraday Fibonacci Pivots for all strikes
-        matching TradingView's 'Pivots Fibonacci Auto' indicator exactly:
-        P = (H + L + C) / 3, R1-R3, S1-S3.
-        Uses Angel One WebSocket SNAP_QUOTE to get completed session OHLC.
-        Saves results to strike_pivot_cache.json and updates self.strike_pivots.
+        Fibonacci pivots (P, R1-R3, S1-S3) of the focus option strikes, exactly as TradingView's
+        'Pivot Points Standard' (Type Fibonacci, timeframe Daily) draws them:
+        P = (H + L + C) / 3 of the previous day's official daily candle (Angel historical API).
+
+        mode="session": levels of the session TradingView shows now (pivot_session_date). Saved to
+                        strike_pivot_cache.json and used by the dashboard, alerts and orders.
+                        During market hours they are locked; only missing strikes are filled.
+        mode="next":    after the close, the next session's levels from today's completed candle.
+                        Saved to strike_pivot_cache_next.json for planning; the live levels are
+                        not touched.
+        No level is ever made up: a strike without an official candle gets no levels and is
+        retried every minute.
         """
         symbol = symbol or "NIFTY"
         try:
@@ -3147,7 +3286,8 @@ class FeedEngine:
                 fut_exp = opts
             if fut_exp.empty:
                 return {}
-            target_expiry = expiry or fut_exp.sort_values('exp_dt').iloc[0]['expiry']
+            nearest_expiry = fut_exp.sort_values('exp_dt').iloc[0]['expiry']
+            target_expiry = expiry or nearest_expiry
 
             sub = opts[opts['expiry'] == target_expiry].copy()
             sub['strike_int'] = (sub['strike'].astype(float) / 100).astype(int)
@@ -3187,161 +3327,120 @@ class FeedEngine:
                 meta_map[str(r['token'])] = {
                     'token': str(r['token']),
                     'symbol': r['symbol'],
-                    'strike': r['strike_int'],
+                    'strike': int(r['strike_int']),
                     'opt_type': 'CE' if r['symbol'].endswith('CE') else 'PE',
                     'expiry': target_expiry
                 }
 
-            cache_file = os.path.join(BASE_DIR, "strike_pivot_cache.json")
-            # Option levels come ONLY from the last completed session (same basis rule as the
-            # 15M/1H index levels). During market hours they are locked: a cached set for today
-            # is always reused and existing in-memory levels are never overwritten.
             _now = datetime.now()
             _after_close = _now.weekday() >= 5 or _now.time() >= dt_time(15, 30)
             _in_session = (not _after_close) and _now.time() >= dt_time(9, 15)
-            _basis_key = f"{_now.strftime('%Y-%m-%d')}:{'post_close' if _after_close else 'pre_close'}"
-            if os.path.exists(cache_file) and (_in_session or not force_fetch):
-                try:
-                    with open(cache_file, "r") as cf:
-                        cd = json.load(cf)
-                        if (cd.get("symbol") == symbol and cd.get("expiry") == target_expiry
-                                and cd.get("basis_key") == _basis_key):
-                            c_strikes = cd.get("strikes", {})
-                            if c_strikes and all(t in c_strikes for t in tokens):
-                                with self.lock:
-                                    for t, s_info in c_strikes.items():
-                                        if _in_session and str(t) in self.strike_pivots:
-                                            continue
-                                        self.strike_pivots[str(t)] = s_info
-                                        self.strike_pivots[(s_info["opt_type"], s_info["strike"])] = s_info
-                                        if "expiry" in s_info:
-                                            self.strike_pivots[(s_info["opt_type"], s_info["strike"], s_info["expiry"])] = s_info
-                                return c_strikes
-                except Exception:
-                    pass
-            if _in_session:
-                # Only compute what is missing; locked strikes stay as they are
-                tokens = [t for t in tokens if t not in self.strike_pivots]
-                meta_map = {t: meta_map[t] for t in tokens}
-                if not tokens:
+            if mode == "next":
+                if not _after_close:
+                    print("[STRIKE MAPPER] Next-session levels are built after 15:30 (today's candle is not complete yet)")
                     return {}
-
-            hist_ohlc = {}
-            if not _after_close:
-                # Before 15:30 the snapshot "day high/low" is today's live range — not allowed.
-                # Use the previous completed daily candle of each option instead.
-                today_s = _now.strftime('%Y-%m-%d')
-                for tok in tokens:
-                    try:
-                        r = Session.obj.getCandleData({
-                            "exchange": exch, "symboltoken": tok, "interval": "ONE_DAY",
-                            "fromdate": (_now - timedelta(days=10)).strftime("%Y-%m-%d 09:15"),
-                            "todate": _now.strftime("%Y-%m-%d %H:%M"),
-                        })
-                        rows = [x for x in ((r or {}).get("data") or []) if str(x[0])[:10] < today_s]
-                        if rows:
-                            hist_ohlc[tok] = (float(rows[-1][2]), float(rows[-1][3]), float(rows[-1][4]))
-                    except Exception as he:
-                        print(f"[STRIKE MAPPER] candle fetch {tok}: {he}")
-                    time.sleep(0.35)   # SmartAPI historical rate limit (~3 req/s)
-                tokens_snap = []        # no snapshot during/before session
+                cache_file = STRIKE_PIVOT_NEXT_CACHE
+                nd = _now.date() + timedelta(days=1)
+                while nd.weekday() >= 5:
+                    nd += timedelta(days=1)
+                level_date = nd
             else:
-                tokens_snap = tokens
+                cache_file = STRIKE_PIVOT_CACHE
+                level_date = pivot_session_date(_now)
+            basis_key = f"{level_date.isoformat()}:{mode}"
 
-            results = {}
-            done_event = threading.Event()
+            cd = read_json_file(cache_file)
+            cached = cd.get("strikes", {}) if (cd.get("basis_key") == basis_key and cd.get("symbol") == symbol) else {}
 
-            def on_snap_data(wsapp, msg):
-                tok = str(msg.get('token', ''))
-                if tok in meta_map:
-                    results[tok] = msg
-                    if len(results) >= len(tokens):
-                        done_event.set()
+            # Reuse a complete set: always during market hours (levels are locked), otherwise
+            # unless a fresh fetch was asked for.
+            if cached and all(t in cached for t in tokens) and (_in_session or not force_fetch):
+                if mode == "session":
+                    with self.lock:
+                        for t in tokens:
+                            if _in_session and t in self.strike_pivots:
+                                continue
+                            self._store_strike_pivot(cached[t], nearest_expiry)
+                        self._pivot_basis = basis_key
+                self._pivot_jobs = {**getattr(self, "_pivot_jobs", {}), (symbol, target_expiry): set()} if mode == "session" else getattr(self, "_pivot_jobs", {})
+                return {t: cached[t] for t in tokens}
 
-            def on_snap_open(wsapp):
-                chunk_size = 50
-                token_lists = []
-                for i in range(0, len(tokens), chunk_size):
-                    token_lists.append({'exchangeType': {"NFO": 2, "BFO": 4, "MCX": 5}.get(exch, 2), 'tokens': tokens[i:i+chunk_size]})
-                sws_tmp.subscribe('snap_map', 3, token_lists)
+            if _in_session and mode == "session":
+                # Locked strikes stay as they are; only compute what is missing
+                fetch_tokens = [t for t in tokens if t not in self.strike_pivots and t not in cached]
+                for t in tokens:
+                    if t in cached and t not in self.strike_pivots:
+                        with self.lock:
+                            self._store_strike_pivot(cached[t], nearest_expiry)
+            elif not force_fetch:
+                fetch_tokens = [t for t in tokens if t not in cached]
+            else:
+                fetch_tokens = list(tokens)
 
-            if tokens_snap:
-                sws_tmp = SmartWebSocketV2(Session.auth_token, API_KEY, CLIENT_ID, Session.feed_token)
-                sws_tmp.on_data = on_snap_data
-                sws_tmp.on_open = on_snap_open
-                th = threading.Thread(target=sws_tmp.connect, daemon=True)
-                th.start()
-
-                done_event.wait(timeout=2.0)
-                try:
-                    sws_tmp.close_connection()
-                except Exception:
-                    pass
-
-            ohlc_src = dict(hist_ohlc)
-            for tok, msg in results.items():
-                ohlc_src[tok] = (msg.get('high_price_of_the_day', 0) / 100,
-                                 msg.get('low_price_of_the_day', 0) / 100,
-                                 msg.get('last_traded_price', 0) / 100)
-
-            mapped = {}
-            for tok, (h, l, c) in ohlc_src.items():
+            mapped, failed = {}, {}
+            for tok in fetch_tokens:
                 m = meta_map[tok]
-                if h <= 0: h = c
-                if l <= 0: l = c
-                piv = calc_fib_pivots(h, l, c)
-                mapped[tok] = {
-                    'token': tok,
-                    'symbol': m['symbol'],
-                    'opt_type': m['opt_type'],
-                    'strike': m['strike'],
-                    'expiry': m['expiry'],
-                    'prev_h': round(h, 2),
-                    'prev_l': round(l, 2),
-                    'prev_c': round(c, 2),
-                    **piv
-                }
-
-            # Trading date these levels apply to: today before 15:30, next weekday after close
-            nd = date.today() + (timedelta(days=1) if _after_close else timedelta(days=0))
-            while nd.weekday() >= 5: nd += timedelta(days=1)
-            next_date = nd.strftime('%Y-%m-%d')
-
-            existing_strikes = {}
-            if os.path.exists(cache_file):
                 try:
-                    with open(cache_file, "r") as f_ex:
-                        _ex = json.load(f_ex)
-                        # never mix levels from another day/basis, symbol or expiry
-                        if (_ex.get("basis_key") == _basis_key and _ex.get("symbol") == symbol
-                                and _ex.get("expiry") == target_expiry):
-                            existing_strikes = _ex.get("strikes", {})
-                except Exception:
-                    pass
-            existing_strikes.update(mapped)
+                    rows = angel_daily_candles(exch, tok, now=_now)
+                    cndl = pick_pivot_candle(rows, mode, _now)
+                    if not cndl:
+                        failed[tok] = "no completed daily candle yet"
+                    else:
+                        c_date, _o, h, l, c = cndl
+                        piv = calc_fib_pivots(h, l, c)
+                        if not piv:
+                            failed[tok] = f"bad candle {c_date} H={h} L={l} C={c}"
+                        else:
+                            mapped[tok] = {
+                                'token': tok,
+                                'symbol': m['symbol'],
+                                'opt_type': m['opt_type'],
+                                'strike': m['strike'],
+                                'expiry': m['expiry'],
+                                'candle_date': c_date,          # day whose H/L/C built these levels
+                                'level_date': level_date.isoformat(),
+                                'prev_h': round(h, 2),
+                                'prev_l': round(l, 2),
+                                'prev_c': round(c, 2),
+                                **piv
+                            }
+                except Exception as he:
+                    failed[tok] = str(he)
+                time.sleep(0.35)   # SmartAPI historical rate limit (~3 req/s)
 
-            cache_data = {
-                'date': next_date,
-                'basis_key': _basis_key,
+            for tok, why in failed.items():
+                m = meta_map[tok]
+                print(f"[STRIKE MAPPER] ⚠️ {m['strike']} {m['opt_type']} {target_expiry}: no levels ({why}) — will retry")
+
+            # Merge with what is already saved for this session (all expiries are kept, by token)
+            cd = read_json_file(cache_file)
+            existing = cd.get("strikes", {}) if (cd.get("basis_key") == basis_key and cd.get("symbol") == symbol) else {}
+            existing.update(mapped)
+            write_json_file(cache_file, {
+                'date': level_date.isoformat(),
+                'basis_key': basis_key,
                 'symbol': symbol,
-                'expiry': target_expiry,
+                'expiry': nearest_expiry,
                 'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'strikes': existing_strikes
-            }
-            with open(cache_file, "w") as f:
-                json.dump(cache_data, f, indent=2)
+                'strikes': existing,
+            })
 
-            with self.lock:
-                for tok, s_info in mapped.items():
-                    if _in_session and str(tok) in self.strike_pivots:
-                        continue   # locked for the session
-                    self.strike_pivots[str(tok)] = s_info
-                    self.strike_pivots[(s_info["opt_type"], s_info["strike"])] = s_info
-                    if "expiry" in s_info:
-                        self.strike_pivots[(s_info["opt_type"], s_info["strike"], s_info["expiry"])] = s_info
+            if mode == "session":
+                with self.lock:
+                    for tok, s_info in mapped.items():
+                        if _in_session and str(tok) in self.strike_pivots:
+                            continue   # locked for the session
+                        self._store_strike_pivot(s_info, nearest_expiry)
+                    self._pivot_basis = basis_key
+                    still = {t for t in tokens if t not in self.strike_pivots}
+                jobs = dict(getattr(self, "_pivot_jobs", {}))
+                jobs[(symbol, target_expiry)] = still
+                self._pivot_jobs = jobs
 
-            print(f"[STRIKE MAPPER] ✅ Mapped {len(mapped)} strikes for {symbol} ({target_expiry}) — 100% TradingView aligned")
-            return mapped
+            label = "next session" if mode == "next" else "session"
+            print(f"[STRIKE MAPPER] ✅ {len(mapped)} strike(s) mapped for {symbol} {target_expiry} "
+                  f"({label} {level_date.isoformat()}, {len(failed)} without data)")
+            return {t: existing[t] for t in tokens if t in existing}
         except Exception as ex:
             print(f"[STRIKE MAPPER] Error: {ex}")
             return {}
@@ -3395,27 +3494,8 @@ class FeedEngine:
                 "time":  now_str
             }
 
-            # Auto-capture strike pivot if missing (during pre-market, weekend, or post-market)
-            if token in self.token_to_meta and token not in self.strike_pivots:
-                now_t = datetime.now()
-                # Only after the session has closed is the day's H/L a completed candle
-                is_outside_live = (now_t.weekday() >= 5 or now_t.time() >= dt_time(15, 30))
-                if is_outside_live and high > 0 and low > 0 and ltp > 0:
-                    piv = calc_fib_pivots(high, low, ltp)
-                    meta = self.token_to_meta[token]
-                    piv_entry = {
-                        "token": token,
-                        "symbol": meta.get("symbol", ""),
-                        "opt_type": meta["opt_type"],
-                        "strike": meta["strike"],
-                        "expiry": meta.get("expiry", ""),
-                        "prev_h": round(high, 2),
-                        "prev_l": round(low, 2),
-                        "prev_c": round(ltp, 2),
-                        **piv
-                    }
-                    self.strike_pivots[token] = piv_entry
-                    self.strike_pivots[(meta["opt_type"], meta["strike"])] = piv_entry
+            # Strike levels come only from the official daily candles (fetch_and_map_all_strikes),
+            # never from ticks.
 
             for sym,stok in self.spot_token.items():
                 if token==stok:
@@ -4512,7 +4592,7 @@ class FeedEngine:
                         opt_low   = d.get("low", ltp)
                         opt_close = d.get("close", ltp)
                     else:
-                        sp = self.strike_pivots.get(token) or self.strike_pivots.get((opt_type, strike))
+                        sp = self.strike_pivots.get(token)
                         if sp and sp.get("prev_c", 0) > 0:
                             ltp       = sp.get("prev_c", 0.0)
                             opt_high  = sp.get("prev_h", ltp)
@@ -4527,23 +4607,12 @@ class FeedEngine:
 
                     # Option Fibonacci Pivots (P, S1-S3, R1-R3) — TradingView Aligned
                     strike_piv = (self.strike_pivots.get(token)
-                                  or (self.strike_pivots.get((opt_type, strike, meta.get("expiry"))) if meta.get("expiry") else None)
-                                  or self.strike_pivots.get((opt_type, strike)))
-                    if strike_piv:
-                        opt_piv = strike_piv
-                    elif is_live_market_open():
-                        # No completed-session level for this strike yet: never derive levels
-                        # from today's running high/low — skip until the mapper fills it.
+                                  or (self.strike_pivots.get((opt_type, strike, meta.get("expiry"))) if meta.get("expiry") else None))
+                    if not strike_piv:
+                        # No official-candle levels for this strike yet: never make them up from
+                        # live prices; the strike shows once the mapper has filled it.
                         continue
-                    else:
-                        opt_piv = calc_fib_pivots(opt_high, opt_low, opt_close)
-                        if opt_high > 0 and opt_low > 0:
-                            # Freeze and lock immediately so strike pivot prices remain completely stable and never drift
-                            self.strike_pivots[token] = opt_piv
-                            self.strike_pivots[(opt_type, strike)] = opt_piv
-                            _exp_m = meta.get("expiry")
-                            if _exp_m:
-                                self.strike_pivots[(opt_type, strike, _exp_m)] = opt_piv
+                    opt_piv = strike_piv
 
                     # Level label for display column
                     level_info  = check_option_levels(ltp, opt_piv, opt_type)
@@ -5228,7 +5297,7 @@ class FeedEngine:
                             if _mtf:
                                 with self.lock:
                                     self.mtf_pivots = _mtf
-                            _mapped = self.fetch_and_map_all_strikes(sym, None, force_fetch=True)
+                            _mapped = self.fetch_and_map_all_strikes(sym, None, force_fetch=True, mode="next")
                             print(f"[EOD] ✅ Next-day strike pivots mapped: {len(_mapped or {})} strikes → strike_pivot_cache.json")
                         except Exception as _nd_err:
                             print(f"[EOD] next-day level calc error: {_nd_err}")
@@ -5911,15 +5980,11 @@ class ControlPanel:
 
         nd_plan = load_next_day_plan(sym)
 
-        cache_f = os.path.join(BASE_DIR, "strike_pivot_cache.json")
-        cdata = {}
-        if os.path.exists(cache_f):
-            try:
-                with open(cache_f, "r") as f:
-                    cdata = json.load(f)
-            except Exception:
-                pass
-
+        # After the close the next session's levels (built from today's candle) are shown;
+        # otherwise the levels of the session in progress.
+        cdata = read_json_file(STRIKE_PIVOT_NEXT_CACHE)
+        if not (cdata.get("symbol") == sym and cdata.get("date", "") > datetime.now().strftime("%Y-%m-%d")):
+            cdata = read_json_file(STRIKE_PIVOT_CACHE)
         strikes_dict = cdata.get("strikes", {})
         if not strikes_dict:
             self._set_status("Generating strike level map...", "#58a6ff")
@@ -6003,10 +6068,9 @@ class ControlPanel:
 
             def get_strike_data(opt_type, strike_num):
                 for tok, s_info in strikes_dict.items():
-                    if s_info.get("opt_type") == opt_type and int(s_info.get("strike", 0)) == int(strike_num):
+                    if (s_info.get("opt_type") == opt_type and int(s_info.get("strike", 0)) == int(strike_num)
+                            and (not exp or s_info.get("expiry") == exp)):
                         return s_info
-                s_info = feed.strike_pivots.get((opt_type, int(strike_num)))
-                if s_info: return s_info
                 return None
 
             rows_to_display = []
@@ -6480,7 +6544,10 @@ class ControlPanel:
             if os.path.exists(cache_file):
                 try:
                     with open(cache_file, "r") as cf:
-                        self._cached_strikes = json.load(cf).get("strikes", {})
+                        _cj = json.load(cf)
+                        _ok = _cj.get("basis_key") == f"{pivot_session_date().isoformat()}:session"
+                        self._cached_strikes = _cj.get("strikes", {}) if _ok else {}
+                        self._cached_nearest_exp = _cj.get("expiry", "")
                 except Exception:
                     self._cached_strikes = getattr(self, "_cached_strikes", {})
             else:
@@ -6490,7 +6557,8 @@ class ControlPanel:
             for _tok, _si in self._cached_strikes.items():
                 _exp = _si.get("expiry", "-")
                 self._cache_by_key[(_si.get("opt_type"), _si.get("strike"), _exp)] = _si
-                self._cache_by_type_strike.setdefault((_si.get("opt_type"), _si.get("strike")), _si)
+                if _exp == getattr(self, "_cached_nearest_exp", _exp):   # short key = nearest expiry only
+                    self._cache_by_type_strike[(_si.get("opt_type"), _si.get("strike"))] = _si
 
         cached_strikes = getattr(self, "_cached_strikes", {})
         _cache_by_key  = getattr(self, "_cache_by_key", {})
@@ -6586,34 +6654,8 @@ class ControlPanel:
             for ot, stk, is_15m, is_1h, is_nearby in needed_focus:
                 strike_tag = "[⭐15M & ⏳1H]" if (is_15m and is_1h) else ("[⭐15M Focus]" if is_15m else ("[⏳1H Focus]" if is_1h else ("[📌Nearby Pivot]" if is_nearby else "")))
                 if (ot, stk, tgt_exp) not in existing_keys:
-                    s_info = feed.strike_pivots.get((ot, stk, tgt_exp))
-                    if not s_info:
-                        for _tok, _si in cached_strikes.items():
-                            if _si.get("opt_type") == ot and _si.get("strike") == stk and _si.get("expiry") == tgt_exp:
-                                s_info = _si
-                                break
-                    if not s_info:
-                        s_info = feed.strike_pivots.get((ot, stk))
-                    if not s_info:
-                        for _tok, _si in cached_strikes.items():
-                            if _si.get("opt_type") == ot and _si.get("strike") == stk:
-                                s_info = _si
-                                break
-                    if not s_info:
-                        ci = _cache_by_ts.get((ot, stk))
-                        if ci:
-                            s_info = ci
-                    if not s_info:
-                        ltp_syn = _live_ltp(ot, stk, tgt_exp)
-                        if ltp_syn > 0:
-                            s_info = calc_fib_pivots(ltp_syn * 1.05, ltp_syn * 0.95, ltp_syn)
-                            s_info["strike"]   = stk
-                            s_info["opt_type"] = ot
-                            s_info["expiry"]   = tgt_exp
-                            s_info["prev_c"]   = ltp_syn
-                            s_info["prev_h"]   = round(ltp_syn * 1.05, 2)
-                            s_info["prev_l"]   = round(ltp_syn * 0.95, 2)
-                            feed.strike_pivots[(ot, stk, tgt_exp)] = s_info
+                    # Levels of this exact contract only (never another expiry's, never estimated)
+                    s_info = feed.strike_pivots.get((ot, stk, tgt_exp)) or _cache_by_key.get((ot, stk, tgt_exp))
                     if s_info:
                         exp_val = tgt_exp
                         ltp_val = _live_ltp(ot, stk, exp_val)
@@ -7021,7 +7063,7 @@ class ControlPanel:
                     if _mtf:
                         with feed.lock:
                             feed.mtf_pivots = _mtf
-                        feed.fetch_and_map_all_strikes(curr_sym, None, force_fetch=True)
+                        feed.fetch_and_map_all_strikes(curr_sym, None, force_fetch=True, mode="next")
                     feed.sync_multi_symbol_sheet()
                     print(f"[EOD UI] ✅ Next-day levels calculated & synced to Multi-Symbol Tracker sheet.")
                 except Exception as _nd_err:

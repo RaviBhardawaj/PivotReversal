@@ -20,6 +20,8 @@ next_day_plan*.json
 multi_symbol_levels.json
 multi_symbol_sheet.json
 strike_pivot_cache.json
+strike_pivot_cache_next.json
+*.json.tmp
 tv_pivot_cache.json
 last_session.json
 .sheet_reset_done

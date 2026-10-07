@@ -33,5 +33,9 @@ Orders are sent only when **AUTO-TRADE** is switched ON in the dashboard's order
 pick the broker, test the connection and set lots, order type and daily limits (default: max 6 trades,
 max ₹5,000 loss per day, SELL setups off, SL placed at the broker). ■ STOP exits every open position.
 
+Before the first live day, double-click `test_connections.command` (logins only), then
+`live_order_check.command` during market hours. It reads funds, the contract, order book and positions,
+and can send one 1-lot NIFTY BUY LIMIT 20% below LTP that it modifies and cancels at once.
+
 Secrets (`.env`, `credentials.json`, `token.pickle`, `config.json`, Dhan files) are listed in
 `.gitignore` and must never be committed.

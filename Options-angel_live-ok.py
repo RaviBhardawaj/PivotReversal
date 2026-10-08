@@ -5710,6 +5710,8 @@ def dash_row_flags(w: dict, ce_15m, pe_15m, ce_1h, pe_1h, p_15m, p_1h, p_exact=N
     rs_15 = (ot == "CE" and stk in ce_15m) or (ot == "PE" and stk in pe_15m)
     rs_1h = (ot == "CE" and stk in ce_1h) or (ot == "PE" and stk in pe_1h)
     p15, p1h = stk in p_15m, stk in p_1h
+    in15 = stk in set(ce_15m) | set(pe_15m) | set(p_15m)
+    in1h = stk in set(ce_1h) | set(pe_1h) | set(p_1h)
     if p_exact is None:
         p_exact = set(p_15m) | set(p_1h)
     is_exact_p = stk in p_exact
@@ -5726,16 +5728,18 @@ def dash_row_flags(w: dict, ce_15m, pe_15m, ce_1h, pe_1h, p_15m, p_1h, p_exact=N
     return {
         "Side": {w.get("side", "BUY")},
         "Type": {ot},
-        # each strike sits in exactly one TF box: 15M only, 1H only, or both (never mixed in)
-        "TF": ({"BOTH"} if ((rs_15 or p15) and (rs_1h or p1h))
-               else {"15M"} if (rs_15 or p15) else {"1H"} if (rs_1h or p1h) else set()),
+        # each strike sits in exactly one TF box: 15M only, 1H only, or both (never mixed in).
+        # A strike counts for a timeframe when it is on that timeframe's plan for CE or PE,
+        # the same rule the trades use ("15M Intraday" / "1H Structure" / "15M / 1H").
+        "TF": ({"BOTH"} if (in15 and in1h) else {"15M"} if in15 else {"1H"} if in1h else set()),
         "Level": ({"RS"} if (rs_15 or rs_1h) else set())
                  | ({"P"} if is_exact_p else set())
                  | ({"PN"} if ((p15 or p1h) and not is_exact_p) else set()),
         "State": {state},
         "is_p": is_exact_p,
-        "is_15m": rs_15 or p15,
-        "is_1h": rs_1h or p1h,
+        "is_15m": in15,
+        "is_1h": in1h,
+        "on_plan": rs_15 or p15 or rs_1h or p1h,     # this CE/PE row is on a 15M or 1H plan
     }
 
 
@@ -7040,7 +7044,7 @@ class ControlPanel:
             if _allowed_exp is not None and (w.get("expiry", "") or "").strip() not in _allowed_exp:
                 continue
             fl = dash_row_flags(w, ce_15m, pe_15m, ce_1h, pe_1h, p_15m, p_1h, p_exact)
-            if not (fl["is_15m"] or fl["is_1h"] or w.get("strike") in nearby_set):
+            if not (fl["on_plan"] or w.get("strike") in nearby_set):
                 continue
             if not dash_row_passes(fl, sel_filters):
                 continue

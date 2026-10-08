@@ -18,4 +18,8 @@ assert P(f(22600), sel("15M")) and not P(f(22650), sel("15M")) and not P(f(22700
 assert P(f(22700), sel("1H")) and not P(f(22650), sel("1H"))
 assert P(f(22650), sel("BOTH")) and not P(f(22600), sel("BOTH"))
 assert P(f(22650), sel("15M", "BOTH")) and P(f(22600), sel("15M", "BOTH"))
+# a CE 15M strike that is a PE 1H strike is "15M + 1H" for both rows, like its trades
+g = lambda ot: ns["dash_row_flags"]({"type": ot, "strike": 22500, "side": "SELL"}, ce_15m=[22500], pe_15m=[],
+                                    ce_1h=[], pe_1h=[22500], p_15m=[], p_1h=[])
+assert g("CE")["TF"] == g("PE")["TF"] == {"BOTH"}
 print("TF FILTER TESTS PASSED")

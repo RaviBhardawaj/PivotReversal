@@ -32,3 +32,4 @@ __pycache__/
 *.pyc
 .DS_Store
 _backup*/
+data_settings.json

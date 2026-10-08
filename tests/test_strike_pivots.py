@@ -23,6 +23,7 @@ _spec=importlib.util.spec_from_file_location("app",_src); app=importlib.util.mod
 app.BASE_DIR=W
 app.STRIKE_PIVOT_CACHE=os.path.join(W,"strike_pivot_cache.json")
 app.STRIKE_PIVOT_NEXT_CACHE=os.path.join(W,"strike_pivot_cache_next.json")
+app._DATA_SETTINGS_FILE=os.path.join(W,"data_settings.json")
 app.time.sleep=lambda s: None
 class FakeDT(datetime):
     v=datetime(2026,10,8,8,30)
@@ -123,23 +124,38 @@ g.load_or_fetch_strike_pivots("NIFTY",list(m),{t:{"expiry":meta[t][0],"strike":m
 assert state["calls"]==calls and all(t in g.strike_pivots for t in m); print("G restart from cache, no refetch: OK")
 # H) flat candle = all levels P, as TradingView
 p=app.calc_fib_pivots(5,5,5); assert p["R3"]==p["S3"]==p["P"]==5
-# I) Dhan is the first source; Angel is not asked when Dhan has the candles
+# I) Dhan is the first source; Angel's candle is used to cross-check it
 class FakeDhan:
-    def __init__(s): s.calls = []
+    def __init__(s, bump=0): s.calls = []; s.bump = bump
     def daily_candles(s, sid, seg, instrument, now=None):
         s.calls.append((sid, seg, instrument))
         today = FakeDT.v.strftime("%Y-%m-%d")
-        return [tuple([c[0][:10]] + c[1:5]) for c in (candle(sid, d) for d in DAYS if d <= today)]
-fd = FakeDhan(); app._DHAN_DATA["ad"] = fd
+        return [tuple([c[0][:10]] + [x + s.bump for x in c[1:5]]) for c in (candle(sid, d) for d in DAYS if d <= today)]
+fd = FakeDhan(); app._DHAN_DATA["ad"] = fd; app._SRC_DOWN.update(Dhan=0.0, Angel=0.0)
+assert app.get_level_source() == "DHAN"
 FakeDT.v = datetime(2026,10,9,8,0); f.strike_pivots.clear(); calls = state["calls"]
 r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
-assert state["calls"] == calls and len(fd.calls) == len(r) and fd.calls[0][1:] == ("NSE_FNO", "OPTIDX")
-for t,s in r.items(): check(s,t,"2026-10-08"); assert s["source"] == "Dhan"
-# Dhan fails -> Angel fills in
-class BadDhan:
-    def daily_candles(s, *a, **k): raise RuntimeError("DH-906 no data plan")
-app._DHAN_DATA["ad"] = BadDhan(); f.strike_pivots.clear()
+assert len(fd.calls) == len(r) and fd.calls[0][1:] == ("NSE_FNO", "OPTIDX") and state["calls"] - calls == len(r)
+for t,s in r.items(): check(s,t,"2026-10-08"); assert s["source"] == "Dhan" and s["cross_check"] == "MATCH"
+assert f.level_check_summary == {"MATCH": len(r)}
+# the two brokers disagree -> flagged, levels still from the selected source
+app._DHAN_DATA["ad"] = FakeDhan(bump=1.0); f.strike_pivots.clear()
 r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
-assert r and all(s["source"] == "Angel" for s in r.values())
-print("I Dhan first, Angel backup: OK")
+assert all(s["cross_check"] == "MISMATCH" and s["source"] == "Dhan" for s in r.values())
+print("I Dhan first + Angel cross-check (match and mismatch): OK")
+# J) Angel selected: Angel first, Dhan checks it
+app._DHAN_DATA["ad"] = FakeDhan(); app.set_level_source("ANGEL"); assert app.get_level_source() == "ANGEL"
+f.strike_pivots.clear()
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+for t,s in r.items(): check(s,t,"2026-10-08"); assert s["source"] == "Angel" and s["cross_check"] == "MATCH"
+app.set_level_source("DHAN")
+print("J Angel selected: OK")
+# K) Dhan fails -> Angel fills in; Dhan is not asked again for 2 minutes
+class BadDhan:
+    n = 0
+    def daily_candles(s, *a, **k): BadDhan.n += 1; raise RuntimeError("DH-906 no data plan")
+app._DHAN_DATA["ad"] = BadDhan(); app._SRC_DOWN.update(Dhan=0.0, Angel=0.0); f.strike_pivots.clear()
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+assert r and all(s["source"] == "Angel" and s["cross_check"] == "NOT CHECKED" for s in r.values())
+print("K Dhan down, Angel backup: OK (Dhan asked", BadDhan.n, "times)")
 print("STRIKE PIVOT TESTS PASSED")

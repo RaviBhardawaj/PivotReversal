@@ -2867,20 +2867,68 @@ def dhan_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now: d
         raise
 
 
+LEVEL_SOURCES = {"DHAN": "Dhan (Angel backup)", "ANGEL": "Angel (Dhan backup)"}
+_DATA_SETTINGS_FILE = os.path.join(BASE_DIR, "data_settings.json")
+_SRC_DOWN = {"Dhan": 0.0, "Angel": 0.0}       # when a source last failed (skip it for 2 minutes)
+
+
+def get_level_source() -> str:
+    """Which broker's daily candles the strike levels come from first: DHAN (default) or ANGEL."""
+    v = str(read_json_file(_DATA_SETTINGS_FILE).get("level_source") or os.getenv("LEVELS_SOURCE") or "DHAN").upper()
+    return v if v in LEVEL_SOURCES else "DHAN"
+
+
+def set_level_source(v: str):
+    d = read_json_file(_DATA_SETTINGS_FILE)
+    d["level_source"] = v if v in LEVEL_SOURCES else "DHAN"
+    write_json_file(_DATA_SETTINGS_FILE, d)
+
+
+def _source_fns(exch, token, instrument, now):
+    return {"Dhan": lambda: dhan_daily_candles(exch, token, instrument, now=now),
+            "Angel": lambda: angel_daily_candles(exch, token, now=now)}
+
+
 def strike_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now: datetime = None):
-    """Official daily candles of one option: Dhan first, Angel One as the backup.
-    Returns (rows, source). Raises with both brokers' reasons when neither has data."""
+    """Official daily candles of one option from the selected source first (get_level_source),
+    the other broker as the backup. Returns (rows, source). Raises with both reasons."""
+    first = "Dhan" if get_level_source() == "DHAN" else "Angel"
+    order = [first, "Angel" if first == "Dhan" else "Dhan"]
+    fns = _source_fns(exch, token, instrument, now)
     errs = []
-    for name, fn in (("Dhan", lambda: dhan_daily_candles(exch, token, instrument, now=now)),
-                     ("Angel", lambda: angel_daily_candles(exch, token, now=now))):
+    for i, name in enumerate(order):
+        if time.time() - _SRC_DOWN[name] < 120:
+            errs.append(f"{name}: skipped (failed in the last 2 minutes)")
+            continue
         try:
-            rows = fn()
+            rows = fns[name]()
             if rows:
                 return rows, name
             errs.append(f"{name}: no candles")
         except Exception as e:
+            _SRC_DOWN[name] = time.time()
             errs.append(f"{name}: {e}")
     raise RuntimeError("; ".join(errs))
+
+
+def cross_check_candle(exch: str, token: str, instrument: str, used: str, cndl, mode: str, now: datetime):
+    """Compare the candle the levels were built from with the other broker's candle for the same
+    day. Returns ("MATCH" | "MISMATCH" | "NOT CHECKED", detail)."""
+    other = "Angel" if used == "Dhan" else "Dhan"
+    if time.time() - _SRC_DOWN[other] < 120:
+        return "NOT CHECKED", f"{other} unavailable"
+    try:
+        rows = _source_fns(exch, token, instrument, now)[other]()
+    except Exception as e:
+        _SRC_DOWN[other] = time.time()
+        return "NOT CHECKED", f"{other}: {e}"
+    o = next((r for r in rows if r[0] == cndl[0]), None)
+    if not o:
+        return "NOT CHECKED", f"{other} has no candle for {cndl[0]}"
+    diff = max(abs(o[2] - cndl[2]), abs(o[3] - cndl[3]), abs(o[4] - cndl[4]))
+    if diff <= 0.05 + 1e-9:
+        return "MATCH", ""
+    return "MISMATCH", (f"{used} H/L/C {cndl[2]}/{cndl[3]}/{cndl[4]} vs {other} {o[2]}/{o[3]}/{o[4]}")
 
 
 def read_json_file(path: str) -> dict:
@@ -3436,7 +3484,7 @@ class FeedEngine:
             else:
                 fetch_tokens = list(tokens)
 
-            mapped, failed = {}, {}
+            mapped, failed, checks = {}, {}, {}
             for tok in fetch_tokens:
                 m = meta_map[tok]
                 try:
@@ -3446,6 +3494,11 @@ class FeedEngine:
                         failed[tok] = "no completed daily candle yet"
                     else:
                         c_date, _o, h, l, c = cndl
+                        chk, chk_note = cross_check_candle(exch, tok, m.get('itype', 'OPTIDX'), src, cndl, mode, _now)
+                        if chk == "MISMATCH":
+                            print(f"[STRIKE MAPPER] ⚠️ {m['strike']} {m['opt_type']} {target_expiry} candle {c_date}: "
+                                  f"Dhan and Angel differ ({chk_note}) — levels use {src}")
+                        checks[chk] = checks.get(chk, 0) + 1
                         piv = calc_fib_pivots(h, l, c)
                         if not piv:
                             failed[tok] = f"bad candle {c_date} H={h} L={l} C={c}"
@@ -3458,6 +3511,7 @@ class FeedEngine:
                                 'expiry': m['expiry'],
                                 'candle_date': c_date,          # day whose H/L/C built these levels
                                 'source': src,                  # Dhan or Angel
+                                'cross_check': chk,             # other broker's candle: MATCH / MISMATCH / NOT CHECKED
                                 'level_date': level_date.isoformat(),
                                 'prev_h': round(h, 2),
                                 'prev_l': round(l, 2),
@@ -3499,7 +3553,10 @@ class FeedEngine:
 
             label = "next session" if mode == "next" else "session"
             print(f"[STRIKE MAPPER] ✅ {len(mapped)} strike(s) mapped for {symbol} {target_expiry} "
-                  f"({label} {level_date.isoformat()}, {len(failed)} without data)")
+                  f"({label} {level_date.isoformat()}, {len(failed)} without data)"
+                  + (f" | Dhan vs Angel check: {checks.get('MATCH', 0)} match, {checks.get('MISMATCH', 0)} differ, "
+                     f"{checks.get('NOT CHECKED', 0)} not checked" if checks else ""))
+            self.level_check_summary = dict(checks)
             return {t: existing[t] for t in tokens if t in existing}
         except Exception as ex:
             print(f"[STRIKE MAPPER] Error: {ex}")
@@ -5800,7 +5857,7 @@ class ControlPanel:
         tree_frame = tk.Frame(rev_frame, bg="#161b22")
         tree_frame.pack(fill="both", expand=True, padx=8, pady=(0, 6))
 
-        cols = ("Expiry", "Type", "Strike", "Side", "LTP", "OI", "Vol", "Trading Zone", "P", "S1", "S2", "R1", "R2", "5M State", "LL", "HH", "Signal", "SL", "Entry", "T1", "T2", "T3", "T4", "Status", "Order",
+        cols = ("Expiry", "Type", "Strike", "Side", "LTP", "OI", "Vol", "Trading Zone", "S3", "S2", "S1", "P", "R1", "R2", "R3", "5M State", "LL", "HH", "Signal", "SL", "Entry", "T1", "T2", "T3", "T4", "T5", "Status", "Order",
                 "Plan S2", "Plan P", "Plan R2", "Plan Signal", "vs Plan")
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=10)
 
@@ -5813,6 +5870,8 @@ class ControlPanel:
             "OI":           {"width": 62,  "anchor": "e",      "minwidth": 50},
             "Vol":          {"width": 62,  "anchor": "e",      "minwidth": 50},
             "Trading Zone": {"width": 180, "anchor": "w",      "minwidth": 120},
+            "S3":           {"width": 55,  "anchor": "e",      "minwidth": 45},
+            "R3":           {"width": 55,  "anchor": "e",      "minwidth": 45},
             "P":            {"width": 55,  "anchor": "e",      "minwidth": 45},
             "S1":           {"width": 55,  "anchor": "e",      "minwidth": 45},
             "S2":           {"width": 55,  "anchor": "e",      "minwidth": 45},
@@ -5828,6 +5887,7 @@ class ControlPanel:
             "T2":           {"width": 58,  "anchor": "e",      "minwidth": 45},
             "T3":           {"width": 58,  "anchor": "e",      "minwidth": 45},
             "T4":           {"width": 58,  "anchor": "e",      "minwidth": 45},
+            "T5":           {"width": 58,  "anchor": "e",      "minwidth": 45},
             "Status":       {"width": 95,  "anchor": "center", "minwidth": 75},
             "Order":        {"width": 80,  "anchor": "center", "minwidth": 60},   # broker order: Pending / Filled / Closed / Rejected
             # Today's Levels plan columns (shown only in TODAY_LEVELS filter)
@@ -5914,6 +5974,14 @@ class ControlPanel:
                    activebackground="#2ea043", activeforeground="#ffffff",
                    font=(GUI_FONT, 9, "bold"),
                    padx=14, pady=5).pack(side="left", padx=6)
+
+        tk.Label(tool_frame, text="Levels from:", bg="#0d1117", fg="#8b949e",
+                 font=(GUI_FONT, 9)).pack(side="left", padx=(6, 2))
+        self.level_source_var = tk.StringVar(value=LEVEL_SOURCES[get_level_source()])
+        _src_cb = ttk.Combobox(tool_frame, textvariable=self.level_source_var, state="readonly",
+                               values=list(LEVEL_SOURCES.values()), width=19)
+        _src_cb.pack(side="left", padx=(0, 6))
+        _src_cb.bind("<<ComboboxSelected>>", lambda e: self._on_level_source_change())
 
         DarkButton(tool_frame, text="⚡ Gap Check (09:16 AM)",
                    command=self._on_gap_check_click,
@@ -6013,6 +6081,17 @@ class ControlPanel:
     def _show_symbol_calculator_window(self, default_sym=None):
         """Symbol calculator window removed as requested."""
         pass
+
+    def _on_level_source_change(self):
+        label = self.level_source_var.get()
+        key = next((k for k, v in LEVEL_SOURCES.items() if v == label), "DHAN")
+        set_level_source(key)
+        if is_live_market_open():
+            # levels are locked during the session; the new source is used from the next session
+            self._set_status(f"Levels source: {label}. Today's levels stay locked; used from the next session.", "#ffd700")
+        else:
+            self._set_status(f"Levels source: {label}. Rebuilding strike levels...", "#58a6ff")
+            self._on_map_strike_levels_click()
 
     def _on_map_strike_levels_click(self):
         sym = self.symbol_var.get()
@@ -6877,26 +6956,34 @@ class ControlPanel:
                 t2_v = tgts[1] if len(tgts) > 1 else 0
                 t3_v = tgts[2] if len(tgts) > 2 else 0
                 t4_v = tgts[3] if len(tgts) > 3 else 0
+                t5_v = tgts[4] if len(tgts) > 4 else 0
             elif is_buy and is_s1_buy:
+                # same ladder as the strategy: S1 entry -> P, R1, R2, R3, R3 x 1.05
                 t1_v = w.get("p", 0)
                 t2_v = w.get("r1", 0)
                 t3_v = w.get("r2", 0)
                 t4_v = w.get("r3", 0) or round(t3_v * 1.25, 2)
+                t5_v = round(w.get("r3", 0) * 1.05, 2) if w.get("r3", 0) else 0
             elif is_buy:
+                # S2 entry -> S1, P, R1, R2, R3
                 t1_v = w.get("s1", 0)
                 t2_v = w.get("p", 0)
                 t3_v = w.get("r1", 0)
                 t4_v = w.get("r2", 0) or round(t3_v * 1.25, 2)
+                t5_v = w.get("r3", 0)
             else:
+                # R2 entry -> R1, P, S1, S2, S3
                 t1_v = w.get("r1", 0)
                 t2_v = w.get("p", 0)
                 t3_v = w.get("s1", 0)
                 t4_v = w.get("s2", 0) or round(t3_v * 0.80, 2)
+                t5_v = w.get("s3", 0)
 
             t1_str = f"{t1_v:.2f}" if t1_v and t1_v > 0 else "-"
             t2_str = f"{t2_v:.2f}" if t2_v and t2_v > 0 else "-"
             t3_str = f"{t3_v:.2f}" if t3_v and t3_v > 0 else "-"
             t4_str = f"{t4_v:.2f}" if t4_v and t4_v > 0 else "-"
+            t5_str = f"{t5_v:.2f}" if t5_v and t5_v > 0 else "-"
 
             _fl = _row_flags.get((opt_t, w.get("strike", 0), w.get("expiry", "-"), w.get("side", "BUY"))) \
                   or dash_row_flags(w, ce_15m, pe_15m, ce_1h, pe_1h, p_15m, p_1h, p_exact)
@@ -7016,11 +7103,13 @@ class ControlPanel:
                 oi_disp,
                 vol_disp,
                 disp_zone,
-                f"{w.get('p', 0.0):.2f}",
-                f"{w.get('s1', 0.0):.2f}",
+                f"{w.get('s3', 0.0):.2f}",
                 f"{w.get('s2', 0.0):.2f}",
+                f"{w.get('s1', 0.0):.2f}",
+                f"{w.get('p', 0.0):.2f}",
                 f"{w.get('r1', 0.0):.2f}",
                 f"{w.get('r2', 0.0):.2f}",
+                f"{w.get('r3', 0.0):.2f}",
                 disp_m5,
                 ll_str,
                 hh_str,
@@ -7031,6 +7120,7 @@ class ControlPanel:
                 t2_str,
                 t3_str,
                 t4_str,
+                t5_str,
                 disp_trade_st,
                 _order_map.get((w["type"], str(w["strike"]), str(w.get("expiry", "") or ""), w.get("side", ""))) or "",
                 # Today's Levels plan columns (always present for Treeview consistency)

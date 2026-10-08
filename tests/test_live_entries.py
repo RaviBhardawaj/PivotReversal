@@ -64,27 +64,27 @@ st=run(seq)
 assert st.state=="WAITING" and st.trade_status=="Waiting", st.state
 print("C opening ticks below R2: stays WAITING: OK")
 
-# D. a real sweep above R2, rejection, retest and drop -> SELL at the R2 level
+# D. a real sweep above R2, a red 5M candle closes below R2, then a break below that candle's low -> SELL
 seq=[]; hi=0; lo=999
 def add(ts,p):
     global hi,lo
     hi=max(hi,p); lo=min(lo,p); seq.append((ts,p,hi,lo))
 for i,p in enumerate([333.0,334.5,336.2,335.0]): add(at(9,20,i),p)     # sweep, HH 336.2
 for i,p in enumerate([331.5,330.8]): add(at(9,24,50+i),p)                  # back below R2
-for i,p in enumerate([331.0,330.5]): add(at(9,25,i),p)                    # 5M closed bearish, drop
+for i,p in enumerate([331.0,330.5]): add(at(9,25,i),p)                    # 09:20 candle closed red (low 330.8); break below
 st=run(seq)
 assert st.state=="CONFIRMED_SELL" and st.trade_status=="Active", (st.state, st.signal)
-assert st.entry_price==332.69 and st.sl==336.2, (st.entry_price, st.sl)
+assert st.entry_price==330.8 and st.sl==336.2, (st.entry_price, st.sl)
 assert app.at_entry_price(seq[-1][1], st.entry_price, "SELL")
-print("D real R2 sweep -> SELL at 332.69, SL HH 336.20: OK")
+print("D real R2 sweep -> SELL below the confirmation candle low 330.80, SL HH 336.20: OK")
 
 # E. price already far below the entry level: no chase, wait for the level
 seq2=seq[:-2]+[(at(9,25,8),318.0,hi,318.0),(at(9,25,9),317.0,hi,317.0)]
 st=run(seq2)
 assert st.trade_status=="Waiting" and "come back to entry" in st.signal, (st.state, st.signal)
-FakeDT.v=at(9,26); st.update_tick(331.0,PIV,at(9,26),opt_high=hi,opt_low=317.0)
-assert st.trade_status=="Active" and st.entry_price==332.69, st.signal
-print("E no chase when price ran 15 pts below entry; enters when back at the level: OK")
+FakeDT.v=at(9,26); st.update_tick(330.6,PIV,at(9,26),opt_high=hi,opt_low=317.0)
+assert st.trade_status=="Active" and st.entry_price==330.8, st.signal
+print("E no chase when price ran 15 pts below entry; enters when back at the entry: OK")
 
 # F. BUY side mirror: price far above S2 never buys
 st=app.StrategyStrikeState("CE",22550,expiry="19OCT2026",mode="BUY")

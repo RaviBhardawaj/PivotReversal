@@ -27,15 +27,18 @@ The buy level is S2, or S1 when S2 ≤ 0.05.
    - State becomes `SWEEP_S2`, and the lowest price is recorded as **LL**.
    - The levels are frozen at that moment.
 2. **Reclaim.** LTP gets back above the level, and the state becomes `RECLAIM_S2`.
-3. **Candle close.** A completed 5-minute candle closes green, at or above the level.
+3. **Confirmation candle.** A 5-minute candle that has fully **closed**, green, at or above the level.
+   - It must be the sweep candle or a later one. A green candle from before the sweep never counts, and a candle that is still forming never counts.
+   - Its high is the **confirmation high**.
    - If its wick touched the level (within 1.5%), the retest counts as done.
-4. **Retest.** Otherwise, price has to dip back within 1.5% of the level while holding above LL.
-5. **Trading in favour.** Price then pushes above the level, at least 0.2% above the retest low.
-   - **Entry is confirmed** and the state becomes `CONFIRMED_BUY`.
+4. **Retest.** Otherwise, price has to dip back within 1.5% of the level while holding above LL. A break above the confirmation high before the retest does not enter.
+5. **Entry: break above the confirmation high.** After the retest, LTP trades above the confirmation candle's high, and the state becomes `CONFIRMED_BUY`.
+   - If price falls back below the level first, it is a new sweep: new LL, and a new confirmation candle is needed.
 
 When the entry is confirmed:
-- **At the entry level only.** The live price must be at the level: S2 (or S1) up to 1% above it (min 0.50). If price has already moved further away, the app does not chase; it waits for price to come back to the level.
-- **Entry price** recorded in the forward test is the **live LTP** at that moment (so within 1% of the level).
+- **Entry price** is the confirmation candle's high. The forward test records the live LTP at that moment.
+- **No chasing.** The live price must be at most 1% (min 0.50) above the confirmation high. If it has run further, the app waits for price to come back.
+- **No room, no trade.** If the confirmation high is already at or above T1, the setup is skipped.
 - **SL** is LL. Fallbacks, in order: the day low, then S3 (or S2 for an S1 entry), then entry minus 10%.
 - **Targets:**
   - From S2: S1, P, R1, R2, R3.
@@ -44,9 +47,9 @@ When the entry is confirmed:
 ## 4. SELL entry, resistance side (mirror image)
 1. **Sweep.** LTP goes above R2, or comes within 1% of it. The highest price is recorded as **HH**.
 2. **Rejection.** LTP drops back below R2.
-3. **Candle close.** A completed 5-minute candle closes red, below R2.
-4. **Retest** of R2, holding below HH.
-5. **Push down.** Price moves lower from there, and the **SELL is confirmed**, only while the price is at R2 or up to 1% below it (no chasing).
+3. **Confirmation candle.** A fully closed 5-minute candle, red, below R2, from the sweep candle or later. Its low is the **confirmation low**.
+4. **Retest** of R2 (within 1.5%), holding below HH. A wick into R2 on the confirmation candle counts.
+5. **Entry: break below the confirmation low.** After the retest, LTP trades below the confirmation candle's low, and the **SELL is confirmed** at that low. No chasing: at most 1% below it. Skipped if the low is already at or below T1 (R1).
 
 When the entry is confirmed:
 - **SL** is HH.

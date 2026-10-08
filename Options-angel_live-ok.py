@@ -491,6 +491,11 @@ class StrategyStrikeState:
         self.retest_done   = False
         self.retest_low    = 0.0
         self.retest_high   = 0.0
+        # Confirmation candle: the first 5M candle that CLOSES back above S2 (below R2) after the sweep.
+        # Entry is a break above its high (BUY) / below its low (SELL), after the retest.
+        self.sweep_bucket  = -1
+        self.conf_high     = 0.0
+        self.conf_low      = 0.0
         # Frozen pivot levels — locked at the moment the sweep begins
         # These do NOT drift as opt_piv recalculates each tick from changing opt_high/low
         self.frozen_s2     = 0.0   # S2 at time of SWEEP_S2 detection
@@ -532,6 +537,8 @@ class StrategyStrikeState:
                     self.ll = self.hh = 0.0
                     self.retest_done = False
                     self.retest_low = self.retest_high = 0.0
+                    self.conf_high = self.conf_low = 0.0
+                    self.sweep_bucket = -1
                     self.frozen_s2 = self.frozen_s1 = 0.0
                     self.frozen_r2 = self.frozen_r1 = 0.0
                     self.frozen_pivots = {}
@@ -612,6 +619,8 @@ class StrategyStrikeState:
                     self.sl = self.entry_price = 0.0
                     self.retest_done   = False
                     self.retest_low    = self.retest_high = 0.0
+                    self.conf_high = self.conf_low = 0.0
+                    self.sweep_bucket = -1
                     self.frozen_s2 = self.frozen_s1 = 0.0
                     self.frozen_r2 = self.frozen_r1 = 0.0
                     self.frozen_pivots = {}
@@ -626,6 +635,8 @@ class StrategyStrikeState:
                     self.sl = self.entry_price = 0.0
                     self.retest_done   = False
                     self.retest_low    = self.retest_high = 0.0
+                    self.conf_high = self.conf_low = 0.0
+                    self.sweep_bucket = -1
                     self.frozen_s2 = self.frozen_s1 = 0.0
                     self.frozen_r2 = self.frozen_r1 = 0.0
                     self.frozen_pivots = {}
@@ -674,6 +685,9 @@ class StrategyStrikeState:
                     else:                  self.frozen_s1 = round(s1, 2)
                     self.frozen_pivots = {k: (round(v, 2) if isinstance(v, (int, float)) else v) for k, v in pivots.items()}
                 self.retest_done = False
+                # the reclaim candle must close AFTER this sweep; any older confirmation is void
+                self.sweep_bucket = c["bucket"]
+                self.conf_high = self.conf_low = 0.0
                 note = f" (S2={s2:.2f}<=0.05)" if use_s1_for_buy else ""
                 re_tag = f" [Re-entry New LL:{self.ll:.2f}]" if self.sl_hit_count > 0 else f" [LL:{self.ll:.2f}]"
                 self.signal = f"★ {self.opt_type} SWEEP {active_lvl}{note}{re_tag} — Awaiting Reclaim & Candle Close"
@@ -684,13 +698,17 @@ class StrategyStrikeState:
                 self.trigger_level = active_lvl
                 if self.ll == 0:
                     self.ll = round(valid_low if valid_low > 0 else ltp, 2)
+                if self.sweep_bucket < 0:
+                    self.sweep_bucket = c["bucket"]
                 self.signal = f"★ {self.opt_type} RECLAIM {active_lvl} — Awaiting Bullish Candle Close"
 
             elif self.state == f"RECLAIM_{active_lvl}":
-                # Check for completed bullish candle closing above active support level
+                # Confirmation candle: a 5M candle that has fully CLOSED, opened in or after the
+                # sweep candle, and closed green above the support level. A candle still forming
+                # never counts.
                 candle_ok = False
                 wick_retested = False
-                if has_closed_candle:
+                if has_closed_candle and closed.get("bucket", -1) >= self.sweep_bucket:
                     c_close = closed["close"]
                     c_open  = closed["open"]
                     c_low   = closed.get("low", c_close)
@@ -698,20 +716,19 @@ class StrategyStrikeState:
                         candle_ok = True
                         if c_low <= fs_sup * 1.015:
                             wick_retested = True
-                elif ltp >= fs_sup and c["close"] >= fs_sup and c["close"] >= c["open"] and c["low"] <= fs_sup:
-                    candle_ok = True
-                    wick_retested = True
 
                 if candle_ok:
+                    self.conf_high = round(closed.get("high", closed["close"]), 2)
+                    self.conf_low  = round(closed.get("low", closed["close"]), 2)
                     self.state = f"RETEST_{active_lvl}"
                     self.retest_low = round(min(ltp, valid_low), 2)
                     if wick_retested:
                         self.retest_done = True
                         self.state = "TRADING_IN_FAVOR_BUY"
-                        self.signal = f"★ {self.opt_type} {active_lvl} Reclaim Candle Closed Bullish (Retest Wick Confirmed) — Watching In-Favour Push"
+                        self.signal = f"★ {self.opt_type} {active_lvl} Confirmation Candle Closed Bullish (Retest Wick) — Buy Above {self.conf_high:.2f}"
                     else:
                         self.retest_done = False
-                        self.signal = f"★ {self.opt_type} {active_lvl} Reclaim Candle Closed Bullish — Watching Retest"
+                        self.signal = f"★ {self.opt_type} {active_lvl} Confirmation Candle Closed Bullish (High {self.conf_high:.2f}) — Watching Retest"
 
             elif self.state == f"RETEST_{active_lvl}":
                 # Step 3: Retest Support level (price dips towards level holding above LL)
@@ -724,20 +741,28 @@ class StrategyStrikeState:
                     self.ll = round(ltp, 2)
 
             elif self.state == "TRADING_IN_FAVOR_BUY":
-                # Step 4: Price bounces and trades in favour (moves above support level and above retest low)
-                start_favor = (ltp > fs_sup and (self.retest_low == 0 or ltp >= self.retest_low + max(fs_sup * 0.002, 0.2)))
+                # Step 4: after the retest, price breaks ABOVE the confirmation candle's high -> BUY.
+                # Entry price = the confirmation candle high. No chasing: only within the entry
+                # band just above it.
                 _fp0 = self.frozen_pivots if self.frozen_pivots else pivots
-                _ep0 = round(_fp0.get(active_lvl, fs_sup), 2)
-                if start_favor and not at_entry_price(ltp, _ep0, "BUY"):
-                    # price has run away from the entry level: no chasing; wait for it to come back
-                    self.signal = f"★ {self.opt_type} {active_lvl} Reclaimed — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
+                _ep0 = round(self.conf_high, 2)
+                start_favor = (self.conf_high > 0 and ltp > fs_sup and ltp > self.conf_high)
+                _t1 = round(_fp0.get('P', p) if active_lvl == "S1" else _fp0.get('S1', s1), 2)
+                if start_favor and _ep0 >= _t1:
+                    self.signal = f"★ {self.opt_type} {active_lvl} Confirmation high {_ep0:.2f} is at/above T1 {_t1:.2f} — no room, no trade"
                     start_favor = False
+                elif start_favor and not at_entry_price(ltp, _ep0, "BUY"):
+                    # price has run away from the entry: no chasing; wait for it to come back
+                    self.signal = f"★ {self.opt_type} {active_lvl} Broke confirmation high — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
+                    start_favor = False
+                elif not start_favor and self.conf_high > 0:
+                    self.signal = f"★ {self.opt_type} {active_lvl} Retested — Buy Above Confirmation High {self.conf_high:.2f}"
                 if start_favor:
                     # Step 5: ENTRY IS CONFIRMED!
                     self.state         = "CONFIRMED_BUY"
                     self.trigger_level = active_lvl
                     fp       = self.frozen_pivots if self.frozen_pivots else pivots
-                    entry_px = round(fp.get(active_lvl, fs_sup), 2)
+                    entry_px = _ep0
 
                     # When support reclaim triggers, LL value is our updated SL (strictly < entry_px, NEVER 0.05)
                     if self.ll > 0 and self.ll < entry_px:
@@ -808,6 +833,9 @@ class StrategyStrikeState:
                     self.frozen_r2 = round(r2, 2)
                     self.frozen_pivots = {k: (round(v, 2) if isinstance(v, (int, float)) else v) for k, v in pivots.items()}
                 self.retest_done = False
+                # the rejection candle must close AFTER this sweep; any older confirmation is void
+                self.sweep_bucket = c["bucket"]
+                self.conf_high = self.conf_low = 0.0
                 re_tag = f" [Re-entry New HH:{self.hh:.2f}]" if self.sl_hit_count > 0 else f" [HH:{self.hh:.2f}]"
                 self.signal = f"▼ {self.opt_type} SWEEP R2{re_tag} — Awaiting Rejection & Candle Close"
 
@@ -817,13 +845,16 @@ class StrategyStrikeState:
                 self.trigger_level = "R2"
                 if self.hh == 0:
                     self.hh = round(valid_high if valid_high > 0 else ltp, 2)
+                if self.sweep_bucket < 0:
+                    self.sweep_bucket = c["bucket"]
                 self.signal = f"▼ {self.opt_type} REJECT R2 — Awaiting Bearish Candle Close"
 
             elif self.state == "RECLAIM_R2":
-                # Check for completed bearish candle closing below R2
+                # Confirmation candle: a fully CLOSED 5M candle, opened in or after the sweep
+                # candle, that closed red below R2. A candle still forming never counts.
                 candle_ok = False
                 wick_retested = False
-                if has_closed_candle:
+                if has_closed_candle and closed.get("bucket", -1) >= self.sweep_bucket:
                     c_close = closed["close"]
                     c_open  = closed["open"]
                     c_high  = closed.get("high", c_close)
@@ -831,20 +862,19 @@ class StrategyStrikeState:
                         candle_ok = True
                         if c_high >= fr2 * 0.985:
                             wick_retested = True
-                elif ltp <= fr2 and c["close"] <= fr2 and c["close"] <= c["open"] and c["high"] >= fr2:
-                    candle_ok = True
-                    wick_retested = True
 
                 if candle_ok:
+                    self.conf_high = round(closed.get("high", closed["close"]), 2)
+                    self.conf_low  = round(closed.get("low", closed["close"]), 2)
                     self.state = "RETEST_R2"
                     self.retest_high = round(max(ltp, valid_high), 2)
                     if wick_retested:
                         self.retest_done = True
                         self.state = "TRADING_IN_FAVOR_SELL"
-                        self.signal = f"▼ {self.opt_type} R2 Rejection Candle Closed Bearish (Retest Wick Confirmed) — Watching In-Favour Drop"
+                        self.signal = f"▼ {self.opt_type} R2 Confirmation Candle Closed Bearish (Retest Wick) — Sell Below {self.conf_low:.2f}"
                     else:
                         self.retest_done = False
-                        self.signal = f"▼ {self.opt_type} R2 Rejection Candle Closed Bearish — Watching Retest"
+                        self.signal = f"▼ {self.opt_type} R2 Confirmation Candle Closed Bearish (Low {self.conf_low:.2f}) — Watching Retest"
 
             elif self.state == "RETEST_R2":
                 # Step 3: Retest R2 level (price bounces towards R2 holding below HH)
@@ -857,20 +887,28 @@ class StrategyStrikeState:
                     self.hh = round(ltp, 2)
 
             elif self.state == "TRADING_IN_FAVOR_SELL":
-                # Step 4: Price drops and trades in favour (moves below R2 and below retest high)
-                start_favor = (ltp < fr2 and (self.retest_high == 0 or ltp <= self.retest_high - max(fr2 * 0.002, 0.2)))
+                # Step 4: after the retest, price breaks BELOW the confirmation candle's low -> SELL.
+                # Entry price = the confirmation candle low. No chasing: only within the entry
+                # band just below it.
                 _fp0 = self.frozen_pivots if self.frozen_pivots else pivots
-                _ep0 = round(_fp0.get('R2', fr2), 2)
-                if start_favor and not at_entry_price(ltp, _ep0, "SELL"):
-                    # price has run away from the entry level: no chasing; wait for it to come back
-                    self.signal = f"▼ {self.opt_type} R2 Rejected — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
+                _ep0 = round(self.conf_low, 2)
+                start_favor = (self.conf_low > 0 and ltp < fr2 and ltp < self.conf_low)
+                _t1 = round(_fp0.get('R1', r1), 2)
+                if start_favor and _ep0 <= _t1:
+                    self.signal = f"▼ {self.opt_type} R2 Confirmation low {_ep0:.2f} is at/below T1 {_t1:.2f} — no room, no trade"
                     start_favor = False
+                elif start_favor and not at_entry_price(ltp, _ep0, "SELL"):
+                    # price has run away from the entry: no chasing; wait for it to come back
+                    self.signal = f"▼ {self.opt_type} R2 Broke confirmation low — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
+                    start_favor = False
+                elif not start_favor and self.conf_low > 0:
+                    self.signal = f"▼ {self.opt_type} R2 Retested — Sell Below Confirmation Low {self.conf_low:.2f}"
                 if start_favor:
                     # Step 5: ENTRY IS CONFIRMED!
                     self.state         = "CONFIRMED_SELL"
                     self.trigger_level = "R2"
                     fp       = self.frozen_pivots if self.frozen_pivots else pivots
-                    entry_px = round(fp.get('R2', fr2), 2)
+                    entry_px = _ep0
 
                     # When R2 rejection triggers, HH value is our updated SL (strictly > entry_px)
                     if self.hh > 0 and self.hh > entry_px:
@@ -907,17 +945,20 @@ class StrategyStrikeState:
 
             elif self.state == "RECLAIM_R1":
                 fr1 = self.frozen_r1 if self.frozen_r1 > 0 else r1
-                confirmed = (has_closed_candle and
-                             closed["close"] <= fr1 and
-                             closed["close"] <= closed["open"]) or (not has_closed_candle and ltp <= fr1)
-                _fp0 = self.frozen_pivots if self.frozen_pivots else pivots
-                if confirmed and not at_entry_price(ltp, round(_fp0.get('R1', fr1), 2), "SELL"):
+                # same rule as R2: a closed red candle below R1, then a break below its low
+                if self.conf_low <= 0 and (has_closed_candle and
+                        closed.get("bucket", -1) >= self.sweep_bucket and
+                        closed["close"] <= fr1 and closed["close"] <= closed["open"]):
+                    self.conf_high = round(closed.get("high", closed["close"]), 2)
+                    self.conf_low  = round(closed.get("low", closed["close"]), 2)
+                confirmed = self.conf_low > 0 and ltp < self.conf_low
+                if confirmed and not at_entry_price(ltp, self.conf_low, "SELL"):
                     confirmed = False
                 if confirmed:
                     self.state        = "CONFIRMED_SELL"
                     self.trigger_level = "R1"
                     fp       = self.frozen_pivots if self.frozen_pivots else pivots
-                    entry_px = round(fp.get('R1', fr1), 2)
+                    entry_px = round(self.conf_low, 2)
                     if self.hh > 0 and self.hh > entry_px:
                         effective_sl = round(self.hh, 2)
                     elif valid_high > 0 and valid_high > entry_px:
@@ -958,6 +999,8 @@ class StrategyStrikeState:
                     self.retest_done  = False
                     self.retest_low   = 0.0
                     self.retest_high  = 0.0
+                    self.conf_high = self.conf_low = 0.0
+                    self.sweep_bucket = -1
                     self.targets      = []
                     self.signal       = "WAITING"
                     self.frozen_s2    = self.frozen_s1 = 0.0
@@ -5065,11 +5108,11 @@ class FeedEngine:
                     else:
                         if is_s1_buy:
                             _b_lvl = "S1"
-                            _b_ep  = round(st_buy.entry_price if st_buy.entry_price > 0 else (st_buy.frozen_s1 or opt_piv.get("S1", 0)), 2)
+                            _b_ep  = round(st_buy.entry_price if st_buy.entry_price > 0 else st_buy.conf_high if st_buy.conf_high > 0 else (st_buy.frozen_s1 or opt_piv.get("S1", 0)), 2)
                             signal_buy = f"★ BUY {opt_type} [Entry@S1:{_b_ep:.1f} | LL SL (S2<=0)]"
                         else:
                             _b_lvl = "S2"
-                            _b_ep  = round(st_buy.entry_price if st_buy.entry_price > 0 else (st_buy.frozen_s2 or _s2_raw), 2)
+                            _b_ep  = round(st_buy.entry_price if st_buy.entry_price > 0 else st_buy.conf_high if st_buy.conf_high > 0 else (st_buy.frozen_s2 or _s2_raw), 2)
                             signal_buy = f"★ BUY {opt_type} [Entry@S2:{_b_ep:.1f} | LL SL]"
 
                     # SELL Signal text:
@@ -5157,12 +5200,12 @@ class FeedEngine:
 
                         is_s1_buy = (opt_piv.get('S2', 0) <= 0.05 or disp_s2_b <= 0.05 or st_buy.trigger_level == "S1")
                         if is_s1_buy:
-                            calc_ep_b = round(st_buy.entry_price if st_buy.entry_price > 0 else (st_buy.frozen_s1 if st_buy.frozen_s1 > 0 else disp_s1_b), 2)
+                            calc_ep_b = round(st_buy.entry_price if st_buy.entry_price > 0 else st_buy.conf_high if st_buy.conf_high > 0 else (st_buy.frozen_s1 if st_buy.frozen_s1 > 0 else disp_s1_b), 2)
                             zone_text = f"{strike_tag} Buy Zone Above S1 ({calc_ep_b:.1f}) [S2<=0]".strip()
                             plan_buy_zone = f"BUY S1={disp_s1_b:.1f} (S2<=0) | T1:{disp_p_b:.1f} T2:{disp_r1_b:.1f}"
                             tgts_b = list(st_buy.targets) if st_buy.targets else [disp_p_b, disp_r1_b, disp_r2_b, disp_r3_b, round(disp_r3_b * 1.05, 2)]
                         else:
-                            calc_ep_b = round(st_buy.entry_price if st_buy.entry_price > 0 else (st_buy.frozen_s2 if st_buy.frozen_s2 > 0 else disp_s2_b), 2)
+                            calc_ep_b = round(st_buy.entry_price if st_buy.entry_price > 0 else st_buy.conf_high if st_buy.conf_high > 0 else (st_buy.frozen_s2 if st_buy.frozen_s2 > 0 else disp_s2_b), 2)
                             zone_text = f"{strike_tag} Buy Zone Above S2 ({calc_ep_b:.1f})".strip()
                             plan_buy_zone = f"BUY S2={disp_s2_b:.1f} | T1:{disp_s1_b:.1f} P:{disp_p_b:.1f}"
                             tgts_b = list(st_buy.targets) if st_buy.targets else [disp_s1_b, disp_p_b, disp_r1_b, disp_r2_b, disp_r3_b]
@@ -5227,7 +5270,7 @@ class FeedEngine:
                         disp_r2_s = round(fp_sell.get('R2', opt_piv['R2']), 2)
                         disp_r3_s = round(fp_sell.get('R3', opt_piv['R3']), 2)
 
-                        calc_ep_s = round(st_sell.entry_price if st_sell.entry_price > 0 else (disp_r2_s if disp_r2_s > 1.0 else disp_r1_s), 2)
+                        calc_ep_s = round(st_sell.entry_price if st_sell.entry_price > 0 else st_sell.conf_low if st_sell.conf_low > 0 else (disp_r2_s if disp_r2_s > 1.0 else disp_r1_s), 2)
                         if st_sell.sl > 0:
                             calc_sl_s = round(st_sell.sl, 2)
                         elif st_sell.trade_status in ("Active", "Target 1 Hit", "Target 2 Hit") or "REJECT" in st_sell.state or "CONFIRMED_SELL" in st_sell.state:

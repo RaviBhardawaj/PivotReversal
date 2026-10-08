@@ -1542,7 +1542,7 @@ class LiveOrderManager:
         """Send the entry for a newly recorded forward-test trade (only when auto-trading is ON).
         levels: the strike's pivot levels (R1/R2/S1/S2/P/PN), checked against the strike selection."""
         if not self.engine.auto_trade:
-            return ""
+            return "No order: auto-trading off"
         inst = self.instrument_for(trade)
         inst["levels"] = sorted(levels or [])
         return self.engine.enter(trade, inst)
@@ -1556,6 +1556,9 @@ class LiveOrderManager:
 
     def pop_forced_close(self, trade_id):
         return self.engine.pop_forced_close(trade_id)
+
+    def order_ref(self, trade_id):
+        return self.engine.order_ref(trade_id)
 
 
 # Singleton order manager instance
@@ -1767,6 +1770,10 @@ class ForwardTestTracker:
 
         trade    = self.active_trades[trade_key]
         time_str = datetime.now().strftime('%H:%M:%S')
+        if not self.paper_only and trade.get('Order_ID') == "QUEUED":
+            _ref = live_order_manager.order_ref(trade.get('Trade_ID'))
+            if _ref:
+                trade['Order_ID'] = _ref     # broker order id, or why no order was sent
 
         # A close that already happened at the broker (its SL order filled, the entry was
         # rejected, kill switch, or the position was closed in the broker app) ends this trade now.

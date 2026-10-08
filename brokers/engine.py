@@ -40,7 +40,7 @@ DEFAULT_SETTINGS = {
     "product":           "INTRADAY",
     "sl_at_broker":      True,     # place a stop-loss order at the broker
     "sl_limit_gap_pct":  5.0,      # SL-limit price this far beyond the trigger, so it fills on a gap
-    "take_sell_setups":  False,    # SELL setups short an option (needs margin); off by default
+    "take_sell_setups":  True,     # SELL setups short an option (needs margin); on (AJ, 8 Oct)
     "trade_15m":         True,
     "trade_1h":          True,
     "max_trades":        6,
@@ -182,6 +182,9 @@ class OrderEngine:
             for k, v in saved.items():
                 if k in DEFAULT_SETTINGS:
                     self.settings[k] = v
+            if not saved.get("sell_default_v2"):
+                # SELL setups used to be off by default; from 8 Oct they are traded like BUY setups
+                self.settings["take_sell_setups"] = True
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -195,7 +198,7 @@ class OrderEngine:
             self.settings["lots"] = max(1, min(int(self.settings["lots"]), int(self.settings["max_lots"])))
             tmp = self.settings_file + ".tmp"
             with open(tmp, "w") as f:
-                json.dump(self.settings, f, indent=2)
+                json.dump(dict(self.settings, sell_default_v2=True), f, indent=2)
             os.replace(tmp, self.settings_file)
 
     def _today(self):
@@ -357,6 +360,9 @@ class OrderEngine:
         if why:
             self.skipped[tid] = why
             self.log(f"[ORDERS] No order for {inst.get('tsym')}: {why}")
+            # every setup is recorded: the skipped ones go to the order log / sheet with the reason
+            self._record({"inst": inst}, trade.get("Action", ""), 0, trade.get("Entry_Price", 0),
+                         "-", "NO ORDER", f"{why} | {trade.get('Timeframe', '')}")
             return
         if True:
             lots = self._lots_for(str(trade.get("Timeframe", "")))
@@ -455,6 +461,14 @@ class OrderEngine:
                 sgn = 1 if p["side"] == "BUY" else -1
                 tot += sgn * (p["last_ltp"] - p["entry_px"]) * p["filled"]
         return tot
+
+    def order_ref(self, trade_id):
+        """What the forward-test sheet shows in Order_ID: the broker order id, or why there is none."""
+        p = self.positions.get(trade_id)
+        if p:
+            return p.get("entry_oid") or ""
+        why = self.skipped.get(trade_id)
+        return f"No order: {why}" if why else ""
 
     def order_status_for(self, trade_id):
         p = self.positions.get(trade_id)

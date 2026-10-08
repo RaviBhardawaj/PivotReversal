@@ -50,6 +50,7 @@ When the entry is confirmed:
 3. **Confirmation candle.** A fully closed 5-minute candle, red, below R2, from the sweep candle or later. Its low is the **confirmation low**.
 4. **Retest** of R2 (within 1.5%), holding below HH. A wick into R2 on the confirmation candle counts.
 5. **Entry: break below the confirmation low.** After the retest, LTP trades below the confirmation candle's low, and the **SELL is confirmed** at that low. No chasing: at most 1% below it. Skipped if the low is already at or below T1 (R1).
+- Live SELL orders are on by default, same as BUY (setting "Take SELL setups"). Every setup is recorded in the sheets; one that gets no order shows the reason (Orders sheet row NO ORDER, and the trade's Order_ID).
 
 When the entry is confirmed:
 - **SL** is HH.

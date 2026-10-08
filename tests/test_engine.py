@@ -166,8 +166,13 @@ check(sum(1 for o in b.book.values() if o["iid"] == "444" and o["side"] == "BUY"
 print("4 ok")
 
 # ── 5. limits: SELL skip, timeframe, same contract, max trades ──
+check(eng.settings["take_sell_setups"] is True, "SELL setups on by default")
+eng.settings["take_sell_setups"] = False
 eng.enter(trade("T5", action="SELL"), inst("555")); settle(eng)
-check("T5" not in eng.positions and "SELL" in eng.order_status_for("T5"), "SELL skipped")
+check("T5" not in eng.positions and "SELL" in eng.order_status_for("T5"), "SELL skipped when switched off")
+check(eng.order_ref("T5").startswith("No order: SELL"), "skip reason shown in Order_ID")
+check(any(r["status"] == "NO ORDER" and "SELL setups are off" in r["remark"] for r in eng.recent), "skip written to the order log")
+eng.settings["take_sell_setups"] = True
 eng.save_settings({"trade_1h": False})
 eng.enter(trade("T6", tf="1H Structure"), inst("666")); settle(eng)
 check("T6" not in eng.positions, "1H disabled")

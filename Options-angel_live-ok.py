@@ -184,6 +184,40 @@ def bs_greeks(S, K, T, r, sigma, opt_type):
     except:
         return dict(delta=0,gamma=0,theta=0,vega=0)
 
+ENTRY_BAND_PCT = 0.01   # a trade is taken only within 1% of its entry level (min 0.50)
+
+
+def at_entry_price(ltp: float, entry_px: float, side: str) -> bool:
+    """True when the live price is at the planned entry level: a SELL at or just under its
+    level, a BUY at or just over it. Never chase a price that has already run away."""
+    if ltp <= 0 or entry_px <= 0:
+        return False
+    band = max(entry_px * ENTRY_BAND_PCT, 0.5)
+    if side == "SELL":
+        return entry_px - band <= ltp <= entry_px + 0.05
+    return entry_px - 0.05 <= ltp <= entry_px + band
+
+
+def traded_today_tick(message: dict, ltp: float, prev_ltp: float = 0.0, now: datetime = None) -> bool:
+    """True when this feed tick is a real trade from today's session (09:15 IST onwards).
+    Before the day's first trade the feed repeats yesterday's close and high/low."""
+    now = now or datetime.now()
+    if not is_live_market_open(now) or ltp <= 0:
+        return False
+    ltt = message.get("last_traded_timestamp") or 0
+    try:
+        ltt = float(ltt)
+    except (TypeError, ValueError):
+        ltt = 0
+    if ltt > 0:
+        if ltt > 1e12:            # milliseconds
+            ltt /= 1000.0
+        start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        return datetime.fromtimestamp(ltt) >= start
+    # no trade time in this feed mode: only a price that moved during market hours counts
+    return prev_ltp > 0 and abs(ltp - prev_ltp) > 1e-9
+
+
 def is_live_market_open(dt: datetime = None) -> bool:
     """
     Checks if Indian Equity/Derivatives market (NSE/NFO) is currently in regular live trading hours:
@@ -511,19 +545,28 @@ class StrategyStrikeState:
         self.last_ltp = ltp
 
         # ── 5M candle builder from live ticks ──
-        bucket = (now.minute // 5) * 5
+        # The candle gets the day's high/low only when it moves while this candle is open
+        # (a trade between two ticks); an older day high is not this candle's high.
+        prev_dh, prev_dl = getattr(self, "_seen_day_high", 0.0), getattr(self, "_seen_day_low", 0.0)
+        first_seen = prev_dh <= 0 and prev_dl <= 0
+        opening_candle = (now.hour == 9 and 15 <= now.minute < 20)
+        new_hi = opt_high if (opt_high > 0 and ((prev_dh > 0 and opt_high > prev_dh) or (first_seen and opening_candle))) else 0.0
+        new_lo = opt_low if (opt_low > 0 and ((prev_dl > 0 and opt_low < prev_dl) or (first_seen and opening_candle))) else 0.0
+        if opt_high > 0: self._seen_day_high = max(prev_dh, opt_high)
+        if opt_low > 0:  self._seen_day_low = min(prev_dl, opt_low) if prev_dl > 0 else opt_low
+        bucket = (now.hour * 60 + now.minute) // 5
         c = self.candle_5m
         if c["bucket"] != bucket:
             if c["bucket"] != -1 and c["close"] > 0:
                 self._prev_candle = dict(c)
             c["open"]   = ltp
-            c["high"]   = max(ltp, opt_high) if opt_high > 0 else ltp
-            c["low"]    = min(ltp, opt_low) if opt_low > 0 else ltp
+            c["high"]   = max(ltp, new_hi)
+            c["low"]    = min(ltp, new_lo) if new_lo > 0 else ltp
             c["close"]  = ltp
             c["bucket"] = bucket
         else:
-            c["high"]  = max(c["high"], ltp)
-            c["low"]   = min(c["low"], ltp) if c["low"] > 0 else ltp
+            c["high"]  = max(c["high"], ltp, new_hi)
+            c["low"]   = min([x for x in (c["low"], ltp, new_lo) if x > 0])
             c["close"] = ltp
 
         closed = getattr(self, "_prev_candle", None)
@@ -683,6 +726,12 @@ class StrategyStrikeState:
             elif self.state == "TRADING_IN_FAVOR_BUY":
                 # Step 4: Price bounces and trades in favour (moves above support level and above retest low)
                 start_favor = (ltp > fs_sup and (self.retest_low == 0 or ltp >= self.retest_low + max(fs_sup * 0.002, 0.2)))
+                _fp0 = self.frozen_pivots if self.frozen_pivots else pivots
+                _ep0 = round(_fp0.get(active_lvl, fs_sup), 2)
+                if start_favor and not at_entry_price(ltp, _ep0, "BUY"):
+                    # price has run away from the entry level: no chasing; wait for it to come back
+                    self.signal = f"★ {self.opt_type} {active_lvl} Reclaimed — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
+                    start_favor = False
                 if start_favor:
                     # Step 5: ENTRY IS CONFIRMED!
                     self.state         = "CONFIRMED_BUY"
@@ -810,6 +859,12 @@ class StrategyStrikeState:
             elif self.state == "TRADING_IN_FAVOR_SELL":
                 # Step 4: Price drops and trades in favour (moves below R2 and below retest high)
                 start_favor = (ltp < fr2 and (self.retest_high == 0 or ltp <= self.retest_high - max(fr2 * 0.002, 0.2)))
+                _fp0 = self.frozen_pivots if self.frozen_pivots else pivots
+                _ep0 = round(_fp0.get('R2', fr2), 2)
+                if start_favor and not at_entry_price(ltp, _ep0, "SELL"):
+                    # price has run away from the entry level: no chasing; wait for it to come back
+                    self.signal = f"▼ {self.opt_type} R2 Rejected — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
+                    start_favor = False
                 if start_favor:
                     # Step 5: ENTRY IS CONFIRMED!
                     self.state         = "CONFIRMED_SELL"
@@ -855,6 +910,9 @@ class StrategyStrikeState:
                 confirmed = (has_closed_candle and
                              closed["close"] <= fr1 and
                              closed["close"] <= closed["open"]) or (not has_closed_candle and ltp <= fr1)
+                _fp0 = self.frozen_pivots if self.frozen_pivots else pivots
+                if confirmed and not at_entry_price(ltp, round(_fp0.get('R1', fr1), 2), "SELL"):
+                    confirmed = False
                 if confirmed:
                     self.state        = "CONFIRMED_SELL"
                     self.trigger_level = "R1"
@@ -3599,7 +3657,26 @@ class FeedEngine:
             r_close = close if close>0 else curr.get("close", ltp)
             r_open  = open_p if open_p>0 else curr.get("open", ltp)
 
+            # Today's traded range, used by the setups. Before the first trade of the day the
+            # feed still carries yesterday's close and high/low; those must never count as a
+            # sweep or an entry. A tick counts only when the exchange says its last trade was
+            # today after 09:15 (or, if the feed gives no trade time, when the price has moved
+            # during market hours).
+            today_s = datetime.now().strftime("%Y-%m-%d")
+            if curr.get("s_date") != today_s:
+                s_live, s_high, s_low = False, 0.0, 0.0
+            else:
+                s_live, s_high, s_low = curr.get("s_live", False), curr.get("s_high", 0.0), curr.get("s_low", 0.0)
+            traded_now = traded_today_tick(message, ltp, curr.get("ltp", 0) if curr.get("s_date") == today_s else 0)
+            if traded_now and ltp > 0:
+                hi_c = [ltp] + ([high] if high > 0 else []) + ([s_high] if s_high > 0 else [])
+                lo_c = [ltp] + ([low] if low > 0 else []) + ([s_low] if s_low > 0 else [])
+                s_high, s_low, s_live = max(hi_c), min(lo_c), True
+            elif s_live and ltp > 0:
+                s_high, s_low = max(s_high, ltp), min(s_low, ltp) if s_low > 0 else ltp
+
             self.live_data[token] = {
+                "s_date": today_s, "s_live": s_live, "s_high": s_high, "s_low": s_low,
                 "ltp":   ltp,
                 "oi":    oi,
                 "vol":   vol,
@@ -4755,8 +4832,16 @@ class FeedEngine:
                             self.strategy_states[(opt_type, strike)] = self.strategy_states[legacy_key]
 
                     now_tick = datetime.now()
-                    st_buy.update_tick(ltp, opt_piv, now_tick, opt_high=opt_high, opt_low=opt_low)
-                    st_sell.update_tick(ltp, opt_piv, now_tick, opt_high=opt_high, opt_low=opt_low)
+                    # Setups move only on real trades from today's session, with today's
+                    # traded high/low. Yesterday's close/high (what the feed shows before the
+                    # first trade, or the saved candle) must never look like a sweep.
+                    live_tick = bool(token in snapshot and d.get("s_live")
+                                     and d.get("s_date") == now_tick.strftime("%Y-%m-%d"))
+                    if live_tick:
+                        sm_high = d.get("s_high", 0) or ltp
+                        sm_low  = d.get("s_low", 0) or ltp
+                        st_buy.update_tick(ltp, opt_piv, now_tick, opt_high=sm_high, opt_low=sm_low)
+                        st_sell.update_tick(ltp, opt_piv, now_tick, opt_high=sm_high, opt_low=sm_low)
 
                     # Check support reclaim (BUY) and resistance rejection (SELL) entries
                     buy_entry     = check_option_entry(ltp, opt_piv, opt_type,
@@ -4808,7 +4893,8 @@ class FeedEngine:
 
                     # ── Evaluate SELL Entry ──
                     fp_sell = getattr(st_sell, "frozen_pivots", None) or opt_piv
-                    if sell_entry["entry"] and mkt_open and is_focus_strike:
+                    if (sell_entry["entry"] and mkt_open and is_focus_strike and live_tick
+                            and at_entry_price(ltp, st_sell.entry_price, "SELL")):
                         in_sell_zone = (fp_sell["S2"] * 0.95 <= ltp <= fp_sell["R2"] * 1.05)
                         if in_sell_zone:
                             lvl = st_sell.trigger_level
@@ -4843,7 +4929,8 @@ class FeedEngine:
 
                     # ── Evaluate BUY Entry ──
                     fp_buy = getattr(st_buy, "frozen_pivots", None) or opt_piv
-                    if buy_entry["entry"] and mkt_open and is_focus_strike:
+                    if (buy_entry["entry"] and mkt_open and is_focus_strike and live_tick
+                            and at_entry_price(ltp, st_buy.entry_price, "BUY")):
                         in_buy_zone = (fp_buy["S2"] * 0.95 <= ltp <= fp_buy["R2"] * 1.05)
                         if in_buy_zone:
                             lvl = st_buy.trigger_level
@@ -4929,7 +5016,9 @@ class FeedEngine:
                         signal_sell = f"▼ SELL {opt_type} [Entry@{_s_lvl}:{_s_ep:.1f} | HH SL]"
 
                     # Update forward test tick tracking for target/SL exit
-                    closed_t = self.forward_tracker.update_tick(opt_type, strike, ltp, expiry=exp, symbol=symbol)
+                    # (only real trades from today can hit a target or SL)
+                    closed_t = (self.forward_tracker.update_tick(opt_type, strike, ltp, expiry=exp, symbol=symbol)
+                                if live_tick else None)
                     if closed_t:
                         self.alert_mgr.send_exit_alert(closed_t)
                         # Keep the setup state machine in step with the tracker: the trade is over,

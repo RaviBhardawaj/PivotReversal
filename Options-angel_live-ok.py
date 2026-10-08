@@ -5618,7 +5618,7 @@ class DarkButton(tk.Label):
 DASH_FILTER_GROUPS = [
     ("Side",  [("BUY", "🟢 Buy"), ("SELL", "🔴 Sell")]),
     ("Type",  [("CE", "CE"), ("PE", "PE")]),
-    ("TF",    [("15M", "⭐ 15M"), ("1H", "⏳ 1H")]),
+    ("TF",    [("15M", "⭐ 15M only"), ("1H", "⏳ 1H only"), ("BOTH", "⭐⏳ 15M + 1H")]),
     ("Level", [("RS", "R/S strikes"), ("P", "🔷 P strike"), ("PN", "Next to P")]),
     ("State", [("WAIT", "Waiting"), ("SETUP", "⚡ Setup forming"), ("TRADE", "🟢 In trade"), ("DONE", "Closed")]),
 ]
@@ -5649,7 +5649,9 @@ def dash_row_flags(w: dict, ce_15m, pe_15m, ce_1h, pe_1h, p_15m, p_1h, p_exact=N
     return {
         "Side": {w.get("side", "BUY")},
         "Type": {ot},
-        "TF": ({"15M"} if (rs_15 or p15) else set()) | ({"1H"} if (rs_1h or p1h) else set()),
+        # each strike sits in exactly one TF box: 15M only, 1H only, or both (never mixed in)
+        "TF": ({"BOTH"} if ((rs_15 or p15) and (rs_1h or p1h))
+               else {"15M"} if (rs_15 or p15) else {"1H"} if (rs_1h or p1h) else set()),
         "Level": ({"RS"} if (rs_15 or rs_1h) else set())
                  | ({"P"} if is_exact_p else set())
                  | ({"PN"} if ((p15 or p1h) and not is_exact_p) else set()),

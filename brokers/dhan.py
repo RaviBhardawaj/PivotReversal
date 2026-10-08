@@ -142,6 +142,39 @@ class DhanAdapter(BrokerAdapter):
                 continue
         return out
 
+    def intraday_day_ohlc(self, security_id, day, segment="NSE_FNO", instrument="OPTIDX"):
+        """One session's OHLC rebuilt from Dhan's 1-minute candles (09:15-15:30 IST trades only):
+        (open, high, low, close, last_bar_time) or None when there is no data."""
+        body = {"securityId": str(security_id), "exchangeSegment": segment, "instrument": instrument,
+                "interval": "1", "oi": False,
+                "fromDate": f"{day} 09:15:00", "toDate": f"{day} 15:31:00"}
+        try:
+            r = self._http.post(API + "/charts/intraday", json=body, headers=self._headers(), timeout=20)
+        except Exception as e:
+            raise BrokerError(f"Dhan intraday network error: {type(e).__name__}")
+        try:
+            d = r.json() if r.content else {}
+        except Exception:
+            d = {}
+        if not (200 <= r.status_code < 300):
+            raise BrokerError(f"Dhan intraday error {d.get('errorCode', r.status_code)}: "
+                              f"{d.get('errorMessage') or d.get('remarks') or r.text[:200]}")
+        ts, o, h, l, c = (d.get(k) or [] for k in ("timestamp", "open", "high", "low", "close"))
+        ist = timezone(timedelta(hours=5, minutes=30))
+        bars = []
+        for i in range(min(len(ts), len(o), len(h), len(l), len(c))):
+            try:
+                t = datetime.fromtimestamp(float(ts[i]), ist)
+            except Exception:
+                continue
+            if t.strftime("%Y-%m-%d") == day and "09:15" <= t.strftime("%H:%M") <= "15:29":
+                bars.append((t, float(o[i]), float(h[i]), float(l[i]), float(c[i])))
+        if not bars:
+            return None
+        bars.sort()
+        return (bars[0][1], max(b[2] for b in bars), min(b[3] for b in bars), bars[-1][4],
+                bars[-1][0].strftime("%H:%M"))
+
     # ── instruments ─────────────────────────────────────────
     def _load_index(self):
         if self._index is not None:

@@ -408,9 +408,11 @@
     if (state.strikeFilter === 'FOCUS') {
       filtered = filtered.filter(w => Boolean(w.is_15m || w.is_1h));
     } else if (state.strikeFilter === '15M') {
-      filtered = filtered.filter(w => Boolean(w.is_15m));
+      filtered = filtered.filter(w => Boolean(w.is_15m) && !w.is_1h);
     } else if (state.strikeFilter === '1H') {
-      filtered = filtered.filter(w => Boolean(w.is_1h));
+      filtered = filtered.filter(w => Boolean(w.is_1h) && !w.is_15m);
+    } else if (state.strikeFilter === 'BOTH') {
+      filtered = filtered.filter(w => Boolean(w.is_15m) && Boolean(w.is_1h));
     } else if (state.strikeFilter === 'BUY_ONLY') {
       filtered = filtered.filter(w => w.side === 'BUY');
     } else if (state.strikeFilter === 'SELL_ONLY') {
@@ -418,7 +420,7 @@
     }
 
     if (filtered.length === 0) {
-      const lbl = state.strikeFilter === '15M' ? '15M Intraday' : (state.strikeFilter === '1H' ? '1H Structure' : 'Filter');
+      const lbl = state.strikeFilter === '15M' ? '15M only' : (state.strikeFilter === '1H' ? '1H only' : (state.strikeFilter === 'BOTH' ? '15M + 1H' : 'Filter'));
       els.tbodyOptionChain.innerHTML = `<tr><td colspan="14" class="empty-state">No strikes currently matched for <strong>${state.symbol}</strong> in <strong>${lbl}</strong>. Click Start Scanner or select ALL strikes to inspect full ladder.</td></tr>`;
       return;
     }
@@ -589,8 +591,13 @@
 
     function matchTf(timeframeStr, filterVal) {
       if (!filterVal || filterVal === 'ALL') return true;
+      // each trade is in exactly one box: 15M only, 1H only, or both ("15M / 1H")
       const tf = String(timeframeStr || '').toUpperCase();
       const f = String(filterVal).toUpperCase();
+      const has15 = tf.includes('15M'), has1h = tf.includes('1H');
+      if (f === 'BOTH') return has15 && has1h;
+      if (f === '15M') return has15 && !has1h;
+      if (f === '1H') return has1h && !has15;
       return tf.includes(f);
     }
 

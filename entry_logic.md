@@ -1,4 +1,4 @@
-# Pivot Reversal: entry and exit logic (as coded, 7 Oct 2026)
+# Pivot Reversal: entry and exit logic (as coded, 8 Oct 2026)
 
 Source: `Options-angel_live-ok.py`. `StrategyStrikeState` runs the state machine, the main feed loop handles entry and alerts, and `ForwardTestTracker` handles exits.
 
@@ -9,9 +9,13 @@ Source: `Options-angel_live-ok.py`. `StrategyStrikeState` runs the state machine
   - P zone: the strike below and above P, traded on both CE and PE.
 - A strike that isn't in a 15M or 1H set gets an empty `trade_tf`. It is never entered, recorded or alerted.
 - Entries happen only in the live market (09:15–15:30).
+- Setups, entries and exits only use **real trades from today** (exchange trade time 09:15 or later) with today's traded high/low. Before the first trade of the day the feed still shows yesterday's close and high/low; those are ignored.
 
 ## 2. Option levels for each strike
 - Fib pivots come from the option's **previous-day** candle: P, S1–S3, R1–R3.
+  - The candle must be of exactly the expected trading day; an older candle is never used.
+  - Dhan's daily candle first (Angel as backup). If the daily candle isn't published yet, the day is rebuilt from Dhan's 1-minute candles and replaced by the official candle later.
+  - From 15:35 (and at weekends/holidays) every strike shows the **next** session's levels, built from the day that just closed.
 - They are fixed for the whole session. New ones are never derived from today's running high/low.
 - **Level lock:** a strike keeps the levels it first saw. They change only if the strike's levels actually change.
   - If that happens while a trade is open, the trade keeps its entry, SL and targets until it exits.
@@ -30,7 +34,8 @@ The buy level is S2, or S1 when S2 ≤ 0.05.
    - **Entry is confirmed** and the state becomes `CONFIRMED_BUY`.
 
 When the entry is confirmed:
-- **Entry price** recorded in the forward test is the **live LTP** at that moment.
+- **At the entry level only.** The live price must be at the level: S2 (or S1) up to 1% above it (min 0.50). If price has already moved further away, the app does not chase; it waits for price to come back to the level.
+- **Entry price** recorded in the forward test is the **live LTP** at that moment (so within 1% of the level).
 - **SL** is LL. Fallbacks, in order: the day low, then S3 (or S2 for an S1 entry), then entry minus 10%.
 - **Targets:**
   - From S2: S1, P, R1, R2, R3.
@@ -41,7 +46,7 @@ When the entry is confirmed:
 2. **Rejection.** LTP drops back below R2.
 3. **Candle close.** A completed 5-minute candle closes red, below R2.
 4. **Retest** of R2, holding below HH.
-5. **Push down.** Price moves lower from there, and the **SELL is confirmed**.
+5. **Push down.** Price moves lower from there, and the **SELL is confirmed**, only while the price is at R2 or up to 1% below it (no chasing).
 
 When the entry is confirmed:
 - **SL** is HH.

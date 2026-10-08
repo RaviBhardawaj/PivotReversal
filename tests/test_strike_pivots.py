@@ -42,7 +42,7 @@ app.Session.auth_token=app.Session.feed_token="x"
 mtf={"15-Min":app.calc_fib_pivots(22821.8,22597.1,22755.75),"1-Hour":app.calc_fib_pivots(23009.3,22417.65,22976.1),"Daily":{"C":22750}}
 app.get_tv_multi_timeframe_pivots=lambda sym,force_refresh=False: mtf
 
-DAYS=["2026-10-01","2026-10-05","2026-10-06","2026-10-07","2026-10-08","2026-10-09"]
+DAYS=["2026-10-01","2026-10-05","2026-10-06","2026-10-07","2026-10-08","2026-10-09","2026-10-12"]
 def candle(t,d,bump=0):
     exp,k,ot=meta[t]; base=(abs(22750-k)/7+40)*(1.3 if exp=="20OCT2026" else 1)+DAYS.index(d)*3.17+bump
     return [d+"T00:00:00+05:30", round(base,2), round(base*1.21,2), round(base*0.83,2), round(base*1.04,2), 1000]
@@ -98,24 +98,27 @@ n=f.fetch_and_map_all_strikes("NIFTY",None,force_fetch=True,mode="next")
 for t,s in n.items(): check(s,t,"2026-10-08")
 assert all(f.strike_pivots[t]==before[t] for t in m)
 nj=json.load(open(app.STRIKE_PIVOT_NEXT_CACHE)); assert nj["date"]=="2026-10-09"
-r=f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
-for t,s in r.items(): check(s,t,"2026-10-07")
-print("D after close: dashboard still = TradingView today; next file for",nj["date"])
-# E) Saturday: TradingView shows Friday 9 Oct, built from Thu 8 Oct
-FakeDT.v=datetime(2026,10,10,10,0)
-assert app.pivot_session_date().isoformat()=="2026-10-09"
-f.strike_pivots.clear()
+FakeDT.v=datetime(2026,10,8,15,34); assert app.pivot_session_date().isoformat()=="2026-10-08"
+FakeDT.v=datetime(2026,10,8,15,45); assert app.pivot_session_date().isoformat()=="2026-10-09"
 r=f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
 for t,s in r.items(): check(s,t,"2026-10-08")
+assert json.load(open(app.STRIKE_PIVOT_CACHE))["basis_key"]=="2026-10-09:session"
+print("D after close: dashboard moves to the 9 Oct levels from today's 8 Oct candle; next file for",nj["date"])
+# E) Saturday: Monday 12 Oct's levels, built from Fri 9 Oct
+FakeDT.v=datetime(2026,10,10,10,0)
+assert app.pivot_session_date().isoformat()=="2026-10-12"
+f.strike_pivots.clear()
+r=f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+for t,s in r.items(): check(s,t,"2026-10-09")
 print("E weekend: OK")
 # F) a strike without data gets NO levels (nothing made up) and is filled on retry
-FakeDT.v=datetime(2026,10,12,8,0); f.strike_pivots.clear()
+FakeDT.v=datetime(2026,10,13,8,0); f.strike_pivots.clear()
 gone=list(m)[0]; state["empty"]={gone}
 r=f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
 assert gone not in r and gone not in f.strike_pivots and gone in f._pivot_jobs[("NIFTY","13OCT2026")]
 state["empty"]=set()
 r=f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=False)
-check(f.strike_pivots[gone],gone,"2026-10-09"); assert not f._pivot_jobs[("NIFTY","13OCT2026")]
+check(f.strike_pivots[gone],gone,"2026-10-12"); assert not f._pivot_jobs[("NIFTY","13OCT2026")]
 print("F missing strike retried: OK")
 # G) load_or_fetch on restart uses cache, with exact expiry keys
 g=app.FeedEngine(); g._start_pivot_watchdog=lambda: None
@@ -158,4 +161,41 @@ app._DHAN_DATA["ad"] = BadDhan(); app._SRC_DOWN.update(Dhan=0.0, Angel=0.0); f.s
 r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
 assert r and all(s["source"] == "Angel" and s["cross_check"] == "NOT CHECKED" for s in r.values())
 print("K Dhan down, Angel backup: OK (Dhan asked", BadDhan.n, "times)")
+# L) the source has not published today's daily candle yet -> rebuilt from 1-minute candles,
+#    never an older day's candle; later the official candle replaces it
+class LateDhan(FakeDhan):
+    def __init__(s, publish=False, holiday=None): super().__init__(); s.publish = publish; s.holiday = holiday or set(); s.min1 = []
+    def daily_candles(s, sid, seg, instrument, now=None):
+        rows = super().daily_candles(sid, seg, instrument, now)
+        return rows if s.publish else [r for r in rows if r[0] != FakeDT.v.strftime("%Y-%m-%d")]
+    def intraday_day_ohlc(s, sid, day, seg="NSE_FNO", instrument="OPTIDX"):
+        s.min1.append((sid, day))
+        if day in s.holiday: return None
+        c = candle(sid, day); return (c[1], c[2], c[3], c[4], "15:29")
+app._SRC_DOWN.update(Dhan=0.0, Angel=0.0); state["empty"] = set(t for t in meta)   # Angel has nothing
+ld = LateDhan(); app._DHAN_DATA["ad"] = ld
+FakeDT.v = datetime(2026,10,9,15,40); f.strike_pivots.clear()
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+assert r and all(s["source"] == "Dhan 1-min" and s["candle_date"] == "2026-10-09" for s in r.values())
+for t,s in r.items(): check(s,t,"2026-10-09")
+assert all(d == "2026-10-09" for _, d in ld.min1)
+ld.publish = True
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+assert all(s["source"] == "Dhan" for s in r.values())
+print("L daily candle late: rebuilt from 1-minute data, then official candle: OK")
+# M) a weekday holiday (no trades at all) is skipped to the day before
+app._DHAN_DATA["ad"] = LateDhan(holiday={"2026-10-09"}); app._SRC_DOWN.update(Dhan=0.0, Angel=0.0)
+FakeDT.v = datetime(2026,10,9,16,0); f.strike_pivots.clear()
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+for t,s in r.items(): check(s,t,"2026-10-08")
+print("M holiday: previous trading day's candle: OK")
+# N) 1-minute data unreachable -> no levels (retried), never yesterday's candle
+class DownMin(LateDhan):
+    def intraday_day_ohlc(s, *a, **k): raise RuntimeError("network")
+app._DHAN_DATA["ad"] = DownMin(); app._SRC_DOWN.update(Dhan=0.0, Angel=0.0)
+f.strike_pivots.clear()
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+assert not any(t in f.strike_pivots for t in m) and f._pivot_jobs[("NIFTY","13OCT2026")]
+print("N no data: strikes wait, nothing stale used: OK")
+state["empty"] = set()
 print("STRIKE PIVOT TESTS PASSED")

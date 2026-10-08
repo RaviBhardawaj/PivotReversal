@@ -2814,30 +2814,53 @@ _ANGEL_RELOGIN_AT = 0.0      # when the app last logged in again because Angel r
 _ANGEL_RATE_ERRORS = ("AB1004", "AB1019", "EXCEEDING ACCESS RATE", "TOO MANY REQUESTS")
 
 
+LEVELS_ROLL_TIME = dt_time(15, 35)   # after this the app shows the next session's levels
+
+
 def pivot_session_date(now: datetime = None) -> date:
-    """The session whose daily pivots TradingView draws now: today on a weekday, otherwise the
-    last weekday. Its levels come from the completed daily candle before it."""
-    d = (now or datetime.now()).date()
+    """The session the strike levels are for. During the trading day (until 15:35 on a weekday)
+    that is today; after the close, at the weekend or on a holiday it is the next weekday, so
+    every strike already shows the levels built from the day that just closed."""
+    now = now or datetime.now()
+    d = now.date()
+    if d.weekday() < 5 and now.time() < LEVELS_ROLL_TIME:
+        return d
+    d += timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
+def prev_weekday(d: date) -> date:
+    d -= timedelta(days=1)
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
 
 
-def pick_pivot_candle(rows, mode: str = "session", now: datetime = None):
-    """From daily candles [(YYYY-MM-DD, o, h, l, c), ...] pick the one the levels are built from:
-    session -> the last candle before pivot_session_date (what TradingView uses today);
-    next    -> the last completed candle up to today (only after 15:30 or at the weekend)."""
+def expected_candle_day(mode: str = "session", now: datetime = None) -> date:
+    """The trading day whose candle the levels must come from: the weekday before the session
+    (pivot_session_date) for "session"; today (last weekday at the weekend) for "next"."""
     now = now or datetime.now()
     if mode == "next":
-        if now.weekday() < 5 and now.time() < dt_time(15, 30):
-            return None
-        limit = now.date().isoformat()
-        rows = [r for r in rows if r[0] <= limit]
-    else:
-        limit = pivot_session_date(now).isoformat()
-        rows = [r for r in rows if r[0] < limit]
-    rows = [r for r in rows if r[2] > 0 and r[3] > 0 and r[4] > 0]
-    return sorted(rows)[-1] if rows else None
+        d = now.date()
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d
+    return prev_weekday(pivot_session_date(now))
+
+
+def pick_pivot_candle(rows, mode: str = "session", now: datetime = None, day: date = None):
+    """From daily candles [(YYYY-MM-DD, o, h, l, c), ...] pick the candle of exactly the expected
+    trading day (expected_candle_day). An older candle is never used in its place: when the
+    source has not published that day yet the result is None and the caller rebuilds the day
+    from 1-minute candles."""
+    now = now or datetime.now()
+    if mode == "next" and now.weekday() < 5 and now.time() < dt_time(15, 30):
+        return None
+    want = (day or expected_candle_day(mode, now)).isoformat()
+    rows = [r for r in rows if r[0] == want and r[2] > 0 and r[3] > 0 and r[4] > 0]
+    return rows[-1] if rows else None
 
 
 def angel_daily_candles(exch: str, token: str, days: int = 20, now: datetime = None) -> list:
@@ -2923,6 +2946,45 @@ def dhan_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now: d
         if any(k in str(e).upper() for k in ("DH-901", "DH-902", " 401", "INVALID", "EXPIRED")):
             st["ad"] = None          # token no longer valid: log in again on the next call
         raise
+
+
+def dhan_intraday_day(exch: str, token: str, day: date, instrument: str = "OPTIDX"):
+    """One trading day's candle rebuilt from Dhan's 1-minute candles (09:15-15:30 trades):
+    (YYYY-MM-DD, o, h, l, c), or None when the contract did not trade that day."""
+    from brokers.dhan import _SEG
+    dhan_daily_candles(exch, token, instrument)          # makes sure the Dhan login is up
+    m = _DHAN_DATA["ad"].intraday_day_ohlc(token, day.isoformat(), _SEG.get(exch, "NSE_FNO"), instrument)
+    if not m:
+        return None
+    return (day.isoformat(), m[0], m[1], m[2], m[3])
+
+
+def official_strike_candle(exch: str, token: str, instrument: str, mode: str, now: datetime):
+    """The candle a strike's levels are built from, always of the expected trading day:
+    the official daily candle when the source has it, otherwise the same day rebuilt from
+    Dhan's 1-minute candles (the daily candle is often published late in the evening).
+    A weekday with no trades at all (exchange holiday) is skipped back to the day before.
+    Returns (candle, source, day) or (None, reason, day)."""
+    day = expected_candle_day(mode, now)
+    rows, src = [], ""
+    try:
+        rows, src = strike_daily_candles(exch, token, instrument, now=now)
+    except Exception as e:
+        src = f"daily candles unavailable ({e})"
+    for _ in range(6):
+        c = pick_pivot_candle(rows, mode, now, day=day)
+        if c:
+            return c, src, day
+        if mode == "next" and now.weekday() < 5 and now.time() < dt_time(15, 30):
+            return None, "today's candle is not complete yet", day
+        try:
+            c = dhan_intraday_day(exch, token, day, instrument)
+        except Exception as e:
+            return None, f"no candle for {day} yet ({e})", day
+        if c:
+            return c, "Dhan 1-min", day
+        day = prev_weekday(day)                       # no trades that day: market holiday
+    return None, "no candle found", day
 
 
 LEVEL_SOURCES = {"DHAN": "Dhan (Angel backup)", "ANGEL": "Angel (Dhan backup)"}
@@ -3402,6 +3464,16 @@ class FeedEngine:
                         for (sym, exp) in jobs:
                             self.fetch_and_map_all_strikes(sym, exp, force_fetch=True)
                         continue
+                    if not in_session and time.time() - getattr(self, "_last_1min_refresh", 0) > 900:
+                        with self.lock:
+                            rebuilt = any(isinstance(v, dict) and v.get("source") == "Dhan 1-min"
+                                          for v in self.strike_pivots.values())
+                        if rebuilt:
+                            self._last_1min_refresh = time.time()
+                            print("[STRIKE PIVOTS] Checking whether the official daily candle is out for levels built from 1-minute candles")
+                            for (sym, exp) in jobs:
+                                self.fetch_and_map_all_strikes(sym, exp, force_fetch=True)
+                            continue
                     for (sym, exp), miss in jobs.items():
                         if miss:
                             print(f"[STRIKE PIVOTS] Retrying {len(miss)} strike(s) without levels ({sym} {exp})")
@@ -3478,6 +3550,11 @@ class FeedEngine:
 
             if not target_strike_set:
                 target_strike_set = {atm - 2*step, atm - step, atm, atm + step, atm + 2*step}
+            # every strike on the dashboard for this expiry gets its levels too (also after the
+            # close, when the 15M/1H focus moves to the next day's strikes)
+            for _m in list(getattr(self, "token_to_meta", {}).values()):
+                if _m.get("expiry") == target_expiry and _m.get("strike"):
+                    target_strike_set.add(int(_m["strike"]))
 
             focus_df = sub[sub['strike_int'].isin(target_strike_set)].copy()
             if focus_df.empty:
@@ -3546,13 +3623,13 @@ class FeedEngine:
             for tok in fetch_tokens:
                 m = meta_map[tok]
                 try:
-                    rows, src = strike_daily_candles(exch, tok, m.get('itype', 'OPTIDX'), now=_now)
-                    cndl = pick_pivot_candle(rows, mode, _now)
+                    cndl, src, _cday = official_strike_candle(exch, tok, m.get('itype', 'OPTIDX'), mode, _now)
                     if not cndl:
-                        failed[tok] = "no completed daily candle yet"
+                        failed[tok] = src
                     else:
                         c_date, _o, h, l, c = cndl
-                        chk, chk_note = cross_check_candle(exch, tok, m.get('itype', 'OPTIDX'), src, cndl, mode, _now)
+                        chk, chk_note = (cross_check_candle(exch, tok, m.get('itype', 'OPTIDX'), src, cndl, mode, _now)
+                                         if src in ("Dhan", "Angel") else ("NOT CHECKED", "rebuilt from 1-minute candles"))
                         if chk == "MISMATCH":
                             print(f"[STRIKE MAPPER] ⚠️ {m['strike']} {m['opt_type']} {target_expiry} candle {c_date}: "
                                   f"Dhan and Angel differ ({chk_note}) — levels use {src}")

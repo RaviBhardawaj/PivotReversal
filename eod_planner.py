@@ -199,7 +199,10 @@ def map_strike_pivots_for_symbol(symbol=SYMBOL, n_strikes=12):
         if now.weekday() < 5 and now.hour * 60 + now.minute < 15 * 60 + 30:
             print("[STRIKE PLAN] Today's candle is not complete before 15:30 — strike levels skipped")
             return {}
-        today_s = now.strftime("%Y-%m-%d")
+        _d = now.date()
+        while _d.weekday() >= 5:
+            _d -= timedelta(days=1)
+        today_s = _d.strftime("%Y-%m-%d")      # only this day's candle; never an older one
         mapped_pivots, failed = {}, 0
         for tok in tokens:
             m = meta_map[tok]
@@ -210,7 +213,7 @@ def map_strike_pivots_for_symbol(symbol=SYMBOL, n_strikes=12):
                                           "fromdate": (now - timedelta(days=20)).strftime("%Y-%m-%d 09:15"),
                                           "todate": now.strftime("%Y-%m-%d %H:%M")})
                     if r and r.get("status") and isinstance(r.get("data"), list):
-                        rows = [x for x in r["data"] if str(x[0])[:10] <= today_s and float(x[2]) > 0 and float(x[3]) > 0 and float(x[4]) > 0]
+                        rows = [x for x in r["data"] if str(x[0])[:10] == today_s and float(x[2]) > 0 and float(x[3]) > 0 and float(x[4]) > 0]
                         break
                 except Exception:
                     pass

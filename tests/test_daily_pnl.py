@@ -24,6 +24,15 @@ assert d8==["2026-10-08",2,1,1,6.0,1,1,0,6.5,3,66.7,12.5,0.0,12.5], d8
 assert tot==["ALL DAYS",3,2,1,9.0,2,1,1,-13.5,5,60.0,-4.5,5.5,-4.5], tot
 print("A BUY / SELL points per date, cumulative, totals: OK")
 
+# B. separate BUY and SELL sheets: open trades first (live price), then closed newest first
+full=[dict(r,Entry_Price=100,SL=90,Target_1=130,Trade_High=104,Trade_Low=95,Exit_Price=100+r["PnL_Pts"],Entry_Time="10:00:00",Exit_Reason="SL Hit") for r in rows]
+live=[{"Date":"2026-10-09","Action":"SELL","Entry_Price":200,"SL":220,"Current_Price":195,"PnL_Pts":5,"Trade_High":201,"Trade_Low":194}]
+b=app.side_trades_table(full,"BUY",live); sl=app.side_trades_table(full,"SELL",live)
+assert len(b)==3 and all(len(r)==len(app.SIDE_SHEET_HEADERS) for r in b+sl)
+assert [r[0] for r in b]==["2026-10-09","2026-10-08","2026-10-08"] and b[0][14]==3 and b[0][10]==4.0
+assert sl[0][15]=="ACTIVE" and sl[0][11]==195 and sl[0][10]==6.0 and [r[15] for r in sl]==["ACTIVE","CLOSED","CLOSED"]
+print("B BUY and SELL trade tabs: OK")
+
 if len(sys.argv)>1:
     real=list(csv.DictReader(open(sys.argv[1])))
     for r in [H]+app.daily_pnl_table(real): print(r)

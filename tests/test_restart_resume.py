@@ -70,6 +70,8 @@ print("E second restart: remaining SELL restored, today's closed trades kept: OK
 
 # next morning: yesterday's leftovers are not restored
 FakeDT.v=datetime(2026,10,12,9,20)
-d=tracker(); assert d.get_active_trades()==[] and rows()[t3["Trade_ID"]]["Status"]=="ABANDONED"
-print("F a new day starts clean (yesterday's leftover marked ABANDONED): OK")
+d=tracker(); r3=rows()[t3["Trade_ID"]]
+assert d.get_active_trades()==[] and r3["Status"]=="CLOSED" and r3["Exit_Time"]=="15:00:00" and "last LTP" in r3["Exit_Reason"], r3
+assert float(r3["Exit_Price"])==332.35 and float(r3["PnL_Pts"])==0.0
+print("F app off at 3 PM: the open SELL is closed at its last LTP, so the day adds up: OK")
 print("RESTART RESUME TESTS PASSED")

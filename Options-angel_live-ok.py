@@ -1676,6 +1676,36 @@ def daily_pnl_table(closed_rows, active_trades=None) -> list:
     return out
 
 
+SIDE_SHEET_HEADERS = ['Date', 'Entry_Time', 'Timeframe', 'Symbol', 'Type', 'Strike', 'Entry', 'SL', 'T1',
+                      'Risk (Pts)', 'Best Move For Us (Pts)', 'Exit / 3PM LTP', 'Exit_Time', 'Exit Reason',
+                      'PnL (Pts)', 'Status']
+
+
+def side_trades_table(rows, side: str, active_trades=None) -> list:
+    """All BUY (or SELL) forward-test trades, newest first: open ones first (live price), then
+    closed ones. Trades still open at 3 PM are closed at the 3 PM LTP and show it here."""
+    out = []
+    def _row(r, live=False):
+        e, sl = _safe_float(r.get('Entry_Price', 0)), _safe_float(r.get('SL', 0))
+        hi, lo = _safe_float(r.get('Trade_High', e)), _safe_float(r.get('Trade_Low', e))
+        best = (hi - e) if side == 'BUY' else (e - lo)
+        px = _safe_float(r.get('Current_Price', e)) if live else _safe_float(r.get('Exit_Price', 0))
+        return [r.get('Date', ''), r.get('Entry_Time', ''), r.get('Timeframe', ''), r.get('Symbol', ''),
+                r.get('Type', ''), r.get('Strike', ''), round(e, 2), round(sl, 2),
+                round(_safe_float(r.get('Target_1', 0)), 2), round(abs(e - sl), 2), round(max(0.0, best), 2),
+                round(px, 2), '' if live else r.get('Exit_Time', ''),
+                'OPEN (live)' if live else r.get('Exit_Reason', ''),
+                round(_safe_float(r.get('PnL_Pts', r.get('Live_PnL', 0))), 2), 'ACTIVE' if live else 'CLOSED']
+    for t in active_trades or []:
+        if str(t.get('Action', '')).upper() == side:
+            out.append(_row(t, live=True))
+    closed = [r for r in rows or [] if str(r.get('Status', '')).strip() == 'CLOSED'
+              and str(r.get('Action', '')).upper() == side]
+    closed.sort(key=lambda r: (str(r.get('Date', '')), str(r.get('Entry_Time', ''))), reverse=True)
+    out += [_row(r) for r in closed]
+    return out
+
+
 def format_points_bar(title: str, s: dict) -> str:
     """One-line +/- points banner for the top of a sheet."""
     return (f"{title}  |  Trades: {s['trades']}  |  ✅ Wins: {s['wins']} (+{s['plus_pts']:.2f} pts)  |  "
@@ -1744,8 +1774,27 @@ class ForwardTestTracker:
         except Exception:
             return set()
         now = datetime.now()
-        if d.get("date") != now.strftime('%Y-%m-%d') or now.time() > dt_time(15, 30):
-            return set()                      # a new day (or after the close) starts clean
+        if d.get("date") != now.strftime('%Y-%m-%d') or now.time() >= EOD_SQUARE_OFF_TIME:
+            # The app was not running at 3 PM: close those trades at the last price seen,
+            # so every entry has an exit and the day's points add up.
+            for t in d.get("active", []):
+                if t.get('Status') != 'ACTIVE':
+                    continue
+                e = _safe_float(t.get('Entry_Price', 0))
+                px = _safe_float(t.get('Current_Price', 0)) or e
+                pnl = round((px - e) if t.get('Action') == 'BUY' else (e - px), 2)
+                t.update({'Exit_Price': round(px, 2), 'Exit_Time': '15:00:00', 'PnL_Pts': pnl, 'Live_PnL': pnl,
+                          'Exit_Reason': 'EOD 3PM Square-off @ last LTP (app off at 3 PM)', 'Status': 'CLOSED'})
+                self._update_trade_in_file(t)
+                print(f"⏰ [FWD TEST] {t.get('Action')} {t.get('Type')} {t.get('Strike')} closed at last LTP "
+                      f"{px:.2f} (app was off at 3 PM) | PnL:{pnl:+.2f}")
+            if d.get("date") == now.strftime('%Y-%m-%d'):
+                self._closed_today = list(d.get("closed_today", []))
+            try:
+                os.remove(self.state_file)
+            except OSError:
+                pass
+            return set()
         tup = lambda k: tuple(int(x) if isinstance(x, float) and x.is_integer() else x for x in k)
         self._closed_keys_today = {tup(k) for k in d.get("closed_keys", [])}
         self._sl_hit_count = {tup(k): int(n) for k, n in d.get("sl_counts", [])}
@@ -4363,6 +4412,13 @@ class FeedEngine:
                     if not dp_ws:
                         dp_ws = spreadsheet.add_worksheet(title="Daily PnL", rows=400, cols=len(DAILY_PNL_HEADERS))
                     self.daily_pnl_sheet = dp_ws
+                    self.side_sheets = {}
+                    for _side in ("BUY", "SELL"):
+                        _title = f"{_side} Trades"
+                        _ws = next((x for x in spreadsheet.worksheets() if x.title == _title), None)
+                        if not _ws:
+                            _ws = spreadsheet.add_worksheet(title=_title, rows=600, cols=len(SIDE_SHEET_HEADERS))
+                        self.side_sheets[_side] = _ws
                 except Exception as dperr:
                     print(f"[DAILY PNL] sheet setup note: {dperr}")
                 self.sync_forward_test_to_sheet()
@@ -4552,6 +4608,20 @@ class FeedEngine:
             if prev is not None and prev > len(grid):
                 ws.batch_clear([f"A{len(grid) + 1}:N{prev}"])
             self._dp_last_len = len(grid)
+            for _side, _ws in (getattr(self, "side_sheets", None) or {}).items():
+                _t = side_trades_table(rows, _side, active_mem)
+                _pts = compute_points_summary([{"PnL_Pts": r[14]} for r in _t if r[15] == 'CLOSED'],
+                                              [{"PnL_Pts": r[14]} for r in _t if r[15] == 'ACTIVE'])
+                _g = ([[format_points_bar(f"{'🟢' if _side == 'BUY' else '🔴'} {_side} TRADES — ALL DAYS", _pts)
+                        + f"  |  Updated: {now_str}"] + [''] * (len(SIDE_SHEET_HEADERS) - 1),
+                       SIDE_SHEET_HEADERS] + _t)
+                if _ws.row_count < len(_g) + 10:
+                    _ws.add_rows(len(_g) + 10 - _ws.row_count)
+                _ws.update(values=_g, range_name="A1")
+                _prev = getattr(self, f"_side_last_len_{_side}", None)
+                if _prev is not None and _prev > len(_g):
+                    _ws.batch_clear([f"A{len(_g) + 1}:P{_prev}"])
+                setattr(self, f"_side_last_len_{_side}", len(_g))
             self._dp_last_sig, self._dp_last_ts = sig, time.time()
         except Exception as e:
             print(f"[DAILY PNL] sheet update note: {e}")

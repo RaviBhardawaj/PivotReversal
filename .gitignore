@@ -33,3 +33,5 @@ __pycache__/
 .DS_Store
 _backup*/
 data_settings.json
+forward_test_trades_open.json
+forward_test_trades_open.json.tmp

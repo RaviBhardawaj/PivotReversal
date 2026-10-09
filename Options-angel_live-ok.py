@@ -509,6 +509,27 @@ class StrategyStrikeState:
 
     _LOCK_KEYS = ("P", "S1", "S2", "S3", "R1", "R2", "R3")
 
+    def seed_from_trade(self, trade: dict, sl_hits: int = 0):
+        """After an app restart: carry on with a trade the forward test restored, instead
+        of starting this strike from WAITING (which could stack a second entry on it)."""
+        side = trade.get("Action", "")
+        self.state         = f"CONFIRMED_{side}"
+        hit = int(_safe_float(trade.get("Target_Hit", 0)))
+        self.trade_status  = f"Target {hit} Hit" if 1 <= hit <= 4 else "Active"
+        self.entry_price   = round(_safe_float(trade.get("Entry_Price", 0)), 2)
+        self.entry_time    = str(trade.get("Entry_Time", ""))
+        self.sl            = round(_safe_float(trade.get("SL", 0)), 2)
+        self.targets       = [round(_safe_float(trade.get(f"Target_{i}", 0)), 2) for i in range(1, 6)]
+        self.entry_count   = 1 + sl_hits
+        self.sl_hit_count  = sl_hits
+        if side == "BUY":
+            self.ll = self.sl
+            self.trigger_level = "S2"
+        else:
+            self.hh = self.sl
+            self.trigger_level = "R2"
+        self.signal = f"♻️ {side} {self.opt_type} restored after restart | Entry:{self.entry_price:.2f} | SL:{self.sl:.2f}"
+
     def update_tick(self, ltp: float, pivots: dict, now: datetime, opt_high: float = 0.0, opt_low: float = 0.0):
         """
         Level lock: the strike's pivot levels (and so planned entry / SL / targets) are locked
@@ -1612,7 +1633,66 @@ class ForwardTestTracker:
         self._closed_keys_today = set()  # {(opt_type, strike, action, date_str)} — action-aware
         self._sl_hit_count      = {}     # {(opt_type, strike, action, date_str) -> int}
         self.paper_only         = False  # True => never route orders to LiveOrderManager
+        # Open trades and today's re-entry guards are saved here, so an app restart
+        # (internet drop, crash, Mac sleep) picks up the same trades and keeps watching them.
+        self.state_file         = os.path.splitext(filepath)[0] + "_open.json"
+        self._snap_ts           = 0.0
+        self._restored_ids      = self._restore_snapshot()
         self._init_file()
+
+    @staticmethod
+    def _trade_keys(t):
+        sym, ot, stk, exp = t.get('Symbol', ''), t.get('Type', ''), t.get('Strike'), t.get('Expiry', '')
+        main = (sym, ot, stk, exp) if (sym and exp) else ((ot, stk, exp) if exp else (ot, stk))
+        keys = [main]
+        if exp:
+            keys.append((ot, stk, exp))
+        keys.append((ot, stk))
+        return keys
+
+    def _save_snapshot(self, force=True):
+        """Write open trades + today's guards to disk (atomic). Throttled unless force."""
+        if not force and time.time() - self._snap_ts < 3.0:
+            return
+        self._snap_ts = time.time()
+        try:
+            data = {"date": datetime.now().strftime('%Y-%m-%d'),
+                    "active": self.get_active_trades(),
+                    "closed_keys": [list(k) for k in self._closed_keys_today],
+                    "sl_counts": [[list(k), n] for k, n in self._sl_hit_count.items()],
+                    "closed_today": self._closed_today}
+            tmp = self.state_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, default=str)
+            os.replace(tmp, self.state_file)
+        except Exception as e:
+            print(f"[FWD TEST] Could not save open trades: {e}")
+
+    def _restore_snapshot(self):
+        """Reload today's open trades after a restart. Returns the restored Trade_IDs."""
+        try:
+            with open(self.state_file) as f:
+                d = json.load(f)
+        except Exception:
+            return set()
+        now = datetime.now()
+        if d.get("date") != now.strftime('%Y-%m-%d') or now.time() > dt_time(15, 30):
+            return set()                      # a new day (or after the close) starts clean
+        tup = lambda k: tuple(int(x) if isinstance(x, float) and x.is_integer() else x for x in k)
+        self._closed_keys_today = {tup(k) for k in d.get("closed_keys", [])}
+        self._sl_hit_count = {tup(k): int(n) for k, n in d.get("sl_counts", [])}
+        self._closed_today = list(d.get("closed_today", []))
+        ids = set()
+        for t in d.get("active", []):
+            if t.get('Status') != 'ACTIVE':
+                continue
+            for k in self._trade_keys(t):
+                if k not in self.active_trades:
+                    self.active_trades[k] = t
+            ids.add(t.get('Trade_ID'))
+            print(f"♻️  [FWD TEST] Restored open {t.get('Action')} {t.get('Type')} {t.get('Strike')} "
+                  f"{t.get('Expiry', '')} @ {t.get('Entry_Price')} | SL:{t.get('SL')} — watching again")
+        return ids
 
 
     def _init_file(self):
@@ -1623,9 +1703,10 @@ class ForwardTestTracker:
                 with open(self.filepath, 'r', newline='') as f:
                     rows = list(csv.DictReader(f))
                     fields = list(rows[0].keys()) if rows else None
-                if fields and any(r.get('Status') == 'ACTIVE' for r in rows):
+                restored = getattr(self, "_restored_ids", set())
+                if fields and any(r.get('Status') == 'ACTIVE' and r.get('Trade_ID') not in restored for r in rows):
                     for r in rows:
-                        if r.get('Status') == 'ACTIVE':
+                        if r.get('Status') == 'ACTIVE' and r.get('Trade_ID') not in restored:
                             r['Status'] = 'ABANDONED'
                             r['Exit_Reason'] = r.get('Exit_Reason') or 'App restarted - not tracked'
                     with open(self.filepath, 'w', newline='') as f:
@@ -1728,6 +1809,7 @@ class ForwardTestTracker:
         if (opt_type, strike) not in self.active_trades:
             self.active_trades[(opt_type, strike)] = trade
         self._append_row(trade)
+        self._save_snapshot()
         zone_str = f"S2:{entry_s2} < LTP:{entry_price:.2f} < R2:{entry_r2}" if entry_s2 else ""
         exp_lbl  = f" | Exp:{expiry}" if expiry else ""
         print(f"📝 [FWD TEST - {timeframe}] {action} {opt_type} {strike}{exp_lbl} @ {entry_price:.2f} "
@@ -1889,6 +1971,8 @@ class ForwardTestTracker:
 
         if not closed and not self.paper_only:
             live_order_manager.on_tick(trade, ltp)    # moves the broker SL order when the SL trails
+        if not closed:
+            self._save_snapshot(force=trade.get('Target_Hit', 0) != target_hit)
 
         if closed:
             # Ensure final tick high/low are captured
@@ -1941,12 +2025,30 @@ class ForwardTestTracker:
                 self._closed_keys_today.add((opt_type, strike, trade['Action'], date_str_close))
             self._closed_today.append(dict(trade))
             self._update_trade_in_file(trade)
+            self._save_snapshot()
             icon = '✅' if exit_pnl >= 0 else '🛑'
             hl_label = f"High:{trade['Trade_High']:.2f}" if trade['Action'] == 'BUY' else f"Low:{trade['Trade_Low']:.2f}"
             print(f"{icon} [FWD TEST] CLOSED {trade['Action']} {opt_type} {strike}{exp_lbl} "
                   f"| {exit_reason} | PnL:{exit_pnl:+.2f} pts | {hl_label} (Max:{trade['Max_Pts']:+.2f} pts)")
             return trade
         return None
+
+    def seed_state(self, st, symbol=""):
+        """A new strike state picks up a trade restored after a restart (same strike, side, expiry)."""
+        if not self._restored_ids:
+            return
+        side = "BUY" if st.mode == "BUY" else "SELL"
+        for t in self.get_active_trades():
+            if (t.get('Trade_ID') in self._restored_ids and t.get('Action') == side
+                    and t.get('Type') == st.opt_type and int(_safe_float(t.get('Strike', 0))) == int(st.strike)
+                    and (t.get('Expiry', '') or '') == (st.expiry or '')
+                    and (not symbol or not t.get('Symbol') or t.get('Symbol') == symbol)):
+                hits = sum(1 for c in self._closed_today
+                           if c.get('Type') == st.opt_type and int(_safe_float(c.get('Strike', 0))) == int(st.strike)
+                           and c.get('Action') == side and (c.get('Expiry', '') or '') == (st.expiry or '')
+                           and 'SL Hit' in str(c.get('Exit_Reason', '')))
+                st.seed_from_trade(t, sl_hits=hits)
+                return
 
     def get_active_trades(self):
         """Return list of all currently active trades with live PnL (de-duplicated)."""
@@ -2060,6 +2162,7 @@ class ForwardTestTracker:
         self._closed_keys_today.add((trade.get('Symbol', ''), opt_type, strike, trade['Action'], date_str_mc))
         self._closed_today.append(dict(trade))
         self._update_trade_in_file(trade)
+        self._save_snapshot()
 
         icon = '✅' if exit_pnl >= 0 else '🛑'
         exp_lbl = f" | Exp:{exp_val}" if exp_val else ""
@@ -4947,10 +5050,12 @@ class FeedEngine:
                         st_buy   = self.strategy_states.get(buy_key)
                         if not st_buy:
                             st_buy = StrategyStrikeState(opt_type, strike, expiry=exp, mode="BUY")
+                            self.forward_tracker.seed_state(st_buy, symbol)
                             self.strategy_states[buy_key] = st_buy
                         st_sell  = self.strategy_states.get(sell_key)
                         if not st_sell:
                             st_sell = StrategyStrikeState(opt_type, strike, expiry=exp, mode="SELL")
+                            self.forward_tracker.seed_state(st_sell, symbol)
                             self.strategy_states[sell_key] = st_sell
 
                         legacy_key = (opt_type, strike, exp) if exp else (opt_type, strike)

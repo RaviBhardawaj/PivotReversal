@@ -187,6 +187,26 @@ def bs_greeks(S, K, T, r, sigma, opt_type):
 ENTRY_BAND_PCT = 0.01   # a trade is taken only within 1% of its entry level (min 0.50)
 
 
+OPEN_TRADE_STATUSES = ("Active", "Target 1 Hit", "Target 2 Hit", "Target 3 Hit", "Target 4 Hit")
+
+
+def display_sl(trade_status: str, m5_state: str, sl: float, is_buy: bool, planned_ep: float,
+               ll: float = 0.0, hh: float = 0.0) -> str:
+    """SL text for the dashboard and sheet. Once a trade is entered its real (trailed) SL is
+    always shown, at every target and after the exit; before entry only a setup preview."""
+    ts, m5 = str(trade_status or ""), str(m5_state or "")
+    entered = ts in OPEN_TRADE_STATUSES or "CONFIRMED" in m5 or ("Hit" in ts) or ("Closed" in ts)
+    if entered and sl > 0:
+        return f"{sl:.2f}"
+    if entered or ("RECLAIM" in m5 if is_buy else "REJECT" in m5):
+        if is_buy:
+            eff = ll if (0 < ll < planned_ep) else (sl if (0 < sl < planned_ep) else round(planned_ep * 0.90, 2))
+        else:
+            eff = hh if hh > planned_ep else (sl if sl > planned_ep else round(planned_ep * 1.10, 2))
+        return f"{eff:.2f}" if eff > 0 else "-"
+    return "-"
+
+
 def at_entry_price(ltp: float, entry_px: float, side: str) -> bool:
     """True when the live price is at the planned entry level: a SELL at or just under its
     level, a BUY at or just over it. Never chase a price that has already run away."""
@@ -5324,7 +5344,7 @@ class FeedEngine:
 
                         if st_buy.sl > 0:
                             calc_sl_b = round(st_buy.sl, 2)
-                        elif st_buy.trade_status in ("Active", "Target 1 Hit", "Target 2 Hit") or "RECLAIM" in st_buy.state or "CONFIRMED_BUY" in st_buy.state:
+                        elif st_buy.trade_status in OPEN_TRADE_STATUSES or "RECLAIM" in st_buy.state or "CONFIRMED_BUY" in st_buy.state:
                             calc_sl_b = eff_ll if (0 < eff_ll < calc_ep_b) else round(calc_ep_b * 0.90, 2)
                         else:
                             calc_sl_b = 0.0
@@ -5385,7 +5405,7 @@ class FeedEngine:
                         calc_ep_s = round(st_sell.entry_price if st_sell.entry_price > 0 else st_sell.conf_low if st_sell.conf_low > 0 else (disp_r2_s if disp_r2_s > 1.0 else disp_r1_s), 2)
                         if st_sell.sl > 0:
                             calc_sl_s = round(st_sell.sl, 2)
-                        elif st_sell.trade_status in ("Active", "Target 1 Hit", "Target 2 Hit") or "REJECT" in st_sell.state or "CONFIRMED_SELL" in st_sell.state:
+                        elif st_sell.trade_status in OPEN_TRADE_STATUSES or "REJECT" in st_sell.state or "CONFIRMED_SELL" in st_sell.state:
                             calc_sl_s = eff_hh if (eff_hh > calc_ep_s) else round(calc_ep_s * 1.10, 2)
                         else:
                             calc_sl_s = 0.0
@@ -5484,19 +5504,11 @@ class FeedEngine:
                     if is_buy:
                         planned_ep = round(s1_raw if is_s1_buy else s2_raw, 2)
                         # SL is calculated AFTER entry: LL when price reclaims S1/S2 and candle close gives entry
-                        if trade_st_row in ("Active", "Target 1 Hit", "Target 2 Hit") or "RECLAIM" in m5_st or "CONFIRMED_BUY" in m5_st:
-                            eff_sl = ll_val if (0 < ll_val < planned_ep) else (sl_val if (0 < sl_val < planned_ep) else round(planned_ep * 0.90, 2))
-                            sl_str = f"{eff_sl:.2f}"
-                        else:
-                            sl_str = "-"
+                        sl_str = display_sl(trade_st_row, m5_st, sl_val, True, planned_ep, ll=ll_val)
                     else:
                         planned_ep = round(w.get("r2", 0) if w.get("r2", 0) > 1.0 else w.get("r1", 0), 2)
                         # SL is calculated AFTER entry: HH when price rejects R2 and candle close gives entry
-                        if trade_st_row in ("Active", "Target 1 Hit", "Target 2 Hit") or "REJECT" in m5_st or "CONFIRMED_SELL" in m5_st:
-                            eff_sl = hh_val if hh_val > planned_ep else (sl_val if sl_val > planned_ep else round(planned_ep * 1.10, 2))
-                            sl_str = f"{eff_sl:.2f}"
-                        else:
-                            sl_str = "-"
+                        sl_str = display_sl(trade_st_row, m5_st, sl_val, False, planned_ep, hh=hh_val)
 
                     # Targets T1 / T2 / T3 from the full target ladder
                     tgts = w.get("targets", [])
@@ -5872,7 +5884,7 @@ def dash_row_flags(w: dict, ce_15m, pe_15m, ce_1h, pe_1h, p_15m, p_1h, p_exact=N
     is_exact_p = stk in p_exact
     ts = str(w.get("trade_status", "") or "")
     m5 = str(w.get("m5_state", "") or "")
-    if ts == "Active" or ts in ("Target 1 Hit", "Target 2 Hit"):
+    if ts in ("Active", "Target 1 Hit", "Target 2 Hit", "Target 3 Hit", "Target 4 Hit"):
         state = "TRADE"
     elif "Target" in ts or "SL" in ts or "Exit" in ts or "Closed" in ts:
         state = "DONE"
@@ -7260,21 +7272,13 @@ class ControlPanel:
                 planned_ep = round(s1_raw if is_s1_buy else s2_raw, 2)
                 lvl_label = "S1" if is_s1_buy else "S2"
                 s2_note = " [S2<=0]" if is_s1_buy else ""
-                if trade_st in ("Active", "Target 1 Hit", "Target 2 Hit") or "RECLAIM" in m5_t or "CONFIRMED_BUY" in m5_t:
-                    eff_sl = ll_v if (0 < ll_v < planned_ep) else (sl_v if (0 < sl_v < planned_ep) else round(planned_ep * 0.90, 2))
-                    sl_str = f"{eff_sl:.2f}"
-                else:
-                    sl_str = "-"
+                sl_str = display_sl(trade_st, m5_t, sl_v, True, planned_ep, ll=ll_v)
             else:
                 planned_ep = round(w.get("r2", 0) if w.get("r2", 0) > 1.0 else w.get("r1", 0), 2)
                 lvl_label = "R2"
                 s2_note = ""
                 is_s1_buy = False
-                if trade_st in ("Active", "Target 1 Hit", "Target 2 Hit") or "REJECT" in m5_t or "CONFIRMED_SELL" in m5_t:
-                    eff_sl = hh_v if hh_v > planned_ep else (sl_v if sl_v > planned_ep else round(planned_ep * 1.10, 2))
-                    sl_str = f"{eff_sl:.2f}"
-                else:
-                    sl_str = "-"
+                sl_str = display_sl(trade_st, m5_t, sl_v, False, planned_ep, hh=hh_v)
 
             # T1 / T2 / T3 / T4 from targets list or planned levels
             tgts = w.get("targets", [])

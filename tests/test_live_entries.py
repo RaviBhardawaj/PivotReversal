@@ -94,4 +94,12 @@ assert st.trade_status=="Waiting"
 assert not app.at_entry_price(235.5,198.71,"BUY") and app.at_entry_price(199.5,198.71,"BUY")
 assert not app.at_entry_price(235.5,332.69,"SELL")
 print("F BUY side and entry band: OK")
+# G. the SL is shown at every stage after entry (the trailed SL, not the day low)
+ds=app.display_sl
+for ts in ("Active","Target 1 Hit","Target 2 Hit","Target 3 Hit","Target 4 Hit","SL Hit Closed","Trailing SL Hit Closed"):
+    assert ds(ts,"CONFIRMED_BUY",104.0,True,96.0,ll=90.0)=="104.00", ts
+    assert ds(ts,"CONFIRMED_SELL",300.0,False,330.0,hh=350.0)=="300.00", ts
+assert ds("Waiting","WAITING",0,True,96.0,ll=90.0)=="-"
+assert ds("Waiting","RECLAIM_S2",0,True,96.0,ll=90.0)=="90.00"        # setup preview = LL
+print("G SL shown after entry at every target and after the exit: OK")
 print("LIVE ENTRY TESTS PASSED")

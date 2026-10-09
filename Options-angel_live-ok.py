@@ -4,7 +4,7 @@ Control Panel + Google Sheets Feed
 Fixes: expiry sort, max OI highlight, BSE/MCX exchange types
 """
 
-import os, sys, time, pyotp, requests, math, threading, pickle, json, csv, socket, functools
+import os, re, sys, time, pyotp, requests, math, threading, pickle, json, csv, socket, functools
 import pandas as pd
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -1715,6 +1715,147 @@ def format_points_bar(title: str, s: dict) -> str:
             f"Win%: {s['win_rate']:.1f}  |  Avg/Trade: {s['avg_pts']:+.2f}")
 
 
+def fwd_exit_check(trade, ltp, opt_type=None, strike=None):
+    """SL / target ladder for one price of an open forward-test trade (the live tick rules).
+    Moves Target_Hit and trails the SL in place. Returns (closed, exit_reason, exit_pnl)."""
+    opt_type = trade.get('Type') if opt_type is None else opt_type
+    strike = trade.get('Strike') if strike is None else strike
+    entry = trade['Entry_Price']
+    target_hit = trade.get('Target_Hit', 0)
+    closed, exit_reason, exit_pnl = False, '', 0.0
+    if trade['Action'] == 'BUY':
+        if trade['SL'] > 0 and ltp <= trade['SL']:
+            closed       = True
+            exit_reason  = 'Trailing SL Hit' if trade['SL'] >= entry else 'SL Hit'
+            exit_pnl     = round(ltp - entry, 2)
+        elif trade.get('Target_5', 0) > 0 and ltp >= trade['Target_5']:
+            closed       = True
+            exit_reason  = 'Target 5 Hit'
+            exit_pnl     = round(ltp - entry, 2)
+            trade['Target_Hit'] = 5
+        elif trade.get('Target_4', 0) > 0 and ltp >= trade['Target_4']:
+            if target_hit < 4:
+                trade['Target_Hit'] = 4
+                if trade.get('Target_3', 0) > trade['SL']:
+                    trade['SL'] = trade['Target_3']   # trail SL to T3
+                print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T5:{trade.get('Target_5',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+        elif trade.get('Target_3', 0) > 0 and ltp >= trade['Target_3']:
+            if target_hit < 3:
+                trade['Target_Hit'] = 3
+                if trade.get('Target_2', 0) > trade['SL']:
+                    trade['SL'] = trade['Target_2']   # trail SL to T2
+                print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T4:{trade.get('Target_4',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+        elif trade.get('Target_2', 0) > 0 and ltp >= trade['Target_2']:
+            if target_hit < 2:
+                trade['Target_Hit'] = 2
+                if trade.get('Target_1', 0) > trade['SL']:
+                    trade['SL'] = trade['Target_1']   # trail SL to T1
+                print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T3:{trade.get('Target_3',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+        elif trade.get('Target_1', 0) > 0 and ltp >= trade['Target_1']:
+            if target_hit < 1:
+                trade['Target_Hit'] = 1
+                if entry > trade['SL']:
+                    trade['SL'] = round(entry, 2)     # trail SL to Entry (breakeven)
+                print(f"🎯 [FWD TEST] T1 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T2:{trade.get('Target_2',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+    else:   # SELL
+        if trade['SL'] > 0 and ltp >= trade['SL']:
+            closed       = True
+            exit_reason  = 'Trailing SL Hit' if trade['SL'] <= entry else 'SL Hit'
+            exit_pnl     = round(entry - ltp, 2)
+        elif trade.get('Target_5', 0) > 0 and ltp <= trade['Target_5']:
+            closed       = True
+            exit_reason  = 'Target 5 Hit'
+            exit_pnl     = round(entry - ltp, 2)
+            trade['Target_Hit'] = 5
+        elif trade.get('Target_4', 0) > 0 and ltp <= trade['Target_4']:
+            if target_hit < 4:
+                trade['Target_Hit'] = 4
+                if trade['SL'] == 0 or trade.get('Target_3', 0) < trade['SL']:
+                    trade['SL'] = trade['Target_3']
+                print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T5:{trade.get('Target_5',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+        elif trade.get('Target_3', 0) > 0 and ltp <= trade['Target_3']:
+            if target_hit < 3:
+                trade['Target_Hit'] = 3
+                if trade['SL'] == 0 or trade.get('Target_2', 0) < trade['SL']:
+                    trade['SL'] = trade['Target_2']
+                print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T4:{trade.get('Target_4',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+        elif trade.get('Target_2', 0) > 0 and ltp <= trade['Target_2']:
+            if target_hit < 2:
+                trade['Target_Hit'] = 2
+                if trade['SL'] == 0 or trade.get('Target_1', 0) < trade['SL']:
+                    trade['SL'] = trade['Target_1']
+                print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T3:{trade.get('Target_3',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+        elif trade.get('Target_1', 0) > 0 and ltp <= trade['Target_1']:
+            if target_hit < 1:
+                trade['Target_Hit'] = 1
+                if trade['SL'] == 0 or entry < trade['SL']:
+                    trade['SL'] = round(entry, 2)
+                print(f"🎯 [FWD TEST] T1 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T2:{trade.get('Target_2',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+    return closed, exit_reason, exit_pnl
+
+
+RESTART_FILL_NOTE = " (from 1-min data: app restarted)"
+
+
+def replay_trade_bars(trade, bars, eod=EOD_SQUARE_OFF_TIME):
+    """Finish a trade the app stopped watching (it was restarted) from that day's 1-minute
+    candles, with the same SL / target / trailing rules as live ticks. Each candle is walked
+    open -> low -> high -> close when green, open -> high -> low -> close when red. Fills at the
+    SL / T5 level itself unless the candle opened past it. Square-off at 15:00 as live.
+    bars: [(datetime, o, h, l, c), ...]. Returns the closed trade, or None while it is still open."""
+    entry = trade['Entry_Price']
+    try:
+        start = datetime.strptime(f"{trade['Date']} {trade['Entry_Time']}", "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+    start = start.replace(second=0)
+    is_buy = trade['Action'] == 'BUY'
+    trade.setdefault('Trade_High', entry)
+    trade.setdefault('Trade_Low', entry)
+    trade.setdefault('Target_Hit', 0)
+    last_px, done = None, None
+    for t, o, h, l, c in bars:
+        tn = t.replace(tzinfo=None)
+        if tn <= start:
+            continue                      # the entry minute itself: the part after entry is unknown
+        if tn.time() >= eod:
+            done = (o, '15:00:00', 'EOD 3PM Square-off @ CMP', None)
+            break
+        path = (o, l, h, c) if c >= o else (o, h, l, c)
+        for i, px in enumerate(path):
+            trade['Trade_High'] = round(max(trade['Trade_High'], px), 2)
+            trade['Trade_Low'] = round(min(trade['Trade_Low'], px) if trade['Trade_Low'] else px, 2)
+            sl_before, t5 = trade['SL'], trade.get('Target_5', 0)
+            closed, reason, _ = fwd_exit_check(trade, px)
+            if closed:
+                fill = px
+                if i > 0:                 # crossed inside the candle: filled at the level
+                    fill = sl_before if 'SL' in reason else (t5 or px)
+                done = (fill, tn.strftime('%H:%M:00'), reason, px)
+                break
+        if done:
+            break
+        last_px = c
+    if not done:
+        if last_px is None or not bars or bars[-1][0].replace(tzinfo=None).time() < dt_time(14, 59):
+            return None                   # the day's candles do not reach the exit yet
+        done = (last_px, '15:00:00', 'EOD 3PM Square-off @ CMP', None)
+    fill, when, reason, _ = done
+    trade['Trade_High'] = round(max(trade['Trade_High'], fill), 2)
+    trade['Trade_Low'] = round(min(trade['Trade_Low'], fill), 2)
+    pnl = round((fill - entry) if is_buy else (entry - fill), 2)
+    trade['Max_Pts'] = round(max(0.0, (trade['Trade_High'] - entry) if is_buy else (entry - trade['Trade_Low'])), 2)
+    trade.update({'Exit_Price': round(fill, 2), 'Exit_Time': when, 'Exit_Reason': reason,
+                  'PnL_Pts': pnl, 'Live_PnL': pnl, 'Status': 'CLOSED'})
+    return trade
+
+
+def trade_expiry(trade_id):
+    """Contract expiry ('13OCT2026') from a forward-test Trade_ID, or ''."""
+    m = re.search(r"_(\d{2}[A-Z]{3}\d{4})_", str(trade_id))
+    return m.group(1) if m else ""
+
+
 class ForwardTestTracker:
     """
     Logs every forward test trade entry & exit to forward_test_trades.csv.
@@ -2017,74 +2158,8 @@ class ForwardTestTracker:
                 _trailed = (trade['SL'] >= entry) if trade['Action'] == 'BUY' else (0 < trade['SL'] <= entry)
                 exit_reason = ('Trailing SL Hit' if _trailed else 'SL Hit') + ' (broker)'
             exit_pnl     = live_pnl
-        elif trade['Action'] == 'BUY':
-            if trade['SL'] > 0 and ltp <= trade['SL']:
-                closed       = True
-                exit_reason  = 'Trailing SL Hit' if trade['SL'] >= entry else 'SL Hit'
-                exit_pnl     = round(ltp - entry, 2)
-            elif trade.get('Target_5', 0) > 0 and ltp >= trade['Target_5']:
-                closed       = True
-                exit_reason  = 'Target 5 Hit'
-                exit_pnl     = round(ltp - entry, 2)
-                trade['Target_Hit'] = 5
-            elif trade.get('Target_4', 0) > 0 and ltp >= trade['Target_4']:
-                if target_hit < 4:
-                    trade['Target_Hit'] = 4
-                    if trade.get('Target_3', 0) > trade['SL']:
-                        trade['SL'] = trade['Target_3']   # trail SL to T3
-                    print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T5:{trade.get('Target_5',0):.1f} | Trailed SL:{trade['SL']:.1f}")
-            elif trade.get('Target_3', 0) > 0 and ltp >= trade['Target_3']:
-                if target_hit < 3:
-                    trade['Target_Hit'] = 3
-                    if trade.get('Target_2', 0) > trade['SL']:
-                        trade['SL'] = trade['Target_2']   # trail SL to T2
-                    print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T4:{trade.get('Target_4',0):.1f} | Trailed SL:{trade['SL']:.1f}")
-            elif trade.get('Target_2', 0) > 0 and ltp >= trade['Target_2']:
-                if target_hit < 2:
-                    trade['Target_Hit'] = 2
-                    if trade.get('Target_1', 0) > trade['SL']:
-                        trade['SL'] = trade['Target_1']   # trail SL to T1
-                    print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T3:{trade.get('Target_3',0):.1f} | Trailed SL:{trade['SL']:.1f}")
-            elif trade.get('Target_1', 0) > 0 and ltp >= trade['Target_1']:
-                if target_hit < 1:
-                    trade['Target_Hit'] = 1
-                    if entry > trade['SL']:
-                        trade['SL'] = round(entry, 2)     # trail SL to Entry (breakeven)
-                    print(f"🎯 [FWD TEST] T1 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T2:{trade.get('Target_2',0):.1f} | Trailed SL:{trade['SL']:.1f}")
-        else:   # SELL
-            if trade['SL'] > 0 and ltp >= trade['SL']:
-                closed       = True
-                exit_reason  = 'Trailing SL Hit' if trade['SL'] <= entry else 'SL Hit'
-                exit_pnl     = round(entry - ltp, 2)
-            elif trade.get('Target_5', 0) > 0 and ltp <= trade['Target_5']:
-                closed       = True
-                exit_reason  = 'Target 5 Hit'
-                exit_pnl     = round(entry - ltp, 2)
-                trade['Target_Hit'] = 5
-            elif trade.get('Target_4', 0) > 0 and ltp <= trade['Target_4']:
-                if target_hit < 4:
-                    trade['Target_Hit'] = 4
-                    if trade['SL'] == 0 or trade.get('Target_3', 0) < trade['SL']:
-                        trade['SL'] = trade['Target_3']
-                    print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T5:{trade.get('Target_5',0):.1f} | Trailed SL:{trade['SL']:.1f}")
-            elif trade.get('Target_3', 0) > 0 and ltp <= trade['Target_3']:
-                if target_hit < 3:
-                    trade['Target_Hit'] = 3
-                    if trade['SL'] == 0 or trade.get('Target_2', 0) < trade['SL']:
-                        trade['SL'] = trade['Target_2']
-                    print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T4:{trade.get('Target_4',0):.1f} | Trailed SL:{trade['SL']:.1f}")
-            elif trade.get('Target_2', 0) > 0 and ltp <= trade['Target_2']:
-                if target_hit < 2:
-                    trade['Target_Hit'] = 2
-                    if trade['SL'] == 0 or trade.get('Target_1', 0) < trade['SL']:
-                        trade['SL'] = trade['Target_1']
-                    print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T3:{trade.get('Target_3',0):.1f} | Trailed SL:{trade['SL']:.1f}")
-            elif trade.get('Target_1', 0) > 0 and ltp <= trade['Target_1']:
-                if target_hit < 1:
-                    trade['Target_Hit'] = 1
-                    if trade['SL'] == 0 or entry < trade['SL']:
-                        trade['SL'] = round(entry, 2)
-                    print(f"🎯 [FWD TEST] T1 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T2:{trade.get('Target_2',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+        else:
+            closed, exit_reason, exit_pnl = fwd_exit_check(trade, ltp, opt_type, strike)
 
         if not closed and not self.paper_only:
             live_order_manager.on_tick(trade, ltp)    # moves the broker SL order when the SL trails
@@ -2209,6 +2284,46 @@ class ForwardTestTracker:
         except Exception as e:
             print(f"Read closed trades error: {e}")
         return closed
+
+    def backfill_abandoned(self, fetch_bars, now=None):
+        """Rows marked ABANDONED (the app was restarted while they were open) are finished
+        from that day's 1-minute candles, so their SL / target / 3 PM exit reaches the sheet.
+        Today's rows wait until after 15:00. fetch_bars(symbol, expiry, strike, opt_type, day).
+        Returns the trades that were closed."""
+        now = now or datetime.now()
+        today = now.strftime('%Y-%m-%d')
+        try:
+            with open(self.filepath, 'r', newline='') as f:
+                rows = [r for r in csv.DictReader(f) if r.get('Status', '').strip() == 'ABANDONED']
+        except Exception:
+            return []
+        done = []
+        for r in rows:
+            day = r.get('Date', '')
+            if day > today or (day == today and now.time() < dt_time(15, 1)):
+                continue
+            exp = trade_expiry(r.get('Trade_ID'))
+            if not exp:
+                continue
+            t = dict(r)
+            for k in ('Entry_Price', 'SL', 'Target_1', 'Target_2', 'Target_3', 'Target_4', 'Target_5'):
+                t[k] = _safe_float(r.get(k, 0))
+            t['Strike'] = int(_safe_float(r.get('Strike', 0)))
+            t.update({'Trade_High': t['Entry_Price'], 'Trade_Low': t['Entry_Price'], 'Target_Hit': 0})
+            try:
+                bars = fetch_bars(t.get('Symbol', ''), exp, t['Strike'], t.get('Type', ''), day)
+            except Exception as e:
+                print(f"[FWD TEST] 1-min data for {t.get('Type')} {t['Strike']} {exp} unavailable: {e}")
+                continue
+            res = replay_trade_bars(t, bars or [])
+            if not res:
+                continue
+            res['Exit_Reason'] += RESTART_FILL_NOTE
+            self._update_trade_in_file(res)
+            done.append(res)
+            print(f"♻️  [FWD TEST] {res['Action']} {res['Type']} {res['Strike']} {exp} ({day} {res['Entry_Time']}) "
+                  f"finished from 1-min data: {res['Exit_Reason']} @ {res['Exit_Price']} | PnL:{res['PnL_Pts']:+.2f}")
+        return done
 
     def get_closed_today(self):
         """Return trades closed in the current session only (no CSV bleed-through)."""
@@ -3194,7 +3309,20 @@ def dhan_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now: d
     Dhan's F&O security ID is the exchange token, the same number Angel's instrument list has.
     Logs in with the Dhan keys in .env (PIN + TOTP makes a fresh token); a failed login is not
     retried for 5 minutes."""
-    from brokers.dhan import DhanAdapter, _SEG
+    from brokers.dhan import _SEG
+    st = _DHAN_DATA
+    _dhan_data_login()
+    try:
+        return st["ad"].daily_candles(token, _SEG.get(exch, "NSE_FNO"), instrument, now=now)
+    except Exception as e:
+        if any(k in str(e).upper() for k in ("DH-901", "DH-902", " 401", "INVALID", "EXPIRED")):
+            st["ad"] = None          # token no longer valid: log in again on the next call
+        raise
+
+
+def _dhan_data_login():
+    """The shared Dhan market-data session (logs in with the Dhan keys in .env)."""
+    from brokers.dhan import DhanAdapter
     st = _DHAN_DATA
     if st["ad"] is None:
         if time.time() - st["fail_at"] < 300:
@@ -3210,11 +3338,20 @@ def dhan_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now: d
             st["fail_at"], st["why"] = time.time(), f"Dhan login failed: {e}"
             raise RuntimeError(st["why"])
         st["ad"] = ad
+    return st["ad"]
+
+
+def dhan_minute_bars(symbol, expiry, strike, opt_type, day):
+    """1-minute candles of one option contract for one day, from Dhan."""
+    ad = _dhan_data_login()
+    exch = "BFO" if str(symbol).upper() in ("SENSEX", "BANKEX") else "NFO"
+    inst = ad.resolve({"symbol": symbol, "expiry": expiry, "strike": strike, "opt_type": opt_type,
+                       "exchange": exch, "tsym": f"{symbol} {expiry} {strike} {opt_type}"})
     try:
-        return st["ad"].daily_candles(token, _SEG.get(exch, "NSE_FNO"), instrument, now=now)
+        return ad.intraday_bars(inst["inst_id"], day, inst["segment"])
     except Exception as e:
         if any(k in str(e).upper() for k in ("DH-901", "DH-902", " 401", "INVALID", "EXPIRED")):
-            st["ad"] = None          # token no longer valid: log in again on the next call
+            _DHAN_DATA["ad"] = None
         raise
 
 
@@ -4422,6 +4559,7 @@ class FeedEngine:
                 except Exception as dperr:
                     print(f"[DAILY PNL] sheet setup note: {dperr}")
                 self.sync_forward_test_to_sheet()
+                self.backfill_abandoned_async()
 
                 # Orders Log tab: mirror of live_orders_log.csv (rewritten from the CSV at start, then appended live)
                 try:
@@ -4556,6 +4694,26 @@ class FeedEngine:
             finally:
                 self._orders_sync_busy = False
         threading.Thread(target=_bg, daemon=True).start()
+
+    def backfill_abandoned_async(self, delay=0):
+        """Finish trades left ABANDONED by an app restart from Dhan 1-minute candles (background)."""
+        if getattr(self, "_backfill_running", False):
+            return
+        self._backfill_running = True
+
+        def _run():
+            try:
+                if delay:
+                    time.sleep(delay)
+                done = self.forward_tracker.backfill_abandoned(dhan_minute_bars)
+                if done:
+                    self._last_ft_sync_ts = 0.0
+                    self.sync_forward_test_to_sheet()
+            except Exception as e:
+                print(f"[FWD TEST] restart backfill note: {e}")
+            finally:
+                self._backfill_running = False
+        threading.Thread(target=_run, daemon=True).start()
 
     def sync_forward_test_to_sheet(self):
         """
@@ -5893,6 +6051,7 @@ class FeedEngine:
                         self.sync_forward_test_to_sheet()
                     except Exception as _sq_err:
                         print(f"[EOD 3PM] square-off error: {_sq_err}")
+                    self.backfill_abandoned_async(delay=120)   # 1-min data up to 15:00 is in by then
 
                 # ── 3:45 PM: next-day levels + eod_planner.py (once per day, non-blocking) ──
                 _after_close = _is_weekday and now_dt.time() >= NEXT_DAY_LEVELS_TIME

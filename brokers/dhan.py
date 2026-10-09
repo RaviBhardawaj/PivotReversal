@@ -142,9 +142,9 @@ class DhanAdapter(BrokerAdapter):
                 continue
         return out
 
-    def intraday_day_ohlc(self, security_id, day, segment="NSE_FNO", instrument="OPTIDX"):
-        """One session's OHLC rebuilt from Dhan's 1-minute candles (09:15-15:30 IST trades only):
-        (open, high, low, close, last_bar_time) or None when there is no data."""
+    def intraday_bars(self, security_id, day, segment="NSE_FNO", instrument="OPTIDX"):
+        """One session's 1-minute candles [(datetime IST, open, high, low, close), ...],
+        09:15-15:29 only, oldest first. Raises BrokerError with Dhan's message on failure."""
         body = {"securityId": str(security_id), "exchangeSegment": segment, "instrument": instrument,
                 "interval": "1", "oi": False,
                 "fromDate": f"{day} 09:15:00", "toDate": f"{day} 15:31:00"}
@@ -169,9 +169,15 @@ class DhanAdapter(BrokerAdapter):
                 continue
             if t.strftime("%Y-%m-%d") == day and "09:15" <= t.strftime("%H:%M") <= "15:29":
                 bars.append((t, float(o[i]), float(h[i]), float(l[i]), float(c[i])))
+        bars.sort()
+        return bars
+
+    def intraday_day_ohlc(self, security_id, day, segment="NSE_FNO", instrument="OPTIDX"):
+        """One session's OHLC rebuilt from Dhan's 1-minute candles (09:15-15:30 IST trades only):
+        (open, high, low, close, last_bar_time) or None when there is no data."""
+        bars = self.intraday_bars(security_id, day, segment, instrument)
         if not bars:
             return None
-        bars.sort()
         return (bars[0][1], max(b[2] for b in bars), min(b[3] for b in bars), bars[-1][4],
                 bars[-1][0].strftime("%H:%M"))
 

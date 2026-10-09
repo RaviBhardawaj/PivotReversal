@@ -1628,6 +1628,54 @@ def compute_points_summary(closed_rows, active_trades=None) -> dict:
     }
 
 
+DAILY_PNL_HEADERS = ['Date', 'BUY Trades', 'BUY Wins', 'BUY Losses', 'BUY PnL (Pts)',
+                     'SELL Trades', 'SELL Wins', 'SELL Losses', 'SELL PnL (Pts)',
+                     'Total Trades', 'Win %', 'NET PnL (Pts)', 'Open Live (Pts)', 'Cumulative NET (Pts)']
+
+
+def daily_pnl_table(closed_rows, active_trades=None) -> list:
+    """Date-wise points: BUY and SELL separately, from every CLOSED forward-test trade.
+    Newest date first, with a running cumulative NET and an ALL-DAYS total row at the end."""
+    days = {}
+    for r in closed_rows or []:
+        if str(r.get('Status', '')).strip() != 'CLOSED':
+            continue
+        d = str(r.get('Date', '')).strip()
+        if not d:
+            continue
+        side = 'SELL' if str(r.get('Action', '')).upper() == 'SELL' else 'BUY'
+        pnl = _safe_float(r.get('PnL_Pts', 0))
+        x = days.setdefault(d, {'BUY': [0, 0, 0, 0.0], 'SELL': [0, 0, 0, 0.0], 'live': 0.0})
+        x[side][0] += 1
+        x[side][1] += 1 if pnl > 0 else 0
+        x[side][2] += 1 if pnl < 0 else 0
+        x[side][3] += pnl
+    for t in active_trades or []:
+        d = str(t.get('Date', '')).strip()
+        if d:
+            x = days.setdefault(d, {'BUY': [0, 0, 0, 0.0], 'SELL': [0, 0, 0, 0.0], 'live': 0.0})
+            x['live'] += _safe_float(t.get('PnL_Pts', t.get('Live_PnL', 0)))
+    cum, out = 0.0, []
+    tot = {'BUY': [0, 0, 0, 0.0], 'SELL': [0, 0, 0, 0.0], 'live': 0.0}
+    for d in sorted(days):
+        x = days[d]
+        b, sl = x['BUY'], x['SELL']
+        n, w = b[0] + sl[0], b[1] + sl[1]
+        net = round(b[3] + sl[3], 2)
+        cum = round(cum + net, 2)
+        out.append([d, b[0], b[1], b[2], round(b[3], 2), sl[0], sl[1], sl[2], round(sl[3], 2),
+                    n, round(100.0 * w / n, 1) if n else 0.0, net, round(x['live'], 2), cum])
+        for k in ('BUY', 'SELL'):
+            tot[k] = [tot[k][i] + x[k][i] for i in range(4)]
+        tot['live'] += x['live']
+    out.reverse()
+    b, sl = tot['BUY'], tot['SELL']
+    n, w = b[0] + sl[0], b[1] + sl[1]
+    out.append(['ALL DAYS', b[0], b[1], b[2], round(b[3], 2), sl[0], sl[1], sl[2], round(sl[3], 2),
+                n, round(100.0 * w / n, 1) if n else 0.0, round(b[3] + sl[3], 2), round(tot['live'], 2), cum])
+    return out
+
+
 def format_points_bar(title: str, s: dict) -> str:
     """One-line +/- points banner for the top of a sheet."""
     return (f"{title}  |  Trades: {s['trades']}  |  ✅ Wins: {s['wins']} (+{s['plus_pts']:.2f} pts)  |  "
@@ -4306,6 +4354,17 @@ class FeedEngine:
                     print(f"Data validation setup note: {dverr}")
 
                 self.forward_test_sheet = ft_ws
+                try:
+                    dp_ws = None
+                    for s in spreadsheet.worksheets():
+                        if s.title == "Daily PnL":
+                            dp_ws = s
+                            break
+                    if not dp_ws:
+                        dp_ws = spreadsheet.add_worksheet(title="Daily PnL", rows=400, cols=len(DAILY_PNL_HEADERS))
+                    self.daily_pnl_sheet = dp_ws
+                except Exception as dperr:
+                    print(f"[DAILY PNL] sheet setup note: {dperr}")
                 self.sync_forward_test_to_sheet()
 
                 # Orders Log tab: mirror of live_orders_log.csv (rewritten from the CSV at start, then appended live)
@@ -4467,6 +4526,35 @@ class FeedEngine:
             self._do_sync_ft_sheet()
         finally:
             self._sheet_write_lock.release()
+
+    def _sync_daily_pnl_sheet(self, active_mem=None):
+        """Date-wise BUY / SELL points on the 'Daily PnL' tab (every closed trade, all days).
+        Rewritten when a trade closes, otherwise at most once a minute (open live points)."""
+        ws = getattr(self, "daily_pnl_sheet", None)
+        if not ws:
+            return
+        try:
+            rows = []
+            if os.path.exists(FORWARD_TEST_FILE):
+                with open(FORWARD_TEST_FILE, 'r', newline='') as f:
+                    rows = [r for r in csv.DictReader(f) if str(r.get('Status', '')).strip() == 'CLOSED']
+            sig = len(rows)
+            if sig == getattr(self, "_dp_last_sig", None) and time.time() - getattr(self, "_dp_last_ts", 0) < 60:
+                return
+            table = daily_pnl_table(rows, active_mem)
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            grid = ([[f"📅 DATE-WISE PnL (POINTS) — BUY vs SELL — closed forward-test trades — Updated: {now_str}"]
+                     + [''] * (len(DAILY_PNL_HEADERS) - 1), DAILY_PNL_HEADERS] + table)
+            if ws.row_count < len(grid) + 10:
+                ws.add_rows(len(grid) + 10 - ws.row_count)
+            ws.update(values=grid, range_name="A1")
+            prev = getattr(self, "_dp_last_len", None)
+            if prev is not None and prev > len(grid):
+                ws.batch_clear([f"A{len(grid) + 1}:N{prev}"])
+            self._dp_last_len = len(grid)
+            self._dp_last_sig, self._dp_last_ts = sig, time.time()
+        except Exception as e:
+            print(f"[DAILY PNL] sheet update note: {e}")
 
     def _do_sync_ft_sheet(self):
         """Actual sheet sync logic (runs in background thread)."""
@@ -4755,6 +4843,7 @@ class FeedEngine:
                 except Exception as _clr_err:
                     print(f"[FT SHEET] clear-below note: {_clr_err}")
             self._ft_last_grid_len = len(grid)
+            self._sync_daily_pnl_sheet(active_mem)
 
             # ── Step 6: Apply colour formatting (atomic batch call to preserve quota) ──
             try:

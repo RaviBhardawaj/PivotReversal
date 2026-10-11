@@ -35,3 +35,5 @@ _backup*/
 data_settings.json
 forward_test_trades_open.json
 forward_test_trades_open.json.tmp
+token.pickle.*
+service_account.json

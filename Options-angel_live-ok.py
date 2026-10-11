@@ -3065,35 +3065,63 @@ SmartWebSocketV2._on_error = _patched_on_error
 # GOOGLE SHEETS AUTH
 # ═══════════════════════════════════════════════════════════
 def get_gspread_client():
-    """Authenticate via OAuth2 and return a gspread client."""
+    """Authenticate with Google and return a gspread client.
+    A service-account key (service_account.json, or GOOGLE_SERVICE_ACCOUNT_FILE in .env) never
+    expires and is used when present. Otherwise the OAuth login in token.pickle is used; when
+    Google refuses it (expired or revoked), the old file is kept as token.pickle.expired and the
+    browser login opens again by itself, so the app never stops on a dead token."""
     creds      = None
     token_file = os.path.join(BASE_DIR, "token.pickle")
     creds_file = os.path.join(BASE_DIR, "credentials.json")
+    sa_file    = (os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "") or "").strip() or os.path.join(BASE_DIR, "service_account.json")
+    if not os.path.isabs(sa_file):
+        sa_file = os.path.join(BASE_DIR, sa_file)
 
-    if os.path.exists(token_file):
-        with open(token_file, "rb") as f:
-            creds = pickle.load(f)
+    if os.path.exists(sa_file):
+        from google.oauth2.service_account import Credentials as _SACreds
+        creds = _SACreds.from_service_account_file(sa_file, scopes=SCOPES)
+        print(f"[GOOGLE] Using service account {getattr(creds, 'service_account_email', '')} (no expiry)")
+    else:
+        if os.path.exists(token_file):
+            try:
+                with open(token_file, "rb") as f:
+                    creds = pickle.load(f)
+            except Exception as e:
+                print(f"[GOOGLE] Saved login unreadable ({type(e).__name__}); logging in again")
+                creds = None
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists(creds_file):
-                raise FileNotFoundError(
-                    "credentials.json not found!\n\n"
-                    "Steps to create it:\n"
-                    "1. Go to https://console.cloud.google.com/\n"
-                    "2. Create/select a project\n"
-                    "3. Enable 'Google Sheets API'\n"
-                    "4. Go to APIs & Services -> Credentials\n"
-                    "5. Create Credentials -> OAuth 2.0 Client ID -> Desktop App\n"
-                    "6. Download JSON and save as:\n"
-                    f"   {creds_file}"
-                )
-            flow  = InstalledAppFlow.from_client_secrets_file(creds_file, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(token_file, "wb") as f:
-            pickle.dump(creds, f)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                except Exception as e:
+                    print(f"[GOOGLE] Saved login refused ({str(e)[:80]}); opening the Google login again")
+                    try:
+                        os.replace(token_file, token_file + ".expired")
+                    except OSError:
+                        pass
+                    creds = None
+            if not creds or not creds.valid:
+                if not os.path.exists(creds_file):
+                    raise FileNotFoundError(
+                        "credentials.json not found!\n\n"
+                        "Steps to create it:\n"
+                        "1. Go to https://console.cloud.google.com/\n"
+                        "2. Create/select a project\n"
+                        "3. Enable 'Google Sheets API'\n"
+                        "4. Go to APIs & Services -> Credentials\n"
+                        "5. Create Credentials -> OAuth 2.0 Client ID -> Desktop App\n"
+                        "6. Download JSON and save as:\n"
+                        f"   {creds_file}"
+                    )
+                flow  = InstalledAppFlow.from_client_secrets_file(creds_file, SCOPES)
+                # access_type=offline + consent: Google always returns a fresh refresh token
+                creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
+                print("[GOOGLE] New Google login saved")
+            tmp = token_file + ".tmp"
+            with open(tmp, "wb") as f:
+                pickle.dump(creds, f)
+            os.replace(tmp, token_file)
 
     gc = gspread.authorize(creds)
     # A Sheets call without a timeout can hang the feed loop forever — cap every request

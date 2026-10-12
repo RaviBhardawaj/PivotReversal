@@ -2,6 +2,8 @@
 
 import os
 import csv
+import time
+import threading
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -69,6 +71,43 @@ class DhanAdapter(BrokerAdapter):
             raise BrokerError(f"Dhan {path} error {code}: {msg}")
         return data
 
+    # Dhan's data APIs allow only a few requests a second; a burst (50 strikes at once)
+    # gets "too many requests". Calls are spaced out, and a rate-limited or dropped call
+    # is retried, so a strike never falls back to a weaker candle because of a burst.
+    _chart_lock = threading.Lock()
+    _chart_last = 0.0
+    CHART_GAP = 0.35
+    CHART_TRIES = 4
+
+    def _chart_post(self, path, body, timeout, what):
+        last = None
+        for attempt in range(self.CHART_TRIES):
+            with DhanAdapter._chart_lock:
+                wait = DhanAdapter._chart_last + self.CHART_GAP - time.time()
+                if wait > 0:
+                    time.sleep(wait)
+                DhanAdapter._chart_last = time.time()
+            try:
+                r = self._http.post(API + path, json=body, headers=self._headers(), timeout=timeout)
+            except Exception as e:
+                last = BrokerError(f"Dhan {what} network error: {type(e).__name__}")
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            try:
+                d = r.json() if r.content else {}
+            except Exception:
+                d = {}
+            if 200 <= r.status_code < 300:
+                return d
+            code = d.get("errorCode", r.status_code)
+            msg = d.get("errorMessage") or d.get("remarks") or r.text[:200]
+            last = BrokerError(f"Dhan {what} error {code}: {msg}")
+            if not (r.status_code in (429, 500, 502, 503, 504) or str(code) in ("DH-904", "DH-908")
+                    or "too many" in str(msg).lower() or "rate" in str(msg).lower()):
+                raise last
+            time.sleep(1.0 * 2 ** attempt)
+        raise last
+
     # ── session ─────────────────────────────────────────────
     def _new_token(self):
         """Fresh access token from client ID + PIN + TOTP, so nobody has to paste a token every day."""
@@ -120,17 +159,7 @@ class DhanAdapter(BrokerAdapter):
                 "expiryCode": 0, "oi": False,
                 "fromDate": (now - timedelta(days=days)).strftime("%Y-%m-%d"),
                 "toDate": (now + timedelta(days=1)).strftime("%Y-%m-%d")}     # toDate is exclusive
-        try:
-            r = self._http.post(API + "/charts/historical", json=body, headers=self._headers(), timeout=15)
-        except Exception as e:
-            raise BrokerError(f"Dhan historical network error: {type(e).__name__}")
-        try:
-            d = r.json() if r.content else {}
-        except Exception:
-            d = {}
-        if not (200 <= r.status_code < 300):
-            raise BrokerError(f"Dhan historical error {d.get('errorCode', r.status_code)}: "
-                              f"{d.get('errorMessage') or d.get('remarks') or r.text[:200]}")
+        d = self._chart_post("/charts/historical", body, 15, "historical")
         ts, o, h, l, c = (d.get(k) or [] for k in ("timestamp", "open", "high", "low", "close"))
         ist = timezone(timedelta(hours=5, minutes=30))
         out = []
@@ -148,17 +177,7 @@ class DhanAdapter(BrokerAdapter):
         body = {"securityId": str(security_id), "exchangeSegment": segment, "instrument": instrument,
                 "interval": "1", "oi": False,
                 "fromDate": f"{day} 09:15:00", "toDate": f"{day} 15:31:00"}
-        try:
-            r = self._http.post(API + "/charts/intraday", json=body, headers=self._headers(), timeout=20)
-        except Exception as e:
-            raise BrokerError(f"Dhan intraday network error: {type(e).__name__}")
-        try:
-            d = r.json() if r.content else {}
-        except Exception:
-            d = {}
-        if not (200 <= r.status_code < 300):
-            raise BrokerError(f"Dhan intraday error {d.get('errorCode', r.status_code)}: "
-                              f"{d.get('errorMessage') or d.get('remarks') or r.text[:200]}")
+        d = self._chart_post("/charts/intraday", body, 20, "intraday")
         ts, o, h, l, c = (d.get(k) or [] for k in ("timestamp", "open", "high", "low", "close"))
         ist = timezone(timedelta(hours=5, minutes=30))
         bars = []

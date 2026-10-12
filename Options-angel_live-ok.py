@@ -4007,6 +4007,60 @@ class FeedEngine:
 
         threading.Thread(target=_loop, daemon=True, name="pivot-watchdog").start()
 
+    def upcoming_expiries(self, symbol: str, n: int = 2, from_day: date = None) -> list:
+        """The first n option expiries of the symbol that are still open on from_day (default today),
+        nearest first, as the instrument list writes them (e.g. '13OCT2026')."""
+        df = Session.scrip_df
+        if df is None:
+            return []
+        exch = get_symbol_exchange(symbol)
+        o = df[(df['name'] == symbol) & (df['exch_seg'] == exch)
+               & (df['instrumenttype'].isin(['OPTIDX', 'OPTSTK']))]
+        day = pd.Timestamp(from_day or datetime.now().date())
+        exps = {}
+        for e in o['expiry'].dropna().unique():
+            try:
+                d = pd.to_datetime(e, format='%d%b%Y')
+            except Exception:
+                continue
+            if d >= day:
+                exps[e] = d
+        return sorted(exps, key=exps.get)[:n]
+
+    def build_next_day_levels(self, symbol: str):
+        """After the close (15:45): the next session's strike levels, built from today's candle,
+        for the current AND the next expiry, then eod_planner.py, which takes its strike levels
+        from them. Runs once a day, whichever of the two 15:45 timers gets here first."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self.lock:
+            if getattr(self, "_next_levels_date", None) == today:
+                return
+            self._next_levels_date = today
+        try:
+            print(f"\n[EOD] ⏰ 15:45 → Calculating NEXT-DAY levels for {symbol}...")
+            _mtf = get_tv_multi_timeframe_pivots(symbol, force_refresh=True)
+            if _mtf:
+                with self.lock:
+                    self.mtf_pivots = _mtf
+            nd = datetime.now().date() + timedelta(days=1)
+            while nd.weekday() >= 5:
+                nd += timedelta(days=1)
+            exps = self.upcoming_expiries(symbol, 2, from_day=nd) or [None]
+            for exp in exps:
+                _mapped = self.fetch_and_map_all_strikes(symbol, exp, force_fetch=True, mode="next")
+                print(f"[EOD] ✅ Next-day strike levels {symbol} {exp or 'nearest'}: {len(_mapped or {})} strikes "
+                      f"→ strike_pivot_cache_next.json")
+        except Exception as _nd_err:
+            print(f"[EOD] next-day level calc error: {_nd_err}")
+        try:
+            import subprocess as _sp
+            _planner = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'eod_planner.py')
+            _sp.Popen([sys.executable or 'python3', _planner], cwd=os.path.dirname(_planner),
+                      stdout=open(os.path.join(BASE_DIR, 'eod_planner_output.log'), 'w'), stderr=_sp.STDOUT)
+            print("[EOD] eod_planner.py started (output: eod_planner_output.log)\n")
+        except Exception as _ep_err:
+            print(f"[EOD] eod_planner auto-run error: {_ep_err}")
+
     def fetch_and_map_all_strikes(self, symbol=None, expiry=None, force_fetch=True, mode="session") -> dict:
         """
         Fibonacci pivots (P, R1-R3, S1-S3) of the focus option strikes, exactly as TradingView's
@@ -6177,29 +6231,7 @@ class FeedEngine:
                 if _after_close and getattr(self, '_eod_planner_done_date', None) != today_date:
                     self._eod_planner_done_date = today_date
 
-                    def _next_day_levels(sym=symbol):
-                        try:
-                            print(f"\n[EOD] ⏰ 15:45 → Calculating NEXT-DAY levels for {sym}...")
-                            _mtf = get_tv_multi_timeframe_pivots(sym, force_refresh=True)
-                            if _mtf:
-                                with self.lock:
-                                    self.mtf_pivots = _mtf
-                            _mapped = self.fetch_and_map_all_strikes(sym, None, force_fetch=True, mode="next")
-                            print(f"[EOD] ✅ Next-day strike pivots mapped: {len(_mapped or {})} strikes → strike_pivot_cache.json")
-                        except Exception as _nd_err:
-                            print(f"[EOD] next-day level calc error: {_nd_err}")
-                    threading.Thread(target=_next_day_levels, daemon=True).start()
-
-                    try:
-                        import subprocess as _sp, os as _os
-                        _planner = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'eod_planner.py')
-                        _sp.Popen(['python3', _planner],
-                                  stdout=open('/tmp/eod_planner_output.log', 'w'),
-                                  stderr=_sp.STDOUT)
-                        print(f"[EOD] ⏰ 15:45 → Auto-running eod_planner.py in background...")
-                        print(f"[EOD] Output → /tmp/eod_planner_output.log\n")
-                    except Exception as _ep_err:
-                        print(f"[EOD] eod_planner auto-run error: {_ep_err}")
+                    threading.Thread(target=self.build_next_day_levels, args=(symbol,), daemon=True).start()
 
                 time.sleep(0.1)   # 100ms ultra-fast tick processing — maximum speed
 
@@ -7982,26 +8014,11 @@ class ControlPanel:
             def _calc_next_day_bg():
                 try:
                     curr_sym = self.symbol_var.get().strip().upper() or "NIFTY"
-                    print(f"\n[EOD UI] ⏰ 15:45:00 → Calculating NEXT-DAY levels for {curr_sym}...")
-                    _mtf = get_tv_multi_timeframe_pivots(curr_sym, force_refresh=True)
-                    if _mtf:
-                        with feed.lock:
-                            feed.mtf_pivots = _mtf
-                        feed.fetch_and_map_all_strikes(curr_sym, None, force_fetch=True, mode="next")
+                    feed.build_next_day_levels(curr_sym)
                     feed.sync_multi_symbol_sheet()
                     print(f"[EOD UI] ✅ Next-day levels calculated & synced to Multi-Symbol Tracker sheet.")
                 except Exception as _nd_err:
                     print(f"[EOD UI] Next-day calculation error: {_nd_err}")
-
-                try:
-                    import subprocess as _sp2, os as _os2
-                    _planner2 = _os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)), 'eod_planner.py')
-                    _sp2.Popen(['python3', _planner2],
-                               stdout=open('/tmp/eod_planner_output.log', 'w'),
-                               stderr=_sp2.STDOUT)
-                    print(f"[EOD UI] ⏰ 15:45 → eod_planner.py launched in background (output: /tmp/eod_planner_output.log)\n")
-                except Exception as _ep2_err:
-                    print(f"[EOD UI] planner auto-run error: {_ep2_err}")
 
             threading.Thread(target=_calc_next_day_bg, daemon=True).start()
 

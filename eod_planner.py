@@ -62,7 +62,11 @@ def fetch_candles(symbol=SYMBOL, days=10):
 def generate_plan(symbol=SYMBOL):
     candles = fetch_candles(symbol)
     today   = date.today()
-    past    = [c for c in candles if c["date"] < today]
+    # After the 15:30 close today's candle is complete, so tomorrow's plan is built from it;
+    # before the close (or on a holiday morning) the last completed day is the one before.
+    now     = datetime.now()
+    closed  = now.weekday() >= 5 or now.hour * 60 + now.minute >= 15 * 60 + 30
+    past    = [c for c in candles if (c["date"] <= today if closed else c["date"] < today)]
     if not past:
         print("[EOD] No historical data — check internet / Yahoo Finance"); return {}
 
@@ -107,7 +111,7 @@ def generate_plan(symbol=SYMBOL):
         },
         "strike_levels": {
             k: {
-                "symbol": v["symbol"], "type": v["opt_type"], "strike": v["strike"],
+                "symbol": v["symbol"], "type": v["opt_type"], "strike": v["strike"], "expiry": v.get("expiry", ""),
                 "H": v["prev_h"], "L": v["prev_l"], "C": v["prev_c"],
                 "S2": v["S2"], "S1": v["S1"], "P": v["P"], "R1": v["R1"], "R2": v["R2"], "R3": v["R3"]
             }
@@ -124,12 +128,39 @@ def generate_plan(symbol=SYMBOL):
     return plan
 
 
+def next_session_date(today=None):
+    nd = (today or date.today()) + timedelta(days=1)
+    while nd.weekday() >= 5:
+        nd += timedelta(days=1)
+    return nd.strftime("%Y-%m-%d")
+
+
+def load_app_next_levels(symbol=SYMBOL):
+    """Next-session strike levels the app saved at 15:45 ({token: levels}), or {} when the
+    file is missing or is for another session / symbol."""
+    try:
+        with open(os.path.join(PLAN_DIR, "strike_pivot_cache_next.json")) as f:
+            d = json.load(f)
+    except Exception:
+        return {}
+    if d.get("symbol") != symbol or d.get("basis_key") != f"{next_session_date()}:next":
+        return {}
+    return d.get("strikes") or {}
+
+
 def map_strike_pivots_for_symbol(symbol=SYMBOL, n_strikes=12):
     """
     Connects to Angel One and fetches previous day completed OHLC
     for all strikes in the trading range, computing exact Fibonacci Pivots
     matching TradingView 'Pivots Fibonacci Auto' indicator.
+    The app's own next-session levels (strike_pivot_cache_next.json, built at 15:45 from Dhan
+    for the current and the next expiry) are used when they are there for the next session;
+    Angel One is only the fallback.
     """
+    app_levels = load_app_next_levels(symbol)
+    if app_levels:
+        print(f"[STRIKE PLAN] {len(app_levels)} strike(s) from the app's next-session levels (Dhan)")
+        return app_levels
     try:
         import pyotp, pickle, time, threading
         import pandas as pd
@@ -292,12 +323,12 @@ def _print_plan(plan):
         print("\n" + "-"*80)
         print("  MAPPED STRIKE FIBONACCI PIVOTS (TradingView Aligned)")
         print("-"*80)
-        print(f"  {'Type':<4} {'Strike':<7} {'PrevH':<7} {'PrevL':<7} {'PrevC':<7} {'S2 (Buy)':<9} {'S1':<7} {'Pivot P':<8} {'R1':<7} {'R2 (Sell)':<9} {'R3':<7}")
+        print(f"  {'Expiry':<10} {'Type':<4} {'Strike':<7} {'PrevH':<7} {'PrevL':<7} {'PrevC':<7} {'S2 (Buy)':<9} {'S1':<7} {'Pivot P':<8} {'R1':<7} {'R2 (Sell)':<9} {'R3':<7}")
         print("  " + "-"*76)
-        sorted_strikes = sorted(sl.values(), key=lambda x: (x["strike"], x["type"]))
+        sorted_strikes = sorted(sl.values(), key=lambda x: (x.get("expiry", ""), x["strike"], x["type"]))
         for s in sorted_strikes:
             # Highlight focus strikes or ATM
-            print(f"  {s['type']:<4} {s['strike']:<7} {s['H']:<7.2f} {s['L']:<7.2f} {s['C']:<7.2f} {s['S2']:<9.2f} {s['S1']:<7.2f} {s['P']:<8.2f} {s['R1']:<7.2f} {s['R2']:<9.2f} {s['R3']:<7.2f}")
+            print(f"  {s.get('expiry', ''):<10} {s['type']:<4} {s['strike']:<7} {s['H']:<7.2f} {s['L']:<7.2f} {s['C']:<7.2f} {s['S2']:<9.2f} {s['S1']:<7.2f} {s['P']:<8.2f} {s['R1']:<7.2f} {s['R2']:<9.2f} {s['R3']:<7.2f}")
     print("="*80)
 
 

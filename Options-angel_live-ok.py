@@ -556,6 +556,22 @@ class StrategyStrikeState:
             self.trigger_level = "R2"
         self.signal = f"♻️ {side} {self.opt_type} restored after restart | Entry:{self.entry_price:.2f} | SL:{self.sl:.2f}"
 
+    def seed_from_closed(self, trade: dict, sl_hits: int = 0, entries: int = 1):
+        """After an app restart: show the strike's last trade of the day (entry, SL, exit) as it
+        was shown before the restart. The strike waits for a fresh sweep for any new entry."""
+        self.state         = "WAITING"
+        self.trade_status  = f"{trade.get('Exit_Reason', 'Exit')} Closed"
+        self.entry_price   = round(_safe_float(trade.get("Entry_Price", 0)), 2)
+        self.entry_time    = str(trade.get("Entry_Time", ""))
+        self.entry_sl      = round(_safe_float(trade.get("Initial_SL", 0) or trade.get("SL", 0)), 2)
+        self.sl            = self.entry_sl
+        self.targets       = [round(_safe_float(trade.get(f"Target_{i}", 0)), 2) for i in range(1, 6)]
+        self.entry_count   = entries
+        self.sl_hit_count  = sl_hits
+        side = trade.get("Action", "")
+        self.signal = (f"{'★' if side == 'BUY' else '▼'} {side} {self.opt_type} {self.trade_status} "
+                       f"@ {_safe_float(trade.get('Exit_Price', 0)):.2f} | Entry:{self.entry_price:.2f} | SL:{self.entry_sl:.2f}")
+
     def update_tick(self, ltp: float, pivots: dict, now: datetime, opt_high: float = 0.0, opt_low: float = 0.0):
         """
         Level lock: the strike's pivot levels (and so planned entry / SL / targets) are locked
@@ -1885,6 +1901,7 @@ class ForwardTestTracker:
         # (internet drop, crash, Mac sleep) picks up the same trades and keeps watching them.
         self.state_file         = os.path.splitext(filepath)[0] + "_open.json"
         self._snap_ts           = 0.0
+        self._seed_closed_cache = None
         self._restored_ids      = self._restore_snapshot()
         self._init_file()
 
@@ -2242,9 +2259,41 @@ class ForwardTestTracker:
             return trade
         return None
 
+    def _today_closed(self):
+        """Today's closed trades: the trade log plus this session's closes (by Trade_ID)."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        out = {}
+        try:
+            with open(self.filepath, 'r', newline='') as f:
+                for r in csv.DictReader(f):
+                    if r.get('Date') == today and r.get('Status', '').strip() == 'CLOSED':
+                        r = dict(r)
+                        r['Expiry'] = trade_expiry(r.get('Trade_ID'))
+                        out[r.get('Trade_ID')] = r
+        except Exception:
+            pass
+        for c in self._closed_today:
+            if c.get('Date', today) == today:
+                out[c.get('Trade_ID')] = c
+        return list(out.values())
+
     def seed_state(self, st, symbol=""):
-        """A new strike state picks up a trade restored after a restart (same strike, side, expiry)."""
+        """A new strike state picks up today's trade on that strike after a restart (same strike,
+        side, expiry): an open trade carries on; otherwise the last closed one is shown with its
+        entry, SL and exit, and the strike waits for a fresh sweep, as before the restart."""
+        side = "BUY" if st.mode == "BUY" else "SELL"
+        same = lambda t: (t.get('Action') == side and t.get('Type') == st.opt_type
+                          and int(_safe_float(t.get('Strike', 0))) == int(st.strike)
+                          and (t.get('Expiry', '') or '') == (st.expiry or '')
+                          and (not symbol or not t.get('Symbol') or t.get('Symbol') == symbol))
         if not self._restored_ids:
+            if self._seed_closed_cache is None:
+                self._seed_closed_cache = self._today_closed()
+            done = sorted((c for c in self._seed_closed_cache if same(c)),
+                          key=lambda c: (str(c.get('Exit_Time', '')), str(c.get('Entry_Time', ''))))
+            if done:
+                hits = sum(1 for c in done if 'SL Hit' in str(c.get('Exit_Reason', '')))
+                st.seed_from_closed(done[-1], sl_hits=hits, entries=len(done))
             return
         side = "BUY" if st.mode == "BUY" else "SELL"
         for t in self.get_active_trades():
@@ -2258,6 +2307,11 @@ class ForwardTestTracker:
                            and 'SL Hit' in str(c.get('Exit_Reason', '')))
                 st.seed_from_trade(t, sl_hits=hits)
                 return
+        ids, self._restored_ids = self._restored_ids, set()
+        try:
+            self.seed_state(st, symbol)            # no open trade on this strike: show its last close
+        finally:
+            self._restored_ids = ids
 
     def get_active_trades(self):
         """Return list of all currently active trades with live PnL (de-duplicated)."""

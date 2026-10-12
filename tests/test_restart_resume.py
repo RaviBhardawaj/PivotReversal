@@ -75,4 +75,18 @@ d=tracker(); r3=rows()[t3["Trade_ID"]]
 assert d.get_active_trades()==[] and r3["Status"]=="CLOSED" and r3["Exit_Time"]=="15:00:00" and "last LTP" in r3["Exit_Reason"], r3
 assert float(r3["Exit_Price"])==332.35 and float(r3["PnL_Pts"])==0.0
 print("F app off at 3 PM: the open SELL is closed at its last LTP, so the day adds up: OK")
+# G: today's closed trades still show on their strikes after a restart (AJ 12 Oct)
+FakeDT.v=datetime(2026,10,9,14,0)
+D2=tempfile.mkdtemp(); F2=os.path.join(D2,"forward_test_trades.csv")
+g=app.ForwardTestTracker(F2); g.paper_only=True
+tg=g.log_entry("NIFTY","CE",22400,"BUY",84.7,76.3,120.22,184.42,248.61,280.0,300.0,timeframe="15M Intraday",expiry="13OCT2026")
+FakeDT.v=datetime(2026,10,9,14,5); assert g.update_tick("CE",22400,75.85,expiry="13OCT2026",symbol="NIFTY")["Exit_Reason"]=="SL Hit"
+FakeDT.v=datetime(2026,10,9,14,10)
+h=app.ForwardTestTracker(F2); h.paper_only=True
+sg=app.StrategyStrikeState("CE",22400,expiry="13OCT2026",mode="BUY"); h.seed_state(sg,"NIFTY")
+assert sg.trade_status=="SL Hit Closed" and sg.entry_price==84.7 and sg.entry_sl==76.3 and sg.sl_hit_count==1 and sg.state=="WAITING", (sg.trade_status, sg.entry_price, sg.entry_sl)
+assert app.display_sl(sg.trade_status, sg.state, sg.sl, True, 84.7, entry_sl=sg.entry_sl)=="76.30"
+sg2=app.StrategyStrikeState("CE",22400,expiry="13OCT2026",mode="SELL"); h.seed_state(sg2,"NIFTY"); assert sg2.trade_status=="Waiting"
+assert h.log_entry("NIFTY","CE",22400,"BUY",85.0,77.0,120.22,184.42,timeframe="15M Intraday",expiry="13OCT2026") is not None   # one re-entry still allowed
+print("G restart: today's closed CE 22400 BUY shows again (entry 84.70, SL 76.30, SL Hit Closed): OK")
 print("RESTART RESUME TESTS PASSED")

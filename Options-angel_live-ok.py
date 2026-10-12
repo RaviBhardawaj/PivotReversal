@@ -471,6 +471,10 @@ def get_1h_trade_bias(spot: float, h1_pivots: dict) -> dict:
             "action": "Monitor — no clear S/R touch"}
 
 
+# SELL setup steps after a sweep, before the entry: the HH keeps tracking the high here
+SELL_SETUP_STATES = ("SWEEP_R2", "RECLAIM_R2", "RETEST_R2", "TRADING_IN_FAVOR_SELL", "SWEEP_R1", "RECLAIM_R1")
+
+
 class StrategyStrikeState:
     """
     Tracks state machine and liquidity sweeps for an option strike:
@@ -886,6 +890,12 @@ class StrategyStrikeState:
         if can_sell:
             fr2 = self.frozen_r2 if self.frozen_r2 > 0 else r2
 
+            # HH = the highest price of the whole sweep. Once a sweep is on, it keeps rising
+            # with price through the rejection, candle close, retest and in-favour steps until
+            # the entry (a sweep that only came near R2 can still make its high afterwards).
+            if self.hh > 0 and self.state in SELL_SETUP_STATES:
+                self.hh = round(max(self.hh, ltp, c["high"]), 2)
+
             # Step 1: Sweep / Push above R2 (Records NEW HH)
             cur_sweep_high = c["high"] if (c.get("high", 0) > 0 and c["high"] > ltp) else ltp
             if ltp > fr2 or (self.state == "WAITING" and (cur_sweep_high >= r2 or ltp >= r2 * 0.99)):
@@ -930,6 +940,7 @@ class StrategyStrikeState:
                 if candle_ok:
                     self.conf_high = round(closed.get("high", closed["close"]), 2)
                     self.conf_low  = round(closed.get("low", closed["close"]), 2)
+                    self.hh = round(max(self.hh, self.conf_high), 2)
                     self.state = "RETEST_R2"
                     self.retest_high = round(max(ltp, valid_high), 2)
                     if wick_retested:
@@ -974,16 +985,13 @@ class StrategyStrikeState:
                     fp       = self.frozen_pivots if self.frozen_pivots else pivots
                     entry_px = _ep0
 
-                    # When R2 rejection triggers, HH value is our updated SL (strictly > entry_px)
-                    if self.hh > 0 and self.hh > entry_px:
-                        effective_sl = round(self.hh, 2)
-                    elif valid_high > 0 and valid_high > entry_px:
-                        effective_sl = round(valid_high, 2)
-                    elif fp.get('R3', r3) > entry_px:
-                        effective_sl = round(fp.get('R3', r3), 2)
-                    else:
-                        effective_sl = round(entry_px * 1.10, 2)
-
+                    # SL is the sweep HH, never R3 or a % of entry (strictly > entry_px)
+                    effective_sl = round(max(self.hh, self.conf_high), 2)
+                if start_favor and effective_sl <= entry_px:
+                    self.signal = f"▼ {self.opt_type} R2 No HH above entry {entry_px:.2f} — no trade"
+                    self.state = "TRADING_IN_FAVOR_SELL"
+                    start_favor = False
+                if start_favor:
                     # 5-target ladder (descending): R1 → P → S1 → S2 → S3
                     t1 = round(fp.get('R1', r1), 2)
                     t2 = round(fp.get('P',  p),  2)
@@ -1024,15 +1032,13 @@ class StrategyStrikeState:
                     self.trigger_level = "R1"
                     fp       = self.frozen_pivots if self.frozen_pivots else pivots
                     entry_px = round(self.conf_low, 2)
-                    if self.hh > 0 and self.hh > entry_px:
-                        effective_sl = round(self.hh, 2)
-                    elif valid_high > 0 and valid_high > entry_px:
-                        effective_sl = round(valid_high, 2)
-                    elif fp.get('R2', r2) > entry_px:
-                        effective_sl = round(fp.get('R2', r2), 2)
-                    else:
-                        effective_sl = round(entry_px * 1.10, 2)
-
+                    # SL is the sweep HH, never R2 or a % of entry (strictly > entry_px)
+                    effective_sl = round(max(self.hh, self.conf_high), 2)
+                    if effective_sl <= entry_px:
+                        self.state = "RECLAIM_R1"
+                        self.signal = f"▼ {self.opt_type} R1 No HH above entry {entry_px:.2f} — no trade"
+                        confirmed = False
+                if confirmed:
                     t1 = round(fp.get('P',  p),  2)
                     t2 = round(fp.get('S1', s1), 2)
                     t3 = round(fp.get('S2', s2), 2)
@@ -3082,15 +3088,13 @@ def check_option_sell_entry(ltp: float, pivots: dict, opt_type: str = "PE",
     p,  s1, s2  = pivots["P"],  pivots["S1"], pivots["S2"]
     s3          = pivots.get("S3", max(round(s2 - (s1 - s2), 2), 0.05))
 
-    # SL is strictly the HH of the day after price reclaim/rejection (MUST be > ltp)
+    # SL is strictly the sweep HH (MUST be > ltp); never R3 or a % of the price
     if hh > 0 and hh > ltp:
         effective_sl = round(hh, 2)
     elif opt_high > 0 and opt_high > ltp:
         effective_sl = round(opt_high, 2)
-    elif r3 > ltp:
-        effective_sl = round(r3, 2)
     else:
-        effective_sl = round(ltp * 1.10, 2)
+        return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
 
     # SELL target ladder always goes DOWN through pivot levels:
     # Entry near R2 → T1:R1 → T2:P → T3:S1 → T4:S2 → T5:S3

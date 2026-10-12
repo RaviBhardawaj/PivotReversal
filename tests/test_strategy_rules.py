@@ -123,4 +123,20 @@ dip_s=[(t,R2*(2-p/S2)) for t,p in dip]
 st=run(PIV,dip_s,"SELL")
 assert st.trade_status=="Active" and st.sl==round(R2*1.08,2), (st.state, st.sl, st.signal)
 print("10b SELL mirror keeps the sweep HH %.2f: OK"%st.sl)
+# 11. SELL SL = the HH of the whole sweep, never R3 (AJ, 12 Oct: PE 22850 19OCT came within 1% of
+#     R2 without crossing it, kept rising below R2, and the SL fell back to R3 610.2 instead of the HH).
+#     The feed gave no day high, as in that trade.
+near=[(at(9,28),R2*0.985),(at(9,29),R2*0.991),(at(9,29,30),R2*0.9905),               # near-sweep, green candle, HH so far R2*0.991
+      (at(9,30,5),R2*0.998),(at(9,31),R2*0.9995),(at(9,34),R2*0.996),               # red candle, high R2*0.9995
+      (at(9,35,5),R2*0.9958),(at(9,35,30),R2*0.9955)]                               # candle closed; break of its low
+st=app.StrategyStrikeState("PE",22850,expiry="19OCT2026",mode="SELL")
+for ts,px in near:
+    FakeDT.v=ts; st.update_tick(px,PIV,ts,opt_high=px,opt_low=px)
+assert st.trade_status=="Active" and st.sl==round(R2*0.9995,2) and st.sl!=R3, (st.state, st.sl, st.signal)
+se=app.check_option_sell_entry(R2*0.9955,PIV,"PE",hh=st.hh,state=st.state,level=st.trigger_level,opt_high=R2*0.9955)
+assert se["SL"]==st.sl, (se["SL"], st.sl)
+print("11 SELL near-sweep: SL is the sweep HH %.2f (R3 %.2f not used): OK"%(st.sl,R3))
+se=app.check_option_sell_entry(R2*0.99,PIV,"PE",hh=0,state="CONFIRMED_SELL",level="R2",opt_high=0)
+assert not se["entry"], se
+print("11b no HH above the price: no SELL signal, never an R3 SL: OK")
 print("STRATEGY RULE TESTS PASSED")

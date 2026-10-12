@@ -53,7 +53,7 @@ When the entry is confirmed:
 - Live SELL orders are on by default, same as BUY (setting "Take SELL setups"). Every setup is recorded in the sheets; one that gets no order shows the reason (Orders sheet row NO ORDER, and the trade's Order_ID).
 
 When the entry is confirmed:
-- **SL** is HH.
+- **SL** is HH: the highest price of the whole sweep, which keeps rising with price through the rejection, candle close and retest until the entry. Never R3 or R2; with no HH above the entry there is no trade.
 - **Targets:** R1, P, S1, S2, S3.
 
 ## 5. Exits (forward test and paper orders)

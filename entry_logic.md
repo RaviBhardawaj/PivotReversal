@@ -33,7 +33,7 @@ The buy level is S2, or S1 when S2 ≤ 0.05.
    - If its wick touched the level (within 1.5%), the retest counts as done.
 4. **Retest.** Otherwise, price has to dip back within 1.5% of the level while holding above LL. A break above the confirmation high before the retest does not enter.
 5. **Entry: break above the confirmation high.** After the retest, LTP trades above the confirmation candle's high, and the state becomes `CONFIRMED_BUY`.
-   - If price falls back below the level first, it is a new sweep: new LL, and a new confirmation candle is needed.
+   - If price falls back below the level first, a new confirmation candle is needed. The LL stays the lowest price of the whole sweep: a shallower dip never moves the SL closer.
 
 When the entry is confirmed:
 - **Entry price** is the confirmation candle's high. The forward test records the live LTP at that moment.

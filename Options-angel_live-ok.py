@@ -723,13 +723,10 @@ class StrategyStrikeState:
             # Step 1: Sweep / Approach below Support (Records NEW LL)
             cur_sweep_low = c["low"] if (c.get("low", 0) > 0 and c["low"] < ltp) else ltp
             if ltp < fs_sup or (self.state == "WAITING" and (cur_sweep_low <= sup_thresh or ltp <= sup_thresh * 1.01)):
-                # A new sweep (price back below the level after a reclaim) starts a NEW LL: the SL
-                # is the low of the sweep this entry comes from, not an older, deeper low.
-                fresh_sweep = self.state != f"SWEEP_{active_lvl}"
                 self.state         = f"SWEEP_{active_lvl}"
                 self.trigger_level = active_lvl
                 sweep_ll = round(min(cur_sweep_low, ltp), 2)
-                self.ll  = sweep_ll if (self.ll == 0 or fresh_sweep) else round(min(self.ll, sweep_ll), 2)
+                self.ll  = sweep_ll if self.ll == 0 else round(min(self.ll, sweep_ll), 2)
                 if (active_lvl == "S2" and self.frozen_s2 == 0.0) or (active_lvl == "S1" and self.frozen_s1 == 0.0):
                     if active_lvl == "S2": self.frozen_s2 = round(s2, 2)
                     else:                  self.frozen_s1 = round(s1, 2)
@@ -747,11 +744,7 @@ class StrategyStrikeState:
                 self.state         = f"RECLAIM_{active_lvl}"
                 self.trigger_level = active_lvl
                 if self.ll == 0:
-                    # sweep not seen tick by tick: LL = low of this or the last 5M candle,
-                    # the day low only when neither went below the level
-                    _rl = [x for x in (c.get("low", 0), closed.get("low", 0) if has_closed_candle else 0) if x > 0]
-                    _rl = min(_rl) if _rl else 0
-                    self.ll = round(_rl if 0 < _rl < sup_thresh else (valid_low if valid_low > 0 else ltp), 2)
+                    self.ll = round(valid_low if valid_low > 0 else ltp, 2)
                 if self.sweep_bucket < 0:
                     self.sweep_bucket = c["bucket"]
                 self.signal = f"★ {self.opt_type} RECLAIM {active_lvl} — Awaiting Bullish Candle Close"
@@ -880,11 +873,10 @@ class StrategyStrikeState:
             # Step 1: Sweep / Push above R2 (Records NEW HH)
             cur_sweep_high = c["high"] if (c.get("high", 0) > 0 and c["high"] > ltp) else ltp
             if ltp > fr2 or (self.state == "WAITING" and (cur_sweep_high >= r2 or ltp >= r2 * 0.99)):
-                fresh_sweep = self.state != "SWEEP_R2"      # a new sweep starts a NEW HH
                 self.state         = "SWEEP_R2"
                 self.trigger_level = "R2"
                 sweep_hh = round(max(cur_sweep_high, ltp), 2)
-                self.hh  = sweep_hh if (self.hh == 0 or fresh_sweep) else round(max(self.hh, sweep_hh), 2)
+                self.hh  = sweep_hh if self.hh == 0 else round(max(self.hh, sweep_hh), 2)
                 if self.frozen_r2 == 0.0:
                     self.frozen_r2 = round(r2, 2)
                     self.frozen_pivots = {k: (round(v, 2) if isinstance(v, (int, float)) else v) for k, v in pivots.items()}
@@ -900,8 +892,7 @@ class StrategyStrikeState:
                 self.state         = "RECLAIM_R2"
                 self.trigger_level = "R2"
                 if self.hh == 0:
-                    _rh = max(c.get("high", 0), closed.get("high", 0) if has_closed_candle else 0)
-                    self.hh = round(_rh if _rh > r2 else (valid_high if valid_high > 0 else ltp), 2)
+                    self.hh = round(valid_high if valid_high > 0 else ltp, 2)
                 if self.sweep_bucket < 0:
                     self.sweep_bucket = c["bucket"]
                 self.signal = f"▼ {self.opt_type} REJECT R2 — Awaiting Bearish Candle Close"

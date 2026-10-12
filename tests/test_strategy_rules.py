@@ -110,17 +110,17 @@ nr2=nr+[(at(9,36),S2*1.01),(at(9,37),S2*1.05),(at(9,38),CH9+0.2)]
 st=run(PIV,nr2,"BUY")
 assert st.trade_status=="Active" and st.entry_price==CH9, (st.state, st.signal)
 print("9 no entry before the retest; after the retest, entry above confirmation high %.2f: OK"%CH9)
-# 10. SL = LL of the sweep the entry comes from: an earlier, deeper sweep that never confirmed
-#     does not set the SL (AJ, 12 Oct: SL must be the LL as per rule)
-two=[(at(9,20),S2*1.05),(at(9,21),S2*0.80),(at(9,23),S2*1.01),(at(9,24),S2*1.02),     # deep sweep, reclaim
-     (at(9,25),S2*1.10),(at(9,29),S2*1.06),(at(9,30),S2*1.06),                          # red candles: no confirmation
-     (at(10,0,10),S2*0.97),(at(10,1),S2*0.97),(at(10,2),S2*1.003),(at(10,4),S2*1.008),  # new sweep, green candle
-     (at(10,5),S2*1.004),(at(10,6),S2*1.012)]
-st=run(PIV,two,"BUY")
-assert st.trade_status=="Active" and st.sl==round(S2*0.97,2), (st.state, st.sl, st.signal)
-print("10 new sweep after a failed one: SL is the new sweep's LL %.2f (not the older %.2f): OK"%(st.sl,S2*0.80))
-two_s=[(t,R2*(2-p/S2)) for t,p in two]
-st=run(PIV,two_s,"SELL")
-assert st.trade_status=="Active" and st.sl==round(R2*1.03,2), (st.state, st.sl, st.signal)
-print("10b SELL mirror: SL is the new sweep's HH %.2f: OK"%st.sl)
+# 10. SL = the LL of the whole sweep. Price dipping under the level again while the
+#     confirmation candle forms does NOT tighten the SL to that shallower dip (AJ, 12 Oct:
+#     CE 22400 re-entry got SL 79.25 instead of the sweep LL and was stopped out in a minute)
+dip=[(at(10,0,10),S2*0.97),(at(10,0,40),S2*0.92),(at(10,4),S2*0.96),                     # sweep candle, LL S2*0.92
+     (at(10,5),S2*1.003),(at(10,6),S2*0.99),(at(10,7),S2*1.006),(at(10,9),S2*1.008),         # reclaim, re-dip S2*0.99
+     (at(10,10),S2*1.004),(at(10,11),S2*1.012)]                                               # green candle closes, break
+st=run(PIV,dip,"BUY")
+assert st.trade_status=="Active" and st.sl==round(S2*0.92,2), (st.state, st.sl, st.signal)
+print("10 re-dip during the reclaim keeps the sweep LL %.2f as SL: OK"%st.sl)
+dip_s=[(t,R2*(2-p/S2)) for t,p in dip]
+st=run(PIV,dip_s,"SELL")
+assert st.trade_status=="Active" and st.sl==round(R2*1.08,2), (st.state, st.sl, st.signal)
+print("10b SELL mirror keeps the sweep HH %.2f: OK"%st.sl)
 print("STRATEGY RULE TESTS PASSED")

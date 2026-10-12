@@ -3193,7 +3193,20 @@ class Session:
                     cls.scrip_df = cached
                     print(f"   ScripMaster loaded from today's cache ({len(cached)} instruments)")
                     return
+                if (now - made).days < 4:
+                    # A recent list has every contract the app trades: start with it at once and
+                    # fetch today's list in the background (it is large; slow internet would hold
+                    # the start for minutes).
+                    cls.scrip_df = cached
+                    print(f"   ScripMaster: using the {made:%d %b} list ({len(cached)} instruments); "
+                          f"today's list downloads in the background")
+                    threading.Thread(target=cls._download_scrip, args=(cache_path, now, cached), daemon=True).start()
+                    return
+        cls._download_scrip(cache_path, now, cached)
 
+    @classmethod
+    def _download_scrip(cls, cache_path, now, cached=None):
+        import pickle as _pkl
         print("   Downloading ScripMaster from Angel One (once per day)...")
         try:
             resp = requests.get(SCRIP_URL, timeout=60, stream=True)
@@ -3218,8 +3231,9 @@ class Session:
         cls.scrip_df = df
 
         try:
-            with open(cache_path, "wb") as f:
-                _pkl.dump(cls.scrip_df, f)
+            with open(cache_path + ".tmp", "wb") as f:
+                _pkl.dump(df, f)
+            os.replace(cache_path + ".tmp", cache_path)
             print(f"   ScripMaster cached → {cache_path}")
         except Exception as e:
             print(f"   Cache save failed: {e}")

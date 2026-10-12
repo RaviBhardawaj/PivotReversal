@@ -52,6 +52,7 @@ print("B after restart: both open trades restored (trailed SL kept), sheet rows 
 st=app.StrategyStrikeState("PE",22300,expiry="19OCT2026",mode="BUY"); b.seed_state(st,"NIFTY")
 assert st.state=="CONFIRMED_BUY" and st.trade_status=="Target 1 Hit" and st.entry_price==104.0 and st.sl==104.0 and st.sl_hit_count==1, (st.state,st.trade_status)
 st2=app.StrategyStrikeState("PE",22300,expiry="19OCT2026",mode="SELL"); b.seed_state(st2,"NIFTY"); assert st2.state=="WAITING"
+assert act[t2["Trade_ID"]]["Initial_SL"]==94.0 and st.entry_sl==94.0 and st.sl==104.0, (act[t2["Trade_ID"]].get("Initial_SL"), st.entry_sl)
 print("C strategy state resumes CONFIRMED_BUY / Target 1 Hit, re-entry count kept: OK")
 
 # no duplicate entry on the restored strike; the SL hit closes it after the restart

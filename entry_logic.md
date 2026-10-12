@@ -58,7 +58,7 @@ When the entry is confirmed:
 
 ## 5. Exits (forward test and paper orders)
 - **SL hit:** the trade closes at LTP.
-- **Target ladder:** at T1 the SL moves to entry, at T2 it moves to T1, and so on.
+- **Target ladder:** at T1 the SL moves to entry, at T2 it moves to T1, and so on. The SL column keeps showing the LL / HH the trade was entered with; the trailed stop follows in brackets, e.g. `20.00 (trail 47.00)`.
 - **3:00 PM:** every open trade closes at LTP.
 - **Re-entry:** after the first SL hit on a strike, one re-entry is allowed with a new LL/HH SL. A second SL hit blocks that strike for the day.
 - Active trades are no longer force-closed mid-session. The old "stale reset" is off.

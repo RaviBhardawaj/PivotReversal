@@ -93,7 +93,7 @@ assert len(done)==1 and ("NIFTY","13OCT2026",22150,"CE","2026-10-09") in calls, 
 rows={r["Trade_ID"]:r for r in csv.DictReader(open(F))}
 ce=rows["NIFTY_CE_22150_13OCT2026_20261009_112525"]
 assert ce["Status"]=="CLOSED" and ce["Exit_Reason"]=="Trailing SL Hit"+app.RESTART_FILL_NOTE, ce
-assert float(ce["PnL_Pts"])==36.03 and float(ce["Max_Pts"])==70.0 and float(ce["SL"])==373.97 and ce["Exit_Time"]=="11:28:00", ce
+assert float(ce["PnL_Pts"])==36.03 and float(ce["Max_Pts"])==70.0 and float(ce["SL"])==430.0 and ce["Exit_Time"]=="11:28:00", ce
 assert rows["NIFTY_PE_22300_19OCT2026_20261009_112519"]["Status"]=="ABANDONED"
 assert rows["NIFTY_PE_22000_13OCT2026_20261009_100000"]["Status"]=="CLOSED"
 assert len(tr.get_closed_trades_from_file())==2

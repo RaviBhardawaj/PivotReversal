@@ -191,13 +191,17 @@ OPEN_TRADE_STATUSES = ("Active", "Target 1 Hit", "Target 2 Hit", "Target 3 Hit",
 
 
 def display_sl(trade_status: str, m5_state: str, sl: float, is_buy: bool, planned_ep: float,
-               ll: float = 0.0, hh: float = 0.0) -> str:
-    """SL text for the dashboard and sheet. Once a trade is entered its real (trailed) SL is
-    always shown, at every target and after the exit; before entry only a setup preview."""
+               ll: float = 0.0, hh: float = 0.0, entry_sl: float = 0.0) -> str:
+    """SL text for the dashboard and sheet. Once a trade is entered its SL is the LL (HH for a
+    SELL) it was entered with, at every target and after the exit; when the SL has trailed
+    (T1 -> entry, T2 -> T1 ...) the trailed stop follows in brackets. Before entry: a preview."""
     ts, m5 = str(trade_status or ""), str(m5_state or "")
     entered = ts in OPEN_TRADE_STATUSES or "CONFIRMED" in m5 or ("Hit" in ts) or ("Closed" in ts)
-    if entered and sl > 0:
-        return f"{sl:.2f}"
+    if entered and (entry_sl > 0 or sl > 0):
+        base = entry_sl if entry_sl > 0 else sl
+        if sl > 0 and abs(sl - base) >= 0.01:
+            return f"{base:.2f} (trail {sl:.2f})"
+        return f"{base:.2f}"
     if entered or ("RECLAIM" in m5 if is_buy else "REJECT" in m5):
         if is_buy:
             eff = ll if (0 < ll < planned_ep) else (sl if (0 < sl < planned_ep) else round(planned_ep * 0.90, 2))
@@ -504,6 +508,7 @@ class StrategyStrikeState:
         self.entry_price   = 0.0
         self.entry_time    = ""
         self.sl            = 0.0
+        self.entry_sl      = 0.0              # SL at entry (the LL / HH), kept when the SL trails
         self.targets       = []
         self.signal        = "WAITING"
         self.last_ltp      = 0.0
@@ -539,14 +544,15 @@ class StrategyStrikeState:
         self.entry_price   = round(_safe_float(trade.get("Entry_Price", 0)), 2)
         self.entry_time    = str(trade.get("Entry_Time", ""))
         self.sl            = round(_safe_float(trade.get("SL", 0)), 2)
+        self.entry_sl      = round(_safe_float(trade.get("Initial_SL", 0)), 2) or self.sl
         self.targets       = [round(_safe_float(trade.get(f"Target_{i}", 0)), 2) for i in range(1, 6)]
         self.entry_count   = 1 + sl_hits
         self.sl_hit_count  = sl_hits
         if side == "BUY":
-            self.ll = self.sl
+            self.ll = self.entry_sl
             self.trigger_level = "S2"
         else:
-            self.hh = self.sl
+            self.hh = self.entry_sl
             self.trigger_level = "R2"
         self.signal = f"♻️ {side} {self.opt_type} restored after restart | Entry:{self.entry_price:.2f} | SL:{self.sl:.2f}"
 
@@ -657,7 +663,7 @@ class StrategyStrikeState:
                     self.trigger_level = "S1" if use_s1 else "S2"
                     self.ll            = round(ltp, 2)
                     self.trade_status  = "Waiting"
-                    self.sl = self.entry_price = 0.0
+                    self.sl = self.entry_price = self.entry_sl = 0.0
                     self.retest_done   = False
                     self.retest_low    = self.retest_high = 0.0
                     self.conf_high = self.conf_low = 0.0
@@ -673,7 +679,7 @@ class StrategyStrikeState:
                     self.trigger_level = "R2"
                     self.hh            = round(ltp, 2)
                     self.trade_status  = "Waiting"
-                    self.sl = self.entry_price = 0.0
+                    self.sl = self.entry_price = self.entry_sl = 0.0
                     self.retest_done   = False
                     self.retest_low    = self.retest_high = 0.0
                     self.conf_high = self.conf_low = 0.0
@@ -844,6 +850,7 @@ class StrategyStrikeState:
                     self.entry_price  = entry_px
                     self.entry_time   = now.strftime("%H:%M:%S")
                     self.sl           = effective_sl
+                    self.entry_sl     = effective_sl
                     self.targets      = [t1, t2, t3, t4, t5]
                     mkt_ctx = "Mkt Bullish ↑" if self.opt_type == "CE" else "Mkt Bearish ↓"
                     s2_tag = " (S2<=0.05)" if use_s1_for_buy else ""
@@ -981,6 +988,7 @@ class StrategyStrikeState:
                     self.entry_price  = entry_px
                     self.entry_time   = now.strftime("%H:%M:%S")
                     self.sl           = effective_sl
+                    self.entry_sl     = effective_sl
                     self.targets      = [t1, t2, t3, t4, t5]
                     mkt_ctx = "Mkt Bearish ↓" if self.opt_type == "CE" else "Mkt Bullish ↑"
                     re_tag = " [RE-ENTRY with New HH SL]" if self.sl_hit_count > 0 else ""
@@ -1027,6 +1035,7 @@ class StrategyStrikeState:
                     self.entry_price  = entry_px
                     self.entry_time   = now.strftime("%H:%M:%S")
                     self.sl           = effective_sl
+                    self.entry_sl     = effective_sl
                     self.targets      = [t1, t2, t3, t4, t5]
                     mkt_ctx = "Mkt Bearish ↓" if self.opt_type == "CE" else "Mkt Bullish ↑"
                     self.signal       = f"▼ SELL {self.opt_type} [{mkt_ctx} | R1 Reject Confirmed | Entry:{entry_px:.2f} | HH SL:{effective_sl:.2f} | T1:{t1:.1f} T2:{t2:.1f} T3:{t3:.1f} T4:{t4:.1f} T5:{t5:.1f}]"
@@ -1044,7 +1053,7 @@ class StrategyStrikeState:
                 if stale_buy or stale_sell:
                     self.state        = "WAITING"
                     self.trade_status = "Waiting"
-                    self.sl = self.entry_price = 0.0
+                    self.sl = self.entry_price = self.entry_sl = 0.0
                     self.ll = self.hh = 0.0
                     self.retest_done  = False
                     self.retest_low   = 0.0
@@ -1695,7 +1704,7 @@ def side_trades_table(rows, side: str, active_trades=None) -> list:
     closed ones. Trades still open at 3 PM are closed at the 3 PM LTP and show it here."""
     out = []
     def _row(r, live=False):
-        e, sl = _safe_float(r.get('Entry_Price', 0)), _safe_float(r.get('SL', 0))
+        e, sl = _safe_float(r.get('Entry_Price', 0)), _safe_float(r.get('Initial_SL') or r.get('SL', 0))
         hi, lo = _safe_float(r.get('Trade_High', e)), _safe_float(r.get('Trade_Low', e))
         best = (hi - e) if side == 'BUY' else (e - lo)
         px = _safe_float(r.get('Current_Price', e)) if live else _safe_float(r.get('Exit_Price', 0))
@@ -1950,9 +1959,16 @@ class ForwardTestTracker:
         self._sl_hit_count = {tup(k): int(n) for k, n in d.get("sl_counts", [])}
         self._closed_today = list(d.get("closed_today", []))
         ids = set()
+        try:
+            with open(self.filepath, 'r', newline='') as f:
+                entry_sl = {r.get('Trade_ID'): _safe_float(r.get('SL', 0)) for r in csv.DictReader(f)}
+        except Exception:
+            entry_sl = {}
         for t in d.get("active", []):
             if t.get('Status') != 'ACTIVE':
                 continue
+            if not t.get('Initial_SL'):
+                t['Initial_SL'] = entry_sl.get(t.get('Trade_ID')) or t.get('SL', 0)
             for k in self._trade_keys(t):
                 if k not in self.active_trades:
                     self.active_trades[k] = t
@@ -2047,6 +2063,7 @@ class ForwardTestTracker:
             'Action':       action,          # 'BUY' or 'SELL'
             'Entry_Price':  round(entry_price, 2),
             'SL':           round(sl, 2),
+            'Initial_SL':   round(sl, 2),   # the LL / HH at entry; 'SL' trails at the targets
             'Target_1':     round(t1, 2),
             'Target_2':     round(t2, 2),
             'Target_3':     round(t3, 2),
@@ -2318,7 +2335,7 @@ class ForwardTestTracker:
             for k in ('Entry_Price', 'SL', 'Target_1', 'Target_2', 'Target_3', 'Target_4', 'Target_5'):
                 t[k] = _safe_float(r.get(k, 0))
             t['Strike'] = int(_safe_float(r.get('Strike', 0)))
-            t.update({'Trade_High': t['Entry_Price'], 'Trade_Low': t['Entry_Price'], 'Target_Hit': 0})
+            t.update({'Trade_High': t['Entry_Price'], 'Trade_Low': t['Entry_Price'], 'Target_Hit': 0, 'Initial_SL': t['SL']})
             try:
                 bars = fetch_bars(t.get('Symbol', ''), exp, t['Strike'], t.get('Type', ''), day)
             except Exception as e:
@@ -2449,7 +2466,7 @@ class ForwardTestTracker:
                         updated_trade['Symbol'],
                         updated_trade['Type'], updated_trade['Strike'],
                         updated_trade['Action'], updated_trade['Entry_Price'],
-                        updated_trade['SL'], updated_trade['Target_1'],
+                        updated_trade.get('Initial_SL') or updated_trade['SL'], updated_trade['Target_1'],
                         updated_trade['Target_2'],
                         updated_trade.get('Target_3', 0),
                         updated_trade.get('Target_4', 0),
@@ -4961,7 +4978,7 @@ class FeedEngine:
                     hh_str,       # Highest price since entry (HH after entry)
                     ll_str,       # Lowest price since entry (LL after entry)
                     max_str,      # Max Result points
-                    t.get('SL', 0),
+                    (t.get('Initial_SL') or t.get('SL', 0)),
                     t.get('Target_1', 0),
                     t.get('Target_2', 0),
                     t.get('Target_3', 0),
@@ -5745,6 +5762,7 @@ class FeedEngine:
                             "ll":           eff_ll,
                             "hh":           eff_hh,
                             "sl":           calc_sl_b,
+                            "entry_sl":     round(st_buy.entry_sl, 2),
                             "entry_price":  calc_ep_b,
                             "targets":      tgts_b,
                             "target":       tgts_b[0] if tgts_b else 0.0,
@@ -5808,6 +5826,7 @@ class FeedEngine:
                             "ll":           eff_ll,
                             "hh":           eff_hh,
                             "sl":           calc_sl_s,
+                            "entry_sl":     round(st_sell.entry_sl, 2),
                             "entry_price":  calc_ep_s,
                             "targets":      tgts_s,
                             "target":       tgts_s[0] if tgts_s else 0.0,
@@ -5872,11 +5891,11 @@ class FeedEngine:
                     if is_buy:
                         planned_ep = round(s1_raw if is_s1_buy else s2_raw, 2)
                         # SL is calculated AFTER entry: LL when price reclaims S1/S2 and candle close gives entry
-                        sl_str = display_sl(trade_st_row, m5_st, sl_val, True, planned_ep, ll=ll_val)
+                        sl_str = display_sl(trade_st_row, m5_st, sl_val, True, planned_ep, ll=ll_val, entry_sl=w.get("entry_sl", 0))
                     else:
                         planned_ep = round(w.get("r2", 0) if w.get("r2", 0) > 1.0 else w.get("r1", 0), 2)
                         # SL is calculated AFTER entry: HH when price rejects R2 and candle close gives entry
-                        sl_str = display_sl(trade_st_row, m5_st, sl_val, False, planned_ep, hh=hh_val)
+                        sl_str = display_sl(trade_st_row, m5_st, sl_val, False, planned_ep, hh=hh_val, entry_sl=w.get("entry_sl", 0))
 
                     # Targets T1 / T2 / T3 from the full target ladder
                     tgts = w.get("targets", [])
@@ -7641,13 +7660,13 @@ class ControlPanel:
                 planned_ep = round(s1_raw if is_s1_buy else s2_raw, 2)
                 lvl_label = "S1" if is_s1_buy else "S2"
                 s2_note = " [S2<=0]" if is_s1_buy else ""
-                sl_str = display_sl(trade_st, m5_t, sl_v, True, planned_ep, ll=ll_v)
+                sl_str = display_sl(trade_st, m5_t, sl_v, True, planned_ep, ll=ll_v, entry_sl=w.get("entry_sl", 0))
             else:
                 planned_ep = round(w.get("r2", 0) if w.get("r2", 0) > 1.0 else w.get("r1", 0), 2)
                 lvl_label = "R2"
                 s2_note = ""
                 is_s1_buy = False
-                sl_str = display_sl(trade_st, m5_t, sl_v, False, planned_ep, hh=hh_v)
+                sl_str = display_sl(trade_st, m5_t, sl_v, False, planned_ep, hh=hh_v, entry_sl=w.get("entry_sl", 0))
 
             # T1 / T2 / T3 / T4 from targets list or planned levels
             tgts = w.get("targets", [])

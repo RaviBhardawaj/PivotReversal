@@ -102,4 +102,9 @@ for ts in ("Active","Target 1 Hit","Target 2 Hit","Target 3 Hit","Target 4 Hit",
 assert ds("Waiting","WAITING",0,True,96.0,ll=90.0)=="-"
 assert ds("Waiting","RECLAIM_S2",0,True,96.0,ll=90.0)=="90.00"        # setup preview = LL
 print("G SL shown after entry at every target and after the exit: OK")
+# H: after entry the SL column shows the LL the trade was entered with, trail in brackets (AJ 12 Oct)
+assert app.display_sl("Target 1 Hit","CONFIRMED_BUY",47.0,True,47.0,ll=20.0,entry_sl=20.0)=="20.00 (trail 47.00)"
+assert app.display_sl("Active","CONFIRMED_BUY",20.0,True,47.0,entry_sl=20.0)=="20.00"
+assert app.display_sl("Active","CONFIRMED_SELL",231.0,False,200.0,entry_sl=231.0)=="231.00"
+print("H SL column = entry LL/HH, trailed stop in brackets: OK")
 print("LIVE ENTRY TESTS PASSED")

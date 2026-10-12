@@ -6674,6 +6674,12 @@ class ControlPanel:
             self.tree.heading(c, text=c)
             self.tree.column(c, width=cfg_c["width"], anchor=cfg_c["anchor"], minwidth=cfg_c["minwidth"])
 
+        # Pivot levels S3..R3 shown on the right, after Status / Order (row values keep their order)
+        _lv = ("S3", "S2", "S1", "P", "R1", "R2", "R3")
+        _plan = ("Plan S2", "Plan P", "Plan R2", "Plan Signal", "vs Plan")
+        self.tree["displaycolumns"] = ([c for c in cols if c not in _lv and c not in _plan]
+                                       + list(_lv) + list(_plan))
+
         self.tree.grid(row=0, column=0, sticky="nsew")
         tree_scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         tree_scroll_y.grid(row=0, column=1, sticky="ns")

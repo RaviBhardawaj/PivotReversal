@@ -1094,25 +1094,25 @@ class StrategyStrikeState:
                         self.signal = f"★ BUY {self.opt_type} All Targets Hit! Final T5:{self.targets[4]:.1f} @ {ltp:.2f}"
                     elif len(self.targets) > 3 and ltp >= self.targets[3]:
                         self.trade_status = "Target 4 Hit"
-                        if len(self.targets) > 2 and self.targets[2] > self.sl:
+                        if TRAIL_SL and (len(self.targets) > 2 and self.targets[2] > self.sl):
                             self.sl = round(self.targets[2], 2)   # trail SL to T3
                         t5_val = self.targets[4] if len(self.targets) > 4 else round(self.targets[3] * 1.05, 2)
-                        self.signal = f"★ BUY {self.opt_type} Target 4 Hit @ {ltp:.2f} | Support Sustained → Aiming T5:{t5_val:.1f} | Trailed SL:{self.sl:.1f}"
+                        self.signal = f"★ BUY {self.opt_type} Target 4 Hit @ {ltp:.2f} | Support Sustained → Aiming T5:{t5_val:.1f} | SL:{self.sl:.1f}"
                     elif len(self.targets) > 2 and ltp >= self.targets[2]:
                         self.trade_status = "Target 3 Hit"
-                        if len(self.targets) > 1 and self.targets[1] > self.sl:
+                        if TRAIL_SL and (len(self.targets) > 1 and self.targets[1] > self.sl):
                             self.sl = round(self.targets[1], 2)   # trail SL to T2
-                        self.signal = f"★ BUY {self.opt_type} Target 3 Hit @ {ltp:.2f} | Support Sustained → Aiming T4:{self.targets[3]:.1f} | Trailed SL:{self.sl:.1f}"
+                        self.signal = f"★ BUY {self.opt_type} Target 3 Hit @ {ltp:.2f} | Support Sustained → Aiming T4:{self.targets[3]:.1f} | SL:{self.sl:.1f}"
                     elif len(self.targets) > 1 and ltp >= self.targets[1]:
                         self.trade_status = "Target 2 Hit"
-                        if self.targets[0] > self.sl:
+                        if TRAIL_SL and (self.targets[0] > self.sl):
                             self.sl = round(self.targets[0], 2)   # trail SL to T1
-                        self.signal = f"★ BUY {self.opt_type} Target 2 Hit @ {ltp:.2f} | Support Sustained → Aiming T3:{self.targets[2]:.1f} | Trailed SL:{self.sl:.1f}"
+                        self.signal = f"★ BUY {self.opt_type} Target 2 Hit @ {ltp:.2f} | Support Sustained → Aiming T3:{self.targets[2]:.1f} | SL:{self.sl:.1f}"
                     elif ltp >= self.targets[0]:
                         self.trade_status = "Target 1 Hit"
-                        if self.entry_price > self.sl:
+                        if TRAIL_SL and (self.entry_price > self.sl):
                             self.sl = round(self.entry_price, 2)  # trail SL to Entry (breakeven)
-                        self.signal = f"★ BUY {self.opt_type} Target 1 Hit @ {ltp:.2f} | Support Sustained → Aiming T2:{self.targets[1]:.1f} | Trailed SL:{self.sl:.1f}"
+                        self.signal = f"★ BUY {self.opt_type} Target 1 Hit @ {ltp:.2f} | Support Sustained → Aiming T2:{self.targets[1]:.1f} | SL:{self.sl:.1f}"
             elif "SELL" in self.signal:
                 if self.sl > 0 and ltp >= self.sl:
                     self.trade_status = "Trailing SL Hit" if (self.entry_price > 0 and self.sl <= self.entry_price) else "SL Hit"
@@ -1123,25 +1123,25 @@ class StrategyStrikeState:
                         self.signal = f"▼ SELL {self.opt_type} All Targets Hit! Final T5:{self.targets[4]:.1f} @ {ltp:.2f}"
                     elif len(self.targets) > 3 and ltp <= self.targets[3]:
                         self.trade_status = "Target 4 Hit"
-                        if len(self.targets) > 2 and (self.sl == 0 or self.targets[2] < self.sl):
+                        if TRAIL_SL and (len(self.targets) > 2 and (self.sl == 0 or self.targets[2] < self.sl)):
                             self.sl = round(self.targets[2], 2)
                         t5_val = self.targets[4] if len(self.targets) > 4 else round(self.targets[3] * 0.95, 2)
-                        self.signal = f"▼ SELL {self.opt_type} Target 4 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T5:{t5_val:.1f} | Trailed SL:{self.sl:.1f}"
+                        self.signal = f"▼ SELL {self.opt_type} Target 4 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T5:{t5_val:.1f} | SL:{self.sl:.1f}"
                     elif len(self.targets) > 2 and ltp <= self.targets[2]:
                         self.trade_status = "Target 3 Hit"
-                        if len(self.targets) > 1 and (self.sl == 0 or self.targets[1] < self.sl):
+                        if TRAIL_SL and (len(self.targets) > 1 and (self.sl == 0 or self.targets[1] < self.sl)):
                             self.sl = round(self.targets[1], 2)
-                        self.signal = f"▼ SELL {self.opt_type} Target 3 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T4:{self.targets[3]:.1f} | Trailed SL:{self.sl:.1f}"
+                        self.signal = f"▼ SELL {self.opt_type} Target 3 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T4:{self.targets[3]:.1f} | SL:{self.sl:.1f}"
                     elif len(self.targets) > 1 and ltp <= self.targets[1]:
                         self.trade_status = "Target 2 Hit"
-                        if self.sl == 0 or self.targets[0] < self.sl:
+                        if TRAIL_SL and (self.sl == 0 or self.targets[0] < self.sl):
                             self.sl = round(self.targets[0], 2)
-                        self.signal = f"▼ SELL {self.opt_type} Target 2 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T3:{self.targets[2]:.1f} | Trailed SL:{self.sl:.1f}"
+                        self.signal = f"▼ SELL {self.opt_type} Target 2 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T3:{self.targets[2]:.1f} | SL:{self.sl:.1f}"
                     elif ltp <= self.targets[0]:
                         self.trade_status = "Target 1 Hit"
-                        if self.sl == 0 or self.entry_price < self.sl:
+                        if TRAIL_SL and (self.sl == 0 or self.entry_price < self.sl):
                             self.sl = round(self.entry_price, 2)
-                        self.signal = f"▼ SELL {self.opt_type} Target 1 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T2:{self.targets[1]:.1f} | Trailed SL:{self.sl:.1f}"
+                        self.signal = f"▼ SELL {self.opt_type} Target 1 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T2:{self.targets[1]:.1f} | SL:{self.sl:.1f}"
 
 
 def select_focus_strikes_from_pivots(pivots: dict, step: int = 50, tf_label: str = "15-Min") -> dict:
@@ -1371,6 +1371,9 @@ FORWARD_TEST_FILE = os.path.join(BASE_DIR, "forward_test_trades.csv")
 
 # ── Intraday EOD rules ─────────────────────────────────────
 EOD_SQUARE_OFF_TIME  = dt_time(15, 0, 0)    # close all open intraday trades at CMP
+# Trailing SL (T1 -> entry, T2 -> T1 ...) is OFF (AJ, 13 Oct): every trade keeps the SL it was
+# entered with, the sweep LL for BUY and the HH for SELL, until SL, T5 or the 3 PM exit.
+TRAIL_SL = False
 NEXT_DAY_LEVELS_TIME = dt_time(15, 45, 0)   # compute next-day levels after close
 
 # ── Multi-symbol forward test (other symbols from calculator) ──
@@ -1767,27 +1770,27 @@ def fwd_exit_check(trade, ltp, opt_type=None, strike=None):
         elif trade.get('Target_4', 0) > 0 and ltp >= trade['Target_4']:
             if target_hit < 4:
                 trade['Target_Hit'] = 4
-                if trade.get('Target_3', 0) > trade['SL']:
+                if TRAIL_SL and (trade.get('Target_3', 0) > trade['SL']):
                     trade['SL'] = trade['Target_3']   # trail SL to T3
-                print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T5:{trade.get('Target_5',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+                print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T5:{trade.get('Target_5',0):.1f} | SL:{trade['SL']:.1f}")
         elif trade.get('Target_3', 0) > 0 and ltp >= trade['Target_3']:
             if target_hit < 3:
                 trade['Target_Hit'] = 3
-                if trade.get('Target_2', 0) > trade['SL']:
+                if TRAIL_SL and (trade.get('Target_2', 0) > trade['SL']):
                     trade['SL'] = trade['Target_2']   # trail SL to T2
-                print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T4:{trade.get('Target_4',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+                print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T4:{trade.get('Target_4',0):.1f} | SL:{trade['SL']:.1f}")
         elif trade.get('Target_2', 0) > 0 and ltp >= trade['Target_2']:
             if target_hit < 2:
                 trade['Target_Hit'] = 2
-                if trade.get('Target_1', 0) > trade['SL']:
+                if TRAIL_SL and (trade.get('Target_1', 0) > trade['SL']):
                     trade['SL'] = trade['Target_1']   # trail SL to T1
-                print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T3:{trade.get('Target_3',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+                print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T3:{trade.get('Target_3',0):.1f} | SL:{trade['SL']:.1f}")
         elif trade.get('Target_1', 0) > 0 and ltp >= trade['Target_1']:
             if target_hit < 1:
                 trade['Target_Hit'] = 1
-                if entry > trade['SL']:
+                if TRAIL_SL and (entry > trade['SL']):
                     trade['SL'] = round(entry, 2)     # trail SL to Entry (breakeven)
-                print(f"🎯 [FWD TEST] T1 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T2:{trade.get('Target_2',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+                print(f"🎯 [FWD TEST] T1 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T2:{trade.get('Target_2',0):.1f} | SL:{trade['SL']:.1f}")
     else:   # SELL
         if trade['SL'] > 0 and ltp >= trade['SL']:
             closed       = True
@@ -1801,27 +1804,27 @@ def fwd_exit_check(trade, ltp, opt_type=None, strike=None):
         elif trade.get('Target_4', 0) > 0 and ltp <= trade['Target_4']:
             if target_hit < 4:
                 trade['Target_Hit'] = 4
-                if trade['SL'] == 0 or trade.get('Target_3', 0) < trade['SL']:
+                if TRAIL_SL and (trade['SL'] == 0 or trade.get('Target_3', 0) < trade['SL']):
                     trade['SL'] = trade['Target_3']
-                print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T5:{trade.get('Target_5',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+                print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T5:{trade.get('Target_5',0):.1f} | SL:{trade['SL']:.1f}")
         elif trade.get('Target_3', 0) > 0 and ltp <= trade['Target_3']:
             if target_hit < 3:
                 trade['Target_Hit'] = 3
-                if trade['SL'] == 0 or trade.get('Target_2', 0) < trade['SL']:
+                if TRAIL_SL and (trade['SL'] == 0 or trade.get('Target_2', 0) < trade['SL']):
                     trade['SL'] = trade['Target_2']
-                print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T4:{trade.get('Target_4',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+                print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T4:{trade.get('Target_4',0):.1f} | SL:{trade['SL']:.1f}")
         elif trade.get('Target_2', 0) > 0 and ltp <= trade['Target_2']:
             if target_hit < 2:
                 trade['Target_Hit'] = 2
-                if trade['SL'] == 0 or trade.get('Target_1', 0) < trade['SL']:
+                if TRAIL_SL and (trade['SL'] == 0 or trade.get('Target_1', 0) < trade['SL']):
                     trade['SL'] = trade['Target_1']
-                print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T3:{trade.get('Target_3',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+                print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T3:{trade.get('Target_3',0):.1f} | SL:{trade['SL']:.1f}")
         elif trade.get('Target_1', 0) > 0 and ltp <= trade['Target_1']:
             if target_hit < 1:
                 trade['Target_Hit'] = 1
-                if trade['SL'] == 0 or entry < trade['SL']:
+                if TRAIL_SL and (trade['SL'] == 0 or entry < trade['SL']):
                     trade['SL'] = round(entry, 2)
-                print(f"🎯 [FWD TEST] T1 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T2:{trade.get('Target_2',0):.1f} | Trailed SL:{trade['SL']:.1f}")
+                print(f"🎯 [FWD TEST] T1 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T2:{trade.get('Target_2',0):.1f} | SL:{trade['SL']:.1f}")
     return closed, exit_reason, exit_pnl
 
 
@@ -1983,6 +1986,8 @@ class ForwardTestTracker:
                 continue
             if not t.get('Initial_SL'):
                 t['Initial_SL'] = entry_sl.get(t.get('Trade_ID')) or t.get('SL', 0)
+            if not TRAIL_SL and _safe_float(t.get('Initial_SL', 0)) > 0:
+                t['SL'] = _safe_float(t['Initial_SL'])   # a stop trailed before the switch goes back to the LL / HH
             for k in self._trade_keys(t):
                 if k not in self.active_trades:
                     self.active_trades[k] = t
@@ -5087,7 +5092,7 @@ class FeedEngine:
                     t.get('Target_3', 0),
                     t.get('Target_4', 0),
                     t.get('Target_5', 0),
-                    (f"🎯 T{t.get('Target_Hit', 0)} Hit — SL trailed to {t.get('SL', 0)}" if t.get('Target_Hit', 0) > 0
+                    (f"🎯 T{t.get('Target_Hit', 0)} Hit — SL {t.get('SL', 0)}" if t.get('Target_Hit', 0) > 0
                      else f"⚡ LIVE — SL {t.get('SL', 0)} / T1 {t.get('Target_1', 0)}"),
                     '🟡 ACTIVE',
                     t.get('Trade_ID', ''),
@@ -5712,7 +5717,7 @@ class FeedEngine:
                         ep  = st_buy.entry_price
                         h1_tag = f" | {h1_buy_action}" if h1_buy_action else ""
                         tg_tag = f" | {st_buy.trade_status}" if st_buy.trade_status != "Active" else ""
-                        signal_buy = f"★ BUY {opt_type} [{buy_ctx} | {lvl} Reclaim | Entry@{lvl}:{ep:.2f} | Trailed SL:{st_buy.sl:.1f}{tg_tag}{h1_tag}]"
+                        signal_buy = f"★ BUY {opt_type} [{buy_ctx} | {lvl} Reclaim | Entry@{lvl}:{ep:.2f} | SL:{st_buy.sl:.1f}{tg_tag}{h1_tag}]"
                     elif st_buy.state == "TRADING_IN_FAVOR_BUY":
                         _lvl = "S1" if is_s1_buy else "S2"
                         signal_buy = f"★ {opt_type} {_lvl} Push In Favour [{buy_ctx}] — Confirming Buy Entry"
@@ -5741,7 +5746,7 @@ class FeedEngine:
                         ep  = st_sell.entry_price
                         h1_tag = f" | {h1_sell_action}" if h1_sell_action else ""
                         tg_tag = f" | {st_sell.trade_status}" if st_sell.trade_status != "Active" else ""
-                        signal_sell = f"▼ SELL {opt_type} [{sell_ctx} | {lvl} Reject | Entry@{lvl}:{ep:.2f} | Trailed SL:{st_sell.sl:.1f}{tg_tag}{h1_tag}]"
+                        signal_sell = f"▼ SELL {opt_type} [{sell_ctx} | {lvl} Reject | Entry@{lvl}:{ep:.2f} | SL:{st_sell.sl:.1f}{tg_tag}{h1_tag}]"
                     elif st_sell.state == "TRADING_IN_FAVOR_SELL":
                         signal_sell = f"▼ {opt_type} R2 Drop In Favour [{sell_ctx}] — Confirming Sell Entry"
                     elif st_sell.state == "RETEST_R2":
@@ -7804,9 +7809,9 @@ class ControlPanel:
             if trade_st == "Active":
                 disp_signal = f"🟢 LIVE LONG @ {ep_v:.2f} | SL: {sl_str} | T1: {t1_str}" if is_buy else f"🔴 LIVE SHORT @ {ep_v:.2f} | SL: {sl_str} | T1: {t1_str}"
             elif "Target 1" in trade_st:
-                disp_signal = f"🎯 T1 HIT (+50% Booked) | Trail SL: {sl_str} -> T2: {t2_str}"
+                disp_signal = f"🎯 T1 HIT (+50% Booked) | SL: {sl_str} -> T2: {t2_str}"
             elif "Target 2" in trade_st:
-                disp_signal = f"🎯 T2 HIT (+80% Booked) | Runner SL: {sl_str} -> T3: {t3_str}"
+                disp_signal = f"🎯 T2 HIT (+80% Booked) | SL: {sl_str} -> T3: {t3_str}"
             elif "Target 3" in trade_st:
                 disp_signal = "🏆 T3 HIT — All Targets Hit"
             elif "SL" in trade_st:

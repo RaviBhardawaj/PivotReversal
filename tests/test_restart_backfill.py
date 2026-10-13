@@ -13,6 +13,7 @@ mb=types.ModuleType("tkinter.messagebox"); tk.ttk=ttk; tk.messagebox=mb
 sys.modules.update({"tkinter":tk,"tkinter.ttk":ttk,"tkinter.messagebox":mb})
 _src=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","Options-angel_live-ok.py")
 _spec=importlib.util.spec_from_file_location("app",_src); app=importlib.util.module_from_spec(_spec); _spec.loader.exec_module(app)
+app.TRAIL_SL=True   # these cases cover the trailing-SL path (off in the app since 13 Oct)
 
 def bars(day, start, ohlc):
     """ohlc: list of (o,h,l,c), one per minute from start 'HH:MM'."""

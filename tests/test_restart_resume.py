@@ -18,6 +18,7 @@ class FakeDT(datetime):
     @classmethod
     def now(cls,tz=None): return cls.v
 app.datetime=FakeDT
+app.TRAIL_SL=True   # these cases cover the trailing-SL path (off in the app since 13 Oct)
 os.environ.pop("FORCE_MARKET_OPEN",None)
 
 D=tempfile.mkdtemp(); F=os.path.join(D,"forward_test_trades.csv")

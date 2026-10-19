@@ -38,6 +38,11 @@ SCRIP_URL      = "https://margincalculator.angelbroking.com/OpenAPI_File/files/O
 SPREADSHEET_ID = "1TNuwFBf1xtTq7xyu_d32MPoWhSp7HzMdacNSnFV6i2U"
 SCOPES         = ["https://www.googleapis.com/auth/spreadsheets"]
 BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
+
+try:
+    from mapped_strikes_manager import mapped_strikes_mgr
+except ImportError:
+    mapped_strikes_mgr = None
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from brokers import (OrderEngine, ADAPTERS, BROKER_LABELS, ALL_LEVELS, LEVEL_LABELS,   # live orders
@@ -1741,6 +1746,11 @@ class LiveOrderManager:
         if ask:
             inst["ask"] = float(ask)
             trade["Ask"] = float(ask)
+        if mapped_strikes_mgr:
+            custom_lots = mapped_strikes_mgr.get_lots_for(trade.get("Symbol", ""), trade.get("Strike", 0), trade.get("Type", ""), fallback_lots=0)
+            if custom_lots and custom_lots > 0:
+                trade["Lots"] = custom_lots
+                inst["lots"] = custom_lots
         return self.engine.enter(trade, inst)
 
     def exit_order(self, trade: dict, reason: str, ltp: float, bid: float = 0.0, ask: float = 0.0) -> str:
@@ -5898,6 +5908,8 @@ class FeedEngine:
                     is_1h_focus  = (strike in daily_focus.get("all_1h", []))  or (strike in f1h_set)
                     # Only 15M and 1H setups are traded / recorded
                     is_focus_strike = bool(trade_tf) and (is_15m_focus or is_1h_focus)
+                    if mapped_strikes_mgr and mapped_strikes_mgr.is_restricted_mode():
+                        is_focus_strike = is_focus_strike and mapped_strikes_mgr.is_strike_active(symbol, strike, opt_type)
                     mkt_open = is_live_market_open(now_tick)
 
                     # ── Evaluate SELL Entry ──

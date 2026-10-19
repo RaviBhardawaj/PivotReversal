@@ -94,6 +94,9 @@
     <button class="nav-tab" data-tab="tab-advanced-strategy">
       🛡️ ADVANCED VERSION <span class="tab-badge" id="tab-adv-count">0</span>
     </button>
+    <button class="nav-tab" data-tab="tab-mapped-strikes">
+      🎯 MAPPED STRIKES & LOTS <span class="tab-badge" id="tab-mapped-count">0</span>
+    </button>
   </nav>
 
   <!-- TAB 1: OPTION STRATEGY SCANNER -->
@@ -605,7 +608,115 @@
     </div>
   </main>
 
+  <!-- TAB 6: MAPPED STRIKES & CUSTOM LOTS -->
+  <main class="tab-pane" id="tab-mapped-strikes">
+    <!-- Top Control Bar -->
+    <div class="scanner-controls-bar mapped-controls-bar">
+      <div class="control-unit">
+        <label>LOGIC RESTRICTION FILTER</label>
+        <div class="toggle-control-group" style="display: flex; align-items: center; gap: 8px; height: 32px;">
+          <label class="switch">
+            <input type="checkbox" id="toggle-restricted-strikes">
+            <span class="slider round"></span>
+          </label>
+          <span class="mode-badge" id="restricted-mode-badge" style="font-size: 11px;">ALL FOCUS STRIKES (UNRESTRICTED)</span>
+        </div>
+      </div>
+
+      <div class="control-unit">
+        <label>DEFAULT LOTS</label>
+        <div class="symbol-input-group">
+          <input type="number" id="input-default-lots" class="terminal-input" value="1" min="1" max="20" style="width: 70px;">
+        </div>
+      </div>
+
+      <div class="control-unit flex-grow">
+        <label>AUTO-MAP ACTIONS</label>
+        <div class="quick-chips">
+          <button class="chip-btn active" id="btn-import-focus-strikes">⚡ Import Today's 15M & 1H Focus Strikes</button>
+          <button class="chip-btn" id="btn-save-mapped-strikes">💾 Save All Lots & Strikes</button>
+          <button class="chip-btn text-red" id="btn-clear-mapped-strikes">🗑️ Clear List</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add Custom Strike Card -->
+    <div class="terminal-panel" style="margin-bottom: 12px; padding: 12px 14px; background: var(--bg-card); border-radius: var(--radius-sm); border: 1px solid var(--border-prominent);">
+      <div class="panel-header" style="margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+        <span class="panel-title" style="font-size: 11px; font-weight: 700; color: var(--cyan);">➕ ADD STRIKE TO RADAR & ALLOCATE LOTS</span>
+        <span style="font-size: 10px; color: var(--text-muted);">(Configure lot size per strike; when restricted mode is ON, logic executes ONLY on selected strikes)</span>
+      </div>
+      <div style="display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap;">
+        <div class="control-unit">
+          <label>SYMBOL</label>
+          <input type="text" id="add-strike-symbol" class="terminal-input" value="NIFTY" style="width: 90px; text-transform: uppercase;">
+        </div>
+        <div class="control-unit">
+          <label>STRIKE PRICE</label>
+          <input type="number" id="add-strike-price" class="terminal-input" placeholder="e.g. 24800" step="50" style="width: 110px;">
+        </div>
+        <div class="control-unit">
+          <label>OPTION TYPE</label>
+          <select id="add-strike-type" class="terminal-select" style="width: 125px;">
+            <option value="BOTH">BOTH (CE & PE)</option>
+            <option value="CE">CE Only</option>
+            <option value="PE">PE Only</option>
+          </select>
+        </div>
+        <div class="control-unit">
+          <label>LOTS</label>
+          <input type="number" id="add-strike-lots" class="terminal-input" value="1" min="1" max="20" style="width: 75px;">
+        </div>
+        <div class="control-unit" style="flex: 1; min-width: 160px;">
+          <label>MAPPING SOURCE / NOTE</label>
+          <input type="text" id="add-strike-note" class="terminal-input" placeholder="e.g. 15M:S2 Reclaim Focus / High Probability" style="width: 100%;">
+        </div>
+        <button id="btn-add-mapped-strike" class="chip-btn active" style="height: 32px; padding: 0 16px; font-weight: 700; background: var(--blue); color: #fff;">
+          Add to Mapped Radar
+        </button>
+      </div>
+    </div>
+
+    <!-- Active Strikes Table -->
+    <div class="terminal-panel">
+      <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: var(--bg-panel); border-bottom: 1px solid var(--border-prominent);">
+        <span class="panel-title" style="font-size: 11px; font-weight: 700; letter-spacing: 0.5px;">
+          📋 ACTIVE MAPPED STRIKES & EXECUTION MATRIX
+        </span>
+        <span class="panel-sub" id="mapped-strikes-summary-text" style="font-size: 10.5px; color: var(--text-muted);">
+          0 strikes mapped | Logic mode: Unrestricted
+        </span>
+      </div>
+
+      <div class="terminal-table-container">
+        <table class="terminal-table" id="table-mapped-strikes">
+          <thead>
+            <tr>
+              <th style="width: 60px; text-align: center;">ACTIVE</th>
+              <th>SYMBOL</th>
+              <th>STRIKE</th>
+              <th>TYPE</th>
+              <th>SOURCE / LEVEL</th>
+              <th>LIVE LTP</th>
+              <th>BID / ASK</th>
+              <th style="width: 90px; text-align: center;">LOTS</th>
+              <th>TOTAL QTY</th>
+              <th>LOGIC STATUS</th>
+              <th>NOTE</th>
+              <th style="width: 70px; text-align: center;">ACTION</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-mapped-strikes">
+            <tr>
+              <td colspan="12" class="empty-state">No strikes mapped yet. Click "⚡ Import Today's 15M & 1H Focus Strikes" or add a custom strike above.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
   <div id="toast-container" class="toast-container"></div>
-  <script src="/static/app.js?v=4.3"></script>
+  <script src="/static/app.js?v=4.4"></script>
 </body>
 </html>

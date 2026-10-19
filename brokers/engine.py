@@ -26,6 +26,11 @@ from .dhan import DhanAdapter
 from .xts import XTSAdapter
 from .smart_execution import smart_execution
 
+try:
+    from mapped_strikes_manager import mapped_strikes_mgr
+except ImportError:
+    mapped_strikes_mgr = None
+
 ADAPTERS = {"ANGEL": AngelAdapter, "DHAN": DhanAdapter, "XTS": XTSAdapter}
 BROKER_LABELS = {"ANGEL": "Angel One", "DHAN": "Dhan", "XTS": "Jainam XTS"}
 
@@ -372,6 +377,12 @@ class OrderEngine:
             return "Option buying only: short selling disabled"
         if trade.get("Action") == "SELL" and not s["take_sell_setups"]:
             return "SELL setups are off"
+        if mapped_strikes_mgr and mapped_strikes_mgr.is_restricted_mode():
+            sym = str(inst.get("symbol") or trade.get("Symbol") or "").upper()
+            stk = float(inst.get("strike") or trade.get("Strike") or 0.0)
+            ot = str(inst.get("opt_type") or trade.get("Type") or "").upper()
+            if not mapped_strikes_mgr.is_strike_active(sym, stk, ot):
+                return f"Strike {stk:g} {ot} not in selected Mapped Strikes list"
         why = strike_selection_reason(s, trade, inst)
         if why:
             return why
@@ -413,7 +424,16 @@ class OrderEngine:
                          "-", "NO ORDER", f"{why} | {trade.get('Timeframe', '')}")
             return
         if True:
-            lots = self._lots_for(str(trade.get("Timeframe", "")))
+            sym = str(inst.get("symbol") or trade.get("Symbol") or "").upper()
+            stk = float(inst.get("strike") or trade.get("Strike") or 0.0)
+            ot = str(inst.get("opt_type") or trade.get("Type") or "").upper()
+            custom_lots = trade.get("Lots") or inst.get("lots")
+            if not custom_lots and mapped_strikes_mgr:
+                custom_lots = mapped_strikes_mgr.get_lots_for(sym, stk, ot, fallback_lots=0)
+            if custom_lots and int(custom_lots) > 0:
+                lots = max(1, min(int(custom_lots), int(self.settings["max_lots"])))
+            else:
+                lots = self._lots_for(str(trade.get("Timeframe", "")))
             pos = {
                 "trade_id": tid, "date": self._today(), "broker": self.broker_name,
                 "inst": dict(inst), "side": trade["Action"], "qty": lots * int(inst["lot_size"]),

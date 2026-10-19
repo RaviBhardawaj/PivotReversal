@@ -53,6 +53,11 @@ advanced_engine = getattr(engine, "advanced_engine", None)
 if not advanced_engine:
     from advanced_strategy import advanced_engine
 
+try:
+    from mapped_strikes_manager import mapped_strikes_mgr
+except ImportError:
+    mapped_strikes_mgr = None
+
 calc_fib_pivots = getattr(engine, "calc_fib_pivots", None)
 if not calc_fib_pivots:
     def calc_fib_pivots(high, low, close):
@@ -1011,7 +1016,8 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
         "advanced_strategy": advanced_engine.get_summary_stats() if advanced_engine else {},
         "advanced_active_trades": advanced_engine.get_active_trades() if advanced_engine else [],
         "advanced_closed_trades": advanced_engine.get_closed_trades() if advanced_engine else [],
-        "advanced_rejections": advanced_engine.get_rejections(25) if advanced_engine else []
+        "advanced_rejections": advanced_engine.get_rejections(25) if advanced_engine else [],
+        "mapped_strikes_config": mapped_strikes_mgr.get_config() if mapped_strikes_mgr else {}
     }
 
 # ── Background Broadcast Worker ────────────────────────────────
@@ -1692,6 +1698,115 @@ async def get_advanced_strategy_plan():
         "target_session_date": plan.get("target_session_date", ""),
         "setups": enriched
     }
+
+
+# ── Mapped Strikes & Custom Lots API ───────────────────────────
+class MappedStrikeItem(BaseModel):
+    symbol: str
+    strike: float
+    opt_type: str = "BOTH"
+    lots: int = 1
+    source: str = "Manual"
+    notes: str = ""
+    enabled: bool = True
+
+
+class MappedStrikesSaveRequest(BaseModel):
+    restrict_to_selected_only: bool
+    default_lots: int = 1
+    strikes: List[Dict[str, Any]] = []
+
+
+class ToggleRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/mapped-strikes")
+async def get_mapped_strikes():
+    if not mapped_strikes_mgr:
+        raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
+    cfg = mapped_strikes_mgr.get_config()
+    req_sym = getattr(feed, "symbol", "NIFTY")
+    mtf = get_tv_multi_timeframe_pivots(req_sym) if get_tv_multi_timeframe_pivots else {}
+    step = get_symbol_step(req_sym)
+    f15 = select_intraday_15m_focus_strikes(mtf, step) if select_intraday_15m_focus_strikes else {}
+    f1h = select_1h_structure_strikes(mtf, step) if select_1h_structure_strikes else {}
+    return {
+        "config": cfg,
+        "symbol": req_sym,
+        "available_focus": {
+            "15M": f15,
+            "1H": f1h,
+            "all_focus": sorted(list(set(f15.get("all_4", []) + f1h.get("all_4", []))))
+        }
+    }
+
+
+@app.post("/api/mapped-strikes/toggle")
+async def toggle_mapped_strikes(req: ToggleRequest):
+    if not mapped_strikes_mgr:
+        raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
+    val = mapped_strikes_mgr.set_restricted_mode(req.enabled)
+    return {"status": "ok", "restrict_to_selected_only": val}
+
+
+@app.post("/api/mapped-strikes/save")
+async def save_mapped_strikes(req: MappedStrikesSaveRequest):
+    if not mapped_strikes_mgr:
+        raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
+    mapped_strikes_mgr.set_restricted_mode(req.restrict_to_selected_only)
+    mapped_strikes_mgr.set_default_lots(req.default_lots)
+    mapped_strikes_mgr.data["strikes"] = req.strikes
+    mapped_strikes_mgr.save()
+    return {"status": "ok", "config": mapped_strikes_mgr.get_config()}
+
+
+@app.post("/api/mapped-strikes/add")
+async def add_mapped_strike(item: MappedStrikeItem):
+    if not mapped_strikes_mgr:
+        raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
+    created = mapped_strikes_mgr.add_strike(
+        symbol=item.symbol,
+        strike=item.strike,
+        opt_type=item.opt_type,
+        lots=item.lots,
+        source=item.source,
+        notes=item.notes,
+        enabled=item.enabled
+    )
+    return {"status": "ok", "item": created, "config": mapped_strikes_mgr.get_config()}
+
+
+@app.post("/api/mapped-strikes/delete")
+async def delete_mapped_strike(payload: Dict[str, str]):
+    item_id = payload.get("id", "")
+    if not mapped_strikes_mgr:
+        raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
+    ok = mapped_strikes_mgr.delete_strike(item_id)
+    return {"status": "ok" if ok else "not_found", "config": mapped_strikes_mgr.get_config()}
+
+
+@app.post("/api/mapped-strikes/import-focus")
+async def import_focus_strikes(payload: Dict[str, Any] = None):
+    if not mapped_strikes_mgr:
+        raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
+    req_sym = (payload or {}).get("symbol") or getattr(feed, "symbol", "NIFTY")
+    lots = int((payload or {}).get("lots") or mapped_strikes_mgr.data.get("default_lots", 1))
+    mtf = get_tv_multi_timeframe_pivots(req_sym) if get_tv_multi_timeframe_pivots else {}
+    step = get_symbol_step(req_sym)
+    f15 = select_intraday_15m_focus_strikes(mtf, step) if select_intraday_15m_focus_strikes else {}
+    f1h = select_1h_structure_strikes(mtf, step) if select_1h_structure_strikes else {}
+    count = mapped_strikes_mgr.import_from_focus(f15, f1h, symbol=req_sym, default_lots=lots)
+    return {"status": "ok", "imported_count": count, "config": mapped_strikes_mgr.get_config()}
+
+
+@app.post("/api/mapped-strikes/clear")
+async def clear_mapped_strikes():
+    if not mapped_strikes_mgr:
+        raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
+    c = mapped_strikes_mgr.clear_strikes()
+    return {"status": "ok", "cleared_count": c, "config": mapped_strikes_mgr.get_config()}
+
 
 if __name__ == "__main__":
     import uvicorn

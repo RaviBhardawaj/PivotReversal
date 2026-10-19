@@ -32,7 +32,12 @@
     otherSymbol: 'BANKNIFTY',
     otherExpiry: 'ALL',
     otherFilter: 'ALL',
-    otherData: null
+    otherData: null,
+    mappedConfig: {
+      restrict_to_selected_only: false,
+      default_lots: 1,
+      strikes: []
+    }
   };
 
   // ── DOM References ──
@@ -99,6 +104,23 @@
     ftActiveBadge: document.getElementById('ft-active-badge'),
     ftClosedBadge: document.getElementById('ft-closed-badge'),
     btnManualSquareoff: document.getElementById('btn-manual-squareoff'),
+
+    // Mapped Strikes & Lots Tab
+    tabMappedCount: document.getElementById('tab-mapped-count'),
+    toggleRestrictedStrikes: document.getElementById('toggle-restricted-strikes'),
+    restrictedModeBadge: document.getElementById('restricted-mode-badge'),
+    inputDefaultLots: document.getElementById('input-default-lots'),
+    btnImportFocusStrikes: document.getElementById('btn-import-focus-strikes'),
+    btnSaveMappedStrikes: document.getElementById('btn-save-mapped-strikes'),
+    btnClearMappedStrikes: document.getElementById('btn-clear-mapped-strikes'),
+    addStrikeSymbol: document.getElementById('add-strike-symbol'),
+    addStrikePrice: document.getElementById('add-strike-price'),
+    addStrikeType: document.getElementById('add-strike-type'),
+    addStrikeLots: document.getElementById('add-strike-lots'),
+    addStrikeNote: document.getElementById('add-strike-note'),
+    btnAddMappedStrike: document.getElementById('btn-add-mapped-strike'),
+    tbodyMappedStrikes: document.getElementById('tbody-mapped-strikes'),
+    mappedStrikesSummaryText: document.getElementById('mapped-strikes-summary-text'),
 
     // Toast Container
     toastContainer: document.getElementById('toast-container')
@@ -180,6 +202,7 @@
       if (tabId === 'tab-planner') loadPlannerDeck(state.symbol);
       if (tabId === 'tab-other-symbols' && !state.otherData) calculateOtherSymbols();
       if (tabId === 'tab-advanced-strategy') loadAdvancedStrategy();
+      if (tabId === 'tab-mapped-strikes') loadMappedStrikesData();
     });
   });
 
@@ -285,6 +308,13 @@
           data.advanced_closed_trades || [],
           data.advanced_rejections || []
         );
+      }
+      if (data.mapped_strikes_config) {
+        state.mappedConfig = data.mapped_strikes_config;
+        updateMappedStrikesSummary(state.mappedConfig);
+        if (state.activeTab === 'tab-mapped-strikes') {
+          renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
+        }
       }
     } else if (data.type === 'TRADE_ALERT') {
       playAlertSound();
@@ -1463,9 +1493,343 @@
     }
   }
 
+  // ── Mapped Strikes & Custom Lots Manager ──
+  function getContractLotSize(symbol) {
+    const s = (symbol || '').toUpperCase();
+    if (s.includes('BANKNIFTY')) return 15;
+    if (s.includes('SENSEX')) return 10;
+    if (s.includes('FINNIFTY')) return 25;
+    if (s.includes('MIDCPNIFTY')) return 50;
+    return 25; // default NIFTY
+  }
+
+  async function loadMappedStrikesData() {
+    try {
+      const res = await fetch('/api/mapped-strikes');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.config) {
+        state.mappedConfig = data.config;
+        updateMappedStrikesSummary(state.mappedConfig);
+        renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
+      }
+    } catch (e) {
+      console.warn('Failed to load mapped strikes:', e);
+    }
+  }
+
+  function updateMappedStrikesSummary(cfg) {
+    if (!cfg) return;
+    const strikes = cfg.strikes || [];
+    const activeCount = strikes.filter(s => s.enabled).length;
+
+    if (els.tabMappedCount) {
+      els.tabMappedCount.textContent = activeCount;
+    }
+
+    if (els.toggleRestrictedStrikes) {
+      els.toggleRestrictedStrikes.checked = Boolean(cfg.restrict_to_selected_only);
+    }
+
+    if (els.restrictedModeBadge) {
+      if (cfg.restrict_to_selected_only) {
+        els.restrictedModeBadge.textContent = '🔒 STRICT: ONLY SELECTED STRIKES';
+        els.restrictedModeBadge.style.background = '#e53935';
+        els.restrictedModeBadge.style.color = '#ffffff';
+        els.restrictedModeBadge.style.boxShadow = '0 0 10px rgba(229, 57, 53, 0.4)';
+      } else {
+        els.restrictedModeBadge.textContent = 'ALL FOCUS STRIKES (UNRESTRICTED)';
+        els.restrictedModeBadge.style.background = '';
+        els.restrictedModeBadge.style.color = '';
+        els.restrictedModeBadge.style.boxShadow = '';
+      }
+    }
+
+    if (els.inputDefaultLots && document.activeElement !== els.inputDefaultLots) {
+      els.inputDefaultLots.value = cfg.default_lots || 1;
+    }
+
+    if (els.mappedStrikesSummaryText) {
+      const modeStr = cfg.restrict_to_selected_only ? '🔒 STRICT ONLY' : '🌐 Unrestricted';
+      els.mappedStrikesSummaryText.innerHTML = `<strong>${activeCount}</strong> active / <strong>${strikes.length}</strong> total mapped | Logic Mode: <strong>${modeStr}</strong>`;
+    }
+  }
+
+  function renderMappedStrikesTable(cfg, watchItems) {
+    if (!els.tbodyMappedStrikes) return;
+    const strikes = (cfg && cfg.strikes) || [];
+    if (strikes.length === 0) {
+      els.tbodyMappedStrikes.innerHTML = `<tr><td colspan="12" class="empty-state">No strikes mapped yet. Click "⚡ Import Today's 15M & 1H Focus Strikes" or add a custom strike above.</td></tr>`;
+      return;
+    }
+
+    const quoteMap = {};
+    if (watchItems && watchItems.length) {
+      watchItems.forEach(w => {
+        const key = `${w.strike}_${w.opt_type}`;
+        quoteMap[key] = w;
+      });
+    }
+
+    const rowsHtml = strikes.map(s => {
+      const lotUnit = getContractLotSize(s.symbol);
+      const totalQty = (parseInt(s.lots, 10) || 1) * lotUnit;
+
+      let ltpDisplay = '<span class="text-silver">-</span>';
+      let bidAskDisplay = '<span class="text-silver">-</span>';
+
+      if (s.opt_type === 'BOTH') {
+        const ce = quoteMap[`${s.strike}_CE`];
+        const pe = quoteMap[`${s.strike}_PE`];
+        const ceLtp = ce && ce.ltp ? `CE ₹${Number(ce.ltp).toFixed(1)}` : 'CE -';
+        const peLtp = pe && pe.ltp ? `PE ₹${Number(pe.ltp).toFixed(1)}` : 'PE -';
+        ltpDisplay = `<div style="font-size:11px;line-height:1.3;"><span class="text-green">${ceLtp}</span><br><span class="text-gold">${peLtp}</span></div>`;
+
+        const ceDepth = ce && (ce.bid || ce.ask) ? `${Number(ce.bid || 0).toFixed(1)} / ${Number(ce.ask || 0).toFixed(1)}` : '-';
+        const peDepth = pe && (pe.bid || pe.ask) ? `${Number(pe.bid || 0).toFixed(1)} / ${Number(pe.ask || 0).toFixed(1)}` : '-';
+        bidAskDisplay = `<div style="font-size:10px;line-height:1.3;"><span class="text-silver">${ceDepth}</span><br><span class="text-silver">${peDepth}</span></div>`;
+      } else {
+        const q = quoteMap[`${s.strike}_${s.opt_type}`];
+        if (q && q.ltp) {
+          ltpDisplay = `<strong class="font-mono ${s.opt_type === 'CE' ? 'text-green' : 'text-gold'}">₹${Number(q.ltp).toFixed(2)}</strong>`;
+        }
+        if (q && (q.bid || q.ask)) {
+          bidAskDisplay = `<span class="font-mono text-silver" style="font-size:11px;">${Number(q.bid || 0).toFixed(1)} / ${Number(q.ask || 0).toFixed(1)}</span>`;
+        }
+      }
+
+      const optBadgeClass = s.opt_type === 'CE' ? 'badge-ce' : (s.opt_type === 'PE' ? 'badge-pe' : 'badge-both');
+      const isRestricted = cfg.restrict_to_selected_only;
+      const willExecute = !isRestricted || s.enabled;
+      const statusBadge = willExecute
+        ? `<span class="badge ${s.enabled ? 'badge-15m' : 'badge-silver'}" style="font-size:10px;">${s.enabled ? '🟢 EVALUATING' : '⚪ IDLE'}</span>`
+        : `<span class="badge" style="background:#2a2e39;color:#787b86;font-size:10px;">BLOCKED</span>`;
+
+      return `
+        <tr data-strike-id="${s.id}" style="${!s.enabled ? 'opacity:0.6;' : ''}">
+          <td style="text-align: center;">
+            <input type="checkbox" class="mapped-active-checkbox" data-id="${s.id}" ${s.enabled ? 'checked' : ''} title="Toggle active status">
+          </td>
+          <td><strong>${s.symbol || 'NIFTY'}</strong></td>
+          <td><strong class="font-mono" style="font-size:13px; color:var(--text-bright);">${s.strike}</strong></td>
+          <td><span class="badge ${optBadgeClass}">${s.opt_type}</span></td>
+          <td><span class="badge badge-1h" style="font-size:10px;">${s.source || 'MANUAL'}</span></td>
+          <td>${ltpDisplay}</td>
+          <td>${bidAskDisplay}</td>
+          <td style="text-align: center;">
+            <input type="number" class="table-lot-input" data-id="${s.id}" value="${s.lots || 1}" min="1" max="20" style="width: 54px; text-align: center;">
+          </td>
+          <td class="font-mono text-cyan" style="font-size:11px;">
+            <span class="qty-calc">${totalQty}</span> <span style="font-size:9.5px;color:var(--text-muted);">(${lotUnit}/lot)</span>
+          </td>
+          <td>${statusBadge}</td>
+          <td class="text-silver" style="font-size:11px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${s.notes || ''}">
+            ${s.notes || '-'}
+          </td>
+          <td style="text-align: center;">
+            <button class="btn-delete-strike" data-id="${s.id}" title="Remove Strike" style="background:none; border:none; cursor:pointer; font-size:13px; color:#ff5252;">🗑️</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    els.tbodyMappedStrikes.innerHTML = rowsHtml;
+
+    // Attach row events
+    els.tbodyMappedStrikes.querySelectorAll('.mapped-active-checkbox').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        const id = e.target.getAttribute('data-id');
+        const st = state.mappedConfig.strikes.find(x => x.id === id);
+        if (st) {
+          st.enabled = e.target.checked;
+          updateMappedStrikesSummary(state.mappedConfig);
+          const tr = e.target.closest('tr');
+          if (tr) tr.style.opacity = st.enabled ? '1' : '0.6';
+        }
+      });
+    });
+
+    els.tbodyMappedStrikes.querySelectorAll('.table-lot-input').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const id = e.target.getAttribute('data-id');
+        const st = state.mappedConfig.strikes.find(x => x.id === id);
+        const val = parseInt(e.target.value, 10);
+        if (st && val > 0) {
+          st.lots = val;
+          const tr = e.target.closest('tr');
+          if (tr) {
+            const qtySpan = tr.querySelector('.qty-calc');
+            if (qtySpan) {
+              const unit = getContractLotSize(st.symbol);
+              qtySpan.textContent = val * unit;
+            }
+          }
+        }
+      });
+    });
+
+    els.tbodyMappedStrikes.querySelectorAll('.btn-delete-strike').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const id = e.target.getAttribute('data-id');
+        if (!confirm('Remove this strike from mapped radar?')) return;
+        try {
+          const res = await fetch('/api/mapped-strikes/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ strike_id: id })
+          });
+          const resp = await res.json();
+          if (resp.status === 'success' && resp.config) {
+            state.mappedConfig = resp.config;
+            updateMappedStrikesSummary(state.mappedConfig);
+            renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
+            showToast('Strike removed', 'silver');
+          }
+        } catch (err) {
+          showToast('Failed to delete strike', 'red');
+        }
+      });
+    });
+  }
+
+  // ── Mapped Strikes Event Listeners ──
+  if (els.toggleRestrictedStrikes) {
+    els.toggleRestrictedStrikes.addEventListener('change', async (e) => {
+      const enabled = e.target.checked;
+      try {
+        const res = await fetch('/api/mapped-strikes/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled })
+        });
+        const resp = await res.json();
+        if (resp.status === 'success' && resp.config) {
+          state.mappedConfig = resp.config;
+          updateMappedStrikesSummary(state.mappedConfig);
+          renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
+          const msg = enabled ? '🔒 Strict Logic Mode: Strategy will ONLY evaluate & trade selected strikes' : '🌐 Unrestricted Mode: Strategy evaluates all focus strikes';
+          showToast(msg, enabled ? 'gold' : 'blue');
+        }
+      } catch (err) {
+        showToast('Failed to toggle restriction mode', 'red');
+      }
+    });
+  }
+
+  if (els.btnImportFocusStrikes) {
+    els.btnImportFocusStrikes.addEventListener('click', async () => {
+      try {
+        const lots = parseInt(els.inputDefaultLots ? els.inputDefaultLots.value : 1, 10) || 1;
+        const sym = state.symbol || 'NIFTY';
+        const res = await fetch('/api/mapped-strikes/import-focus', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: sym, lots })
+        });
+        const resp = await res.json();
+        if (resp.status === 'success' && resp.config) {
+          state.mappedConfig = resp.config;
+          updateMappedStrikesSummary(state.mappedConfig);
+          renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
+          showToast(`⚡ Imported ${resp.imported_count || 0} focus strikes for ${sym}`, 'green');
+        }
+      } catch (err) {
+        showToast('Failed to import focus strikes', 'red');
+      }
+    });
+  }
+
+  if (els.btnSaveMappedStrikes) {
+    els.btnSaveMappedStrikes.addEventListener('click', async () => {
+      try {
+        const defLots = parseInt(els.inputDefaultLots ? els.inputDefaultLots.value : 1, 10) || 1;
+        state.mappedConfig.default_lots = defLots;
+        const res = await fetch('/api/mapped-strikes/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            default_lots: defLots,
+            strikes: state.mappedConfig.strikes || []
+          })
+        });
+        const resp = await res.json();
+        if (resp.status === 'success' && resp.config) {
+          state.mappedConfig = resp.config;
+          updateMappedStrikesSummary(state.mappedConfig);
+          renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
+          showToast('💾 Mapped strikes and lot sizes saved to disk', 'green');
+        }
+      } catch (err) {
+        showToast('Failed to save mapped strikes', 'red');
+      }
+    });
+  }
+
+  if (els.btnClearMappedStrikes) {
+    els.btnClearMappedStrikes.addEventListener('click', async () => {
+      if (!confirm('Are you sure you want to clear all mapped strikes?')) return;
+      try {
+        const res = await fetch('/api/mapped-strikes/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const resp = await res.json();
+        if (resp.status === 'success' && resp.config) {
+          state.mappedConfig = resp.config;
+          updateMappedStrikesSummary(state.mappedConfig);
+          renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
+          showToast('Cleared mapped strikes list', 'gold');
+        }
+      } catch (err) {
+        showToast('Failed to clear strikes', 'red');
+      }
+    });
+  }
+
+  if (els.btnAddMappedStrike) {
+    els.btnAddMappedStrike.addEventListener('click', async () => {
+      const sym = (els.addStrikeSymbol ? els.addStrikeSymbol.value : 'NIFTY').trim().toUpperCase();
+      const strike = parseFloat(els.addStrikePrice ? els.addStrikePrice.value : 0);
+      const optType = els.addStrikeType ? els.addStrikeType.value : 'BOTH';
+      const lots = parseInt(els.addStrikeLots ? els.addStrikeLots.value : 1, 10) || 1;
+      const note = els.addStrikeNote ? els.addStrikeNote.value.trim() : '';
+
+      if (!strike || strike <= 0) {
+        showToast('Please enter a valid strike price', 'red');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/mapped-strikes/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: sym,
+            strike: strike,
+            opt_type: optType,
+            lots: lots,
+            note: note
+          })
+        });
+        const resp = await res.json();
+        if (resp.status === 'success' && resp.config) {
+          state.mappedConfig = resp.config;
+          updateMappedStrikesSummary(state.mappedConfig);
+          renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
+          if (els.addStrikePrice) els.addStrikePrice.value = '';
+          if (els.addStrikeNote) els.addStrikeNote.value = '';
+          showToast(`Added ${sym} ${strike} (${optType}) with ${lots} lot(s)`, 'green');
+        }
+      } catch (err) {
+        showToast('Failed to add strike', 'red');
+      }
+    });
+  }
+
   // ── Bootstrap ──
   loadDashboard('NIFTY');
   loadExpiries('NIFTY');
   loadPlannerDeck('NIFTY');
+  loadMappedStrikesData();
   connectWebSocket();
 })();

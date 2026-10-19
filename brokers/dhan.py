@@ -13,7 +13,7 @@ API = "https://api.dhan.co/v2"
 AUTH_URL = "https://auth.dhan.co/app/generateAccessToken"   # PIN + TOTP login (same call as dhan_login.py)
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
 
-_TYPE = {"MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "STOP_LOSS"}
+_TYPE = {"MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "STOP_LOSS", "SL-M": "STOP_LOSS_MARKET"}
 _PRODUCT = {"INTRADAY": "INTRADAY", "CARRY": "MARGIN"}
 _SEG = {"NFO": "NSE_FNO", "BFO": "BSE_FNO"}
 
@@ -40,24 +40,65 @@ class DhanAdapter(BrokerAdapter):
         self.cache_dir = cache_dir
         self.cache_file = os.path.join(cache_dir, "dhan_scrip_cache.csv")
         self.token_file = os.path.join(cache_dir, ".dhan_token")
+        self.token_json_file = os.path.join(cache_dir, "dhan_token.json")
+        self.config_json_file = os.path.join(cache_dir, "config.json")
         self._index = None          # {(UNDERLYING, 'YYYY-MM-DD', strike, 'CE'): (security_id, lot)}
         self._http = requests.Session()
+        
+        # High-performance connection pooling for low latency (<50ms execution)
+        try:
+            adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
+            self._http.mount("https://", adapter)
+            self._http.mount("http://", adapter)
+        except Exception:
+            pass
+
+        self._load_config_json_creds()
         self._load_cached_token()
 
+    def _load_config_json_creds(self):
+        """Loads client_id, pin, totp_secret from config.json if not in self.creds."""
+        if os.path.exists(self.config_json_file):
+            try:
+                import json
+                with open(self.config_json_file, "r") as f:
+                    cfg = json.load(f)
+                if not self.creds.get("DHAN_CLIENT_ID") and cfg.get("client_id"):
+                    self.creds["DHAN_CLIENT_ID"] = str(cfg["client_id"]).strip()
+                if not self.creds.get("DHAN_PIN") and cfg.get("pin"):
+                    self.creds["DHAN_PIN"] = str(cfg["pin"]).strip()
+                if not self.creds.get("DHAN_TOTP_SECRET") and cfg.get("totp_secret"):
+                    self.creds["DHAN_TOTP_SECRET"] = str(cfg["totp_secret"]).strip()
+                if not self.creds.get("DHAN_ACCESS_TOKEN") and cfg.get("access_token"):
+                    self.creds["DHAN_ACCESS_TOKEN"] = str(cfg["access_token"]).strip()
+            except Exception:
+                pass
+
     def _load_cached_token(self):
-        """Loads valid token from .dhan_token if present and not already set."""
+        """Loads valid token from .dhan_token or dhan_token.json or config.json."""
+        tok = None
         if os.path.exists(self.token_file):
             try:
                 with open(self.token_file, "r") as f:
                     tok = f.read().strip()
-                if tok:
-                    DhanAdapter._shared_token = tok
-                    self.creds["DHAN_ACCESS_TOKEN"] = tok
             except Exception:
                 pass
+        if not tok and os.path.exists(self.token_json_file):
+            try:
+                import json
+                with open(self.token_json_file, "r") as f:
+                    tok = json.load(f).get("accessToken")
+            except Exception:
+                pass
+        if not tok and self.creds.get("DHAN_ACCESS_TOKEN"):
+            tok = str(self.creds["DHAN_ACCESS_TOKEN"]).strip()
+
+        if tok:
+            DhanAdapter._shared_token = tok
+            self.creds["DHAN_ACCESS_TOKEN"] = tok
 
     def _persist_token(self, token: str):
-        """Saves active token to .dhan_token and updates .env so all processes share it."""
+        """Saves active token to .dhan_token, dhan_token.json, and updates .env so all processes share it."""
         token = (token or "").strip()
         if not token:
             return
@@ -66,6 +107,12 @@ class DhanAdapter(BrokerAdapter):
         try:
             with open(self.token_file, "w") as f:
                 f.write(token)
+        except Exception:
+            pass
+        try:
+            import json
+            with open(self.token_json_file, "w") as f:
+                json.dump({"accessToken": token}, f, indent=2)
         except Exception:
             pass
         # Also update .env
@@ -108,6 +155,17 @@ class DhanAdapter(BrokerAdapter):
                 import time
                 time.sleep(1.0)
                 continue
+
+            # Auto-refresh token on HTTP 401 Unauthorized
+            if r.status_code == 401:
+                self.log("[DHAN] Token expired (HTTP 401). Refreshing token...")
+                try:
+                    self._new_token()
+                    # Retry with new token
+                    r = self._http.request(method, API + path, json=body, headers=self._headers(), timeout=12)
+                except Exception as auth_err:
+                    self.log(f"[DHAN] Auto token refresh failed: {auth_err}")
+
             try:
                 data = r.json() if r.content else {}
             except Exception:
@@ -373,7 +431,8 @@ class DhanAdapter(BrokerAdapter):
 
     # ── orders ──────────────────────────────────────────────
     def _body(self, inst, side, qty, order_type, price, trigger, product):
-        return {
+        cid = self.creds.get("DHAN_CLIENT_ID", "")
+        b = {
             "transactionType": side,
             "exchangeSegment": inst["segment"],
             "productType": _PRODUCT.get(product, "INTRADAY"),
@@ -382,10 +441,13 @@ class DhanAdapter(BrokerAdapter):
             "securityId": str(inst["inst_id"]),
             "quantity": int(qty),
             "disclosedQuantity": 0,
-            "price": tick_round(price) if order_type != "MARKET" else 0,
-            "triggerPrice": tick_round(trigger) if order_type == "SL" else 0,
+            "price": tick_round(price) if order_type not in ("MARKET", "SL-M") else 0,
+            "triggerPrice": tick_round(trigger) if order_type in ("SL", "SL-M") else 0,
             "afterMarketOrder": False,
         }
+        if cid:
+            b["dhanClientId"] = str(cid)
+        return b
 
     def place(self, inst, side, qty, order_type, price=0.0, trigger=0.0, product="INTRADAY", tag=""):
         b = self._body(inst, side, qty, order_type, price, trigger, product)
@@ -400,6 +462,7 @@ class DhanAdapter(BrokerAdapter):
         return oid
 
     def modify(self, order_id, inst, side, qty, order_type, price=0.0, trigger=0.0, product="INTRADAY", tag=""):
+        cid = self.creds.get("DHAN_CLIENT_ID", "")
         b = {
             "orderId": str(order_id),
             "orderType": _TYPE[order_type],
@@ -409,6 +472,8 @@ class DhanAdapter(BrokerAdapter):
             "disclosedQuantity": 0,
             "validity": "DAY",
         }
+        if cid:
+            b["dhanClientId"] = str(cid)
         self._req("PUT", f"/orders/{order_id}", b)
 
     def cancel(self, order_id, inst=None, tag=""):

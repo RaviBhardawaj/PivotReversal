@@ -1728,21 +1728,27 @@ class LiveOrderManager:
             print(f"[ORDERS] Instrument lookup error for token {token}: {e}")
         return inst
 
-    def place_order(self, trade: dict, levels=None) -> str:
+    def place_order(self, trade: dict, levels=None, bid: float = 0.0, ask: float = 0.0) -> str:
         """Send the entry for a newly recorded forward-test trade (only when auto-trading is ON).
         levels: the strike's pivot levels (R1/R2/S1/S2/P/PN), checked against the strike selection."""
         if not self.engine.auto_trade:
             return "No order: auto-trading off"
         inst = self.instrument_for(trade)
         inst["levels"] = sorted(levels or [])
+        if bid:
+            inst["bid"] = float(bid)
+            trade["Bid"] = float(bid)
+        if ask:
+            inst["ask"] = float(ask)
+            trade["Ask"] = float(ask)
         return self.engine.enter(trade, inst)
 
-    def exit_order(self, trade: dict, reason: str, ltp: float) -> str:
+    def exit_order(self, trade: dict, reason: str, ltp: float, bid: float = 0.0, ask: float = 0.0) -> str:
         """Exit the broker position behind a forward-test trade. Safe to call more than once."""
-        return self.engine.exit(trade, reason, ltp)
+        return self.engine.exit(trade, reason, ltp, bid=bid, ask=ask)
 
-    def on_tick(self, trade: dict, ltp: float):
-        self.engine.on_tick(trade, ltp)
+    def on_tick(self, trade: dict, ltp: float, bid: float = 0.0, ask: float = 0.0):
+        self.engine.on_tick(trade, ltp, bid=bid, ask=ask)
 
     def pop_forced_close(self, trade_id):
         return self.engine.pop_forced_close(trade_id)
@@ -2150,13 +2156,15 @@ class ForwardTestTracker:
                   entry_price: float, sl: float, t1: float, t2: float,
                   t3: float = 0.0, t4: float = 0.0, t5: float = 0.0,
                   opt_piv: dict = None, timeframe: str = "15M Intraday",
-                  token: str = "", exchange: str = "NFO", expiry: str = "", levels=None):
+                  token: str = "", exchange: str = "NFO", expiry: str = "", levels=None,
+                  bid: float = 0.0, ask: float = 0.0):
         """Log a new trade entry with Timeframe, Expiry, and High/Low tracking.
         opt_piv: option Fibonacci pivots at time of entry (used to record S2/R2 entry zone).
         timeframe: '15M Intraday', '1H Structure' or '15M / 1H'.
         token: Angel One instrument token (needed for live order execution).
         exchange: exchange code e.g. 'NFO', 'BFO'.
         expiry: contract expiry string e.g. '10OCT2024'.
+        bid/ask: live L1 market depth for smart limit price calculation.
         """
         trade_key  = (symbol, opt_type, strike, expiry) if (symbol and expiry) else ((opt_type, strike, expiry) if expiry else (opt_type, strike))
         date_str   = datetime.now().strftime('%Y-%m-%d')
@@ -2213,6 +2221,8 @@ class ForwardTestTracker:
             'Entry_P':      entry_p,         # option P at entry time
             'Token':        token,           # instrument token for order placement
             'Exchange':     exchange,        # exchange code
+            'Bid':          round(_safe_float(bid), 2) if bid else 0.0,
+            'Ask':          round(_safe_float(ask), 2) if ask else 0.0,
             'Order_ID':     '',              # filled by live_order_manager
             'Exit_Price':   '',
             'Exit_Time':    '',
@@ -2239,13 +2249,14 @@ class ForwardTestTracker:
         # ── Live/Paper Order Placement ─────────────────────────────────
         if not self.paper_only:
             try:
-                trade['Order_ID'] = live_order_manager.place_order(trade, levels)
+                trade['Order_ID'] = live_order_manager.place_order(trade, levels, bid=bid, ask=ask)
             except Exception as oe:
                 print(f"[ORDER] place_order error: {oe}")
 
         return trade
 
-    def update_tick(self, opt_type: str, strike: int, ltp: float, expiry: str = "", symbol: str = ""):
+    def update_tick(self, opt_type: str, strike: int, ltp: float, expiry: str = "", symbol: str = "",
+                    bid: float = 0.0, ask: float = 0.0):
         """
         Called every tick for every watched strike.
         Updates live PnL, tracks Trade High & Low, calculates Maximum Results (MFE),
@@ -2325,7 +2336,7 @@ class ForwardTestTracker:
             closed, exit_reason, exit_pnl = fwd_exit_check(trade, ltp, opt_type, strike)
 
         if not closed and not self.paper_only:
-            live_order_manager.on_tick(trade, ltp)    # moves the broker SL order when the SL trails
+            live_order_manager.on_tick(trade, ltp, bid=bid, ask=ask)    # moves the broker SL order when the SL trails
         if not closed:
             self._save_snapshot(force=trade.get('Target_Hit', 0) != target_hit)
 
@@ -2348,7 +2359,7 @@ class ForwardTestTracker:
             # ── Broker exit order ─────────────────────────────────────────
             if not self.paper_only:
                 try:
-                    live_order_manager.exit_order(trade, exit_reason, ltp)
+                    live_order_manager.exit_order(trade, exit_reason, ltp, bid=bid, ask=ask)
                 except Exception as oe:
                     print(f"[ORDER] exit_order error: {oe}")
             trade['Live_PnL']    = exit_pnl
@@ -5905,6 +5916,8 @@ class FeedEngine:
                                 f"| Zone: Above S2({fp_sell['S2']:.1f}) Below R2({fp_sell['R2']:.1f})"
                             )
                             self._last_ft_sync_ts = 0.0   # push the new entry to the sheet right away
+                            _b_val = _safe_float(d.get("bid", 0.0))
+                            _a_val = _safe_float(d.get("ask", 0.0))
                             _new_trade = self.forward_tracker.log_entry(
                                 symbol, opt_type, strike, "SELL",
                                 round(ltp, 2),          # Live market data entry price (LTP)
@@ -5916,7 +5929,8 @@ class FeedEngine:
                                 st_sell.targets[4] if len(st_sell.targets) > 4 else sell_entry['T5'],
                                 opt_piv=opt_piv, timeframe=trade_tf,
                                 token=token, exchange=self.exchange,
-                                expiry=exp, levels=strike_levels_tf(strike, f15_focus, f1h_focus)
+                                expiry=exp, levels=strike_levels_tf(strike, f15_focus, f1h_focus),
+                                bid=_b_val, ask=_a_val
                             )
                             if _new_trade:   # alert only when a trade was actually recorded
                                 self.alert_mgr.send_alert_once(
@@ -5982,6 +5996,8 @@ class FeedEngine:
                                 f"| Zone: Above S2({fp_buy['S2']:.1f}) Below R2({fp_buy['R2']:.1f})"
                             )
                             self._last_ft_sync_ts = 0.0   # push the new entry to the sheet right away
+                            _b_val = _safe_float(d.get("bid", 0.0))
+                            _a_val = _safe_float(d.get("ask", 0.0))
                             _new_trade = self.forward_tracker.log_entry(
                                 symbol, opt_type, strike, "BUY",
                                 round(ltp, 2),          # Live market data entry price (LTP)
@@ -5993,7 +6009,8 @@ class FeedEngine:
                                 st_buy.targets[4] if len(st_buy.targets) > 4 else buy_entry['T5'],
                                 opt_piv=opt_piv, timeframe=trade_tf,
                                 token=token, exchange=self.exchange,
-                                expiry=exp, levels=strike_levels_tf(strike, f15_focus, f1h_focus)
+                                expiry=exp, levels=strike_levels_tf(strike, f15_focus, f1h_focus),
+                                bid=_b_val, ask=_a_val
                             )
                             if _new_trade:   # alert only when a trade was actually recorded
                                 self.alert_mgr.send_alert_once(
@@ -6201,7 +6218,9 @@ class FeedEngine:
 
                     # Update forward test tick tracking for target/SL exit
                     # (only real trades from today can hit a target or SL)
-                    closed_t = (self.forward_tracker.update_tick(opt_type, strike, ltp, expiry=exp, symbol=symbol)
+                    _b_val = _safe_float(d.get("bid", 0.0))
+                    _a_val = _safe_float(d.get("ask", 0.0))
+                    closed_t = (self.forward_tracker.update_tick(opt_type, strike, ltp, expiry=exp, symbol=symbol, bid=_b_val, ask=_a_val)
                                 if live_tick else None)
 
                     # Update Advanced Strategy tick tracking (independent P&L and exits, no alerts)

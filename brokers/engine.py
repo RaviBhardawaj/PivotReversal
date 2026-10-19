@@ -24,6 +24,7 @@ from .base import (BrokerError, FILLED, PENDING, REJECTED, CANCELLED, tick_round
 from .angel import AngelAdapter
 from .dhan import DhanAdapter
 from .xts import XTSAdapter
+from .smart_execution import smart_execution
 
 ADAPTERS = {"ANGEL": AngelAdapter, "DHAN": DhanAdapter, "XTS": XTSAdapter}
 BROKER_LABELS = {"ANGEL": "Angel One", "DHAN": "Dhan", "XTS": "Jainam XTS"}
@@ -34,13 +35,15 @@ DEFAULT_SETTINGS = {
     "lots_15m":          0,        # 0 = use "lots"
     "lots_1h":           0,        # 0 = use "lots"
     "max_lots":          20,       # hard cap per order
-    "entry_type":        "LIMIT",  # LIMIT (LTP + buffer, then MARKET) or MARKET
+    "entry_type":        "SMART_LIMIT",  # SMART_LIMIT (Bid/Ask depth), LIMIT or MARKET
+    "smart_execution":   True,     # Best bid/ask execution calculation
     "limit_buffer_pct":  0.5,
-    "chase_after_s":     10,       # unfilled LIMIT → modified to MARKET after this many seconds
+    "chase_after_s":     3,        # 3 seconds fast chase timeout
     "product":           "INTRADAY",
     "sl_at_broker":      True,     # place a stop-loss order at the broker
     "sl_limit_gap_pct":  5.0,      # SL-limit price this far beyond the trigger, so it fills on a gap
-    "take_sell_setups":  True,     # SELL setups short an option (needs margin); on (AJ, 8 Oct)
+    "option_buying_only": True,    # Only place BUY orders (CE/PE); never sell/short options
+    "take_sell_setups":  False,    # SELL setups short an option; turned off for option buying
     "trade_15m":         True,
     "trade_1h":          True,
     "max_trades":        6,
@@ -365,6 +368,8 @@ class OrderEngine:
             return "broker not connected"
         if not (("15M" in tf and s["trade_15m"]) or ("1H" in tf and s["trade_1h"])):
             return f"timeframe {tf or '-'} not enabled"
+        if s.get("option_buying_only", True) and trade.get("Action") != "BUY":
+            return "Option buying only: short selling disabled"
         if trade.get("Action") == "SELL" and not s["take_sell_setups"]:
             return "SELL setups are off"
         why = strike_selection_reason(s, trade, inst)
@@ -386,7 +391,7 @@ class OrderEngine:
 
     def enter(self, trade, inst):
         """
-        trade: the forward-test trade dict. inst: {symbol, exchange, token, tsym, expiry, strike, opt_type, lot_size}.
+        trade: the forward-test trade dict. inst: {symbol, exchange, token, tsym, expiry, strike, opt_type, lot_size, bid, ask}.
         Returns a short status for trade['Order_ID'].
         """
         if not self.auto_trade:
@@ -414,6 +419,8 @@ class OrderEngine:
                 "inst": dict(inst), "side": trade["Action"], "qty": lots * int(inst["lot_size"]),
                 "lots": lots, "timeframe": trade.get("Timeframe", ""),
                 "signal_px": float(trade.get("Entry_Price", 0)), "sl_want": float(trade.get("SL", 0) or 0),
+                "bid": float(trade.get("Bid") or inst.get("bid") or 0.0),
+                "ask": float(trade.get("Ask") or inst.get("ask") or 0.0),
                 "state": "OPENING", "entry_oid": "", "entry_tag": self._tag("E"), "entry_px": 0.0,
                 "filled": 0, "placed_at": time.time(), "chased": False,
                 "sl_oid": "", "sl_tag": "", "sl_trigger": 0.0,
@@ -423,37 +430,51 @@ class OrderEngine:
             self.positions[tid] = pos
         self._job_enter(pos)
 
-    def on_tick(self, trade, ltp=0.0):
+    def on_tick(self, trade, ltp=0.0, bid=0.0, ask=0.0):
         """Cheap; called every tick for an open trade. Moves the broker SL when the strategy trails it."""
         tid = trade.get("Trade_ID")
         pos = self.positions.get(tid)
-        if not pos or pos["state"] != "OPEN":
+        if not pos or pos["state"] not in OPEN_STATES:
             return
         pos["last_ltp"] = float(ltp or 0)
+        if bid:
+            pos["bid"] = float(bid)
+        if ask:
+            pos["ask"] = float(ask)
+        if pos["state"] != "OPEN":
+            return
         want = float(trade.get("SL", 0) or 0)
         if want and abs(want - pos["sl_want"]) >= 0.05:
             pos["sl_want"] = want
             self._jobs.put(("sl_sync", tid))
 
-    def exit(self, trade, reason, ltp=0.0):
+    def exit(self, trade, reason, ltp=0.0, bid=0.0, ask=0.0):
         tid = trade.get("Trade_ID")
         pos = self.positions.get(tid)
         if not pos and tid not in self._pending_new():
             return "NO_ACTIVE_ORDER"
-        self._jobs.put(("exit_req", (tid, reason, float(ltp or 0))))
+        self._jobs.put(("exit_req", (tid, reason, float(ltp or 0), float(bid or 0), float(ask or 0))))
         return "EXIT QUEUED"
 
     def _pending_new(self):
         return {a[0].get("Trade_ID") for j, a in list(self._jobs.queue) if j == "new"}
 
     def _job_exit_req(self, arg):
-        tid, reason, ltp = arg
+        if len(arg) == 5:
+            tid, reason, ltp, bid, ask = arg
+        else:
+            tid, reason, ltp = arg[:3]
+            bid, ask = 0.0, 0.0
         pos = self.positions.get(tid)
         if not pos or pos["state"] not in ("OPENING", "OPEN"):
             return
         pos["exit_reason"] = reason
         if ltp:
             pos["last_ltp"] = ltp
+        if bid:
+            pos["bid"] = bid
+        if ask:
+            pos["ask"] = ask
         pos["state"] = "CLOSING"
         self._job_exit(pos)
 
@@ -589,7 +610,15 @@ class OrderEngine:
             return self._entry_failed(pos, str(e))
         s = self.settings
         px = pos["signal_px"]
-        if s["entry_type"] == "LIMIT":
+        ltp = pos.get("last_ltp") or px
+        bid = pos.get("bid", 0.0)
+        ask = pos.get("ask", 0.0)
+
+        if s.get("smart_execution", True) or s.get("entry_type") in ("SMART_LIMIT", "LIMIT"):
+            otype, price, rationale = smart_execution.compute_buy_entry_price(ltp=ltp, bid=bid, ask=ask, signal_ep=px)
+            pos["exec_rationale"] = rationale
+            self.log(f"[SMART-EXEC] {pos['inst'].get('tsym')} Entry: {rationale}")
+        elif s["entry_type"] == "LIMIT":
             buf = 1 + float(s["limit_buffer_pct"]) / 100 if pos["side"] == "BUY" else 1 - float(s["limit_buffer_pct"]) / 100
             otype, price = "LIMIT", tick_round(px * buf)
         else:
@@ -603,6 +632,7 @@ class OrderEngine:
                 return self._entry_failed(pos, str(e))
         pos["entry_oid"] = oid
         pos["placed_at"] = time.time()
+        pos["entry_order_px"] = price
         self._record(pos, pos["side"], pos["qty"], price or px, oid, "PLACED",
                      f"{otype} {pos['lots']} lot(s) | {pos['timeframe']}")
         self.log(f"✅ [ORDER] {pos['side']} {pos['inst'].get('tsym')} x{pos['qty']} {otype} {price or ''} → {oid}")
@@ -709,11 +739,19 @@ class OrderEngine:
     def _send_exit(self, pos):
         exit_side = "SELL" if pos["side"] == "BUY" else "BUY"
         ltp = pos.get("last_ltp") or pos["entry_px"] or pos["signal_px"]
-        buf = float(self.settings["limit_buffer_pct"]) * 4 / 100          # marketable limit: 4× the entry buffer
-        price = tick_round(ltp * (1 - buf) if exit_side == "SELL" else ltp * (1 + buf))
-        otype = "LIMIT"
+        bid = pos.get("bid", 0.0)
+        ask = pos.get("ask", 0.0)
+
         if pos["exit_reason"] == "Kill switch" or pos["exit_tries"] >= 1:
             otype, price = "MARKET", 0.0      # STOP, or a retry after a failed exit: go straight to market
+        elif self.settings.get("smart_execution", True):
+            otype, price, rationale = smart_execution.compute_sell_exit_price(ltp=ltp, bid=bid, ask=ask)
+            pos["exit_rationale"] = rationale
+            self.log(f"[SMART-EXEC] {pos['inst'].get('tsym')} Exit: {rationale}")
+        else:
+            buf = float(self.settings["limit_buffer_pct"]) * 4 / 100          # marketable limit: 4× the entry buffer
+            price = tick_round(ltp * (1 - buf) if exit_side == "SELL" else ltp * (1 + buf))
+            otype = "LIMIT"
         pos["exit_tag"] = self._tag("X")
         pos["exit_tries"] += 1
         try:
@@ -733,18 +771,33 @@ class OrderEngine:
         self._record(pos, exit_side, pos["filled"], price or ltp, oid, "EXIT PLACED", f"{otype} | {pos['exit_reason']}")
 
     def _job_chase(self, pos):
-        """Turn a still-open LIMIT entry or exit into a MARKET order."""
+        """Step limit price or modify to MARKET for unfilled entry/exit."""
         if pos["state"] == "OPENING" and pos["entry_oid"]:
             oid, side, qty, tag = pos["entry_oid"], pos["side"], pos["qty"], pos["entry_tag"]
+            curr_px = pos.get("entry_order_px", pos["signal_px"])
+            bid = pos.get("bid", 0.0)
+            ask = pos.get("ask", 0.0)
+            ltp = pos.get("last_ltp", pos["signal_px"])
+            new_px, rationale = smart_execution.compute_chase_modification(side, curr_px, bid=bid, ask=ask, ltp=ltp)
+            try:
+                # Step limit price towards market quote first for guaranteed option fill
+                if new_px > 0 and abs(new_px - curr_px) >= 0.05:
+                    self.broker.modify(oid, pos["inst"], side, qty, "LIMIT", price=new_px, product=self.settings["product"], tag=tag)
+                    pos["entry_order_px"] = new_px
+                    self._record(pos, side, qty, new_px, oid, "MODIFIED", f"Chase: {rationale}")
+                    self.log(f"[SMART-EXEC] Chase step {oid} -> {new_px} ({rationale})")
+                else:
+                    self.broker.modify(oid, pos["inst"], side, qty, "MARKET", product=self.settings["product"], tag=tag)
+                    self._record(pos, side, qty, 0, oid, "MODIFIED", "unfilled LIMIT → MARKET")
+            except Exception as e:
+                self.log(f"[ORDERS] Could not chase {oid}: {e}")
         elif pos["state"] == "CLOSING" and pos["exit_oid"]:
             oid, side, qty, tag = pos["exit_oid"], ("SELL" if pos["side"] == "BUY" else "BUY"), pos["filled"], pos["exit_tag"]
-        else:
-            return
-        try:
-            self.broker.modify(oid, pos["inst"], side, qty, "MARKET", product=self.settings["product"], tag=tag)
-            self._record(pos, side, qty, 0, oid, "MODIFIED", "unfilled LIMIT → MARKET")
-        except Exception as e:
-            self.log(f"[ORDERS] Could not convert {oid} to MARKET: {e}")
+            try:
+                self.broker.modify(oid, pos["inst"], side, qty, "MARKET", product=self.settings["product"], tag=tag)
+                self._record(pos, side, qty, 0, oid, "MODIFIED", "unfilled exit LIMIT → MARKET")
+            except Exception as e:
+                self.log(f"[ORDERS] Could not convert exit {oid} to MARKET: {e}")
 
     # ── monitor (status polling and reconciliation) ─────────
     def _safe_orders(self):
@@ -761,6 +814,7 @@ class OrderEngine:
             if not from_exit and pos["state"] == "OPENING":
                 pos["state"] = "OPEN"
                 self._record(pos, pos["side"], pos["filled"], pos["entry_px"], pos["entry_oid"], "FILLED")
+                self.log(f"🎯 [ORDER] Entry FILLED for {pos['inst'].get('tsym')} @ {pos['entry_px']:.2f}. Immediately placing broker Stop-Loss (trig {pos['sl_want']})...")
                 self._jobs.put(("place_sl", pos["trade_id"]))
         elif st.status in (CANCELLED, REJECTED) and not from_exit:
             self._entry_failed(pos, st.message or st.status.lower())

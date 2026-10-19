@@ -19,6 +19,10 @@ from .config import (
     ADVANCED_NEXT_DAY_PLAN_FILE,
     ADVANCED_MIN_RR_RATIO,
     ADVANCED_REJECT_ON_CONTEXT_CONFLICT,
+    ADVANCED_TIMEFRAME,
+    ADVANCED_EXPIRY_MODE,
+    ADVANCED_MAX_ENTRY_TOLERANCE_PCT,
+    ADVANCED_MAX_ENTRY_DIST_PTS,
     BASE_DIR,
 )
 from .filters import (
@@ -45,6 +49,38 @@ def get_symbol_step(symbol: str) -> int:
     if "MIDCP" in s:
         return 25
     return 50
+
+
+def get_monthly_expiry(expiries: List[str], ref_date: Optional[date] = None) -> str:
+    """
+    Finds the monthly expiry (last chronological expiry date of the current active month,
+    or next month if current month is already past).
+    """
+    if not expiries:
+        return ""
+    ref = ref_date or date.today()
+    month_expiries: Dict[Tuple[int, int], List[Tuple[date, str]]] = {}
+    for e in expiries:
+        if not e:
+            continue
+        e_str = str(e).strip()
+        try:
+            d = datetime.strptime(e_str, "%d%b%Y").date()
+            key = (d.year, d.month)
+            if key not in month_expiries:
+                month_expiries[key] = []
+            month_expiries[key].append((d, e_str))
+        except Exception:
+            continue
+    sorted_months = sorted(month_expiries.keys())
+    for ym in sorted_months:
+        dates_and_exp = sorted(month_expiries[ym], key=lambda x: x[0])
+        last_d, last_exp = dates_and_exp[-1]
+        if last_d >= ref:
+            return last_exp
+    if sorted_months:
+        return sorted(month_expiries[sorted_months[-1]], key=lambda x: x[0])[-1][1]
+    return ""
 
 
 def extract_focus_strikes_from_pivots(pivots: Dict[str, float], step: int = 50) -> Dict[str, Any]:
@@ -110,6 +146,8 @@ class AdvancedStrategyEngine:
         self.sheets_mgr = AdvancedGoogleSheetsManager()
         self._last_sheet_sync_ts = 0.0
         self._p_states: Dict[Tuple, Dict[str, Any]] = {} # (symbol, opt_type, strike, exp) -> state dict
+        self.monthly_expiry: str = ""
+        self.focus_1h_strikes: set = set()
         self.next_day_plan: Dict[str, Any] = self._load_persisted_plan()
 
     def _load_persisted_plan(self) -> Dict[str, Any]:
@@ -348,6 +386,20 @@ class AdvancedStrategyEngine:
         """
         now = datetime.now()
 
+        # Enforce Monthly Expiry strictly for Advance Strategy
+        if hasattr(self, "monthly_expiry") and self.monthly_expiry and expiry:
+            if str(expiry).strip().upper() != str(self.monthly_expiry).strip().upper():
+                reason = f"Advance Strategy trades ONLY Monthly Expiry ({self.monthly_expiry}), got {expiry}"
+                self.tracker.log_rejection(symbol, opt_type, strike, expiry, action, setup_type, ltp, reason)
+                return False, reason, None
+
+        # Enforce 1-Hour Structure strictly for Advance Strategy
+        if hasattr(self, "focus_1h_strikes") and self.focus_1h_strikes:
+            if strike not in self.focus_1h_strikes:
+                reason = f"Strike {strike} is not in 1-Hour Structure focus strikes {sorted(list(self.focus_1h_strikes))}"
+                self.tracker.log_rejection(symbol, opt_type, strike, expiry, action, setup_type, ltp, reason)
+                return False, reason, None
+
         # Check if Pivot P continuation is disabled
         if "CONTINUATION" in setup_type.upper() and not ADVANCED_ALLOW_P_CONTINUATION:
             reason = "Pivot P Continuation setup disabled in configuration"
@@ -383,6 +435,25 @@ class AdvancedStrategyEngine:
             self.tracker.log_rejection(symbol, opt_type, strike, expiry, action, setup_type, ltp, reason_b, {"LL": ll, "HH": hh})
             return False, reason_b, None
 
+        # Proximity Check (Level Reclaim / Retest Entry - Best Combination Entry Logic)
+        # Prevents late entry wicks (e.g. buying at 91.50 when S2 was 31.77 and LL was 26.35).
+        # We enter near the level with tight SL at LL. If price ran away too far, wait for retest/pullback.
+        if level_px > 0:
+            if action == "BUY":
+                entry_dist = ltp - level_px
+                max_dist_pts = max(level_px * (ADVANCED_MAX_ENTRY_TOLERANCE_PCT / 100.0), ADVANCED_MAX_ENTRY_DIST_PTS)
+                if entry_dist > max_dist_pts:
+                    reason = f"LTP ({ltp:.2f}) ran away from {level_name} ({level_px:.2f}) by +{entry_dist:.2f} pts (> {max_dist_pts:.1f} pts) - awaiting retest near level"
+                    self.tracker.log_rejection(symbol, opt_type, strike, expiry, action, setup_type, ltp, reason)
+                    return False, reason, None
+            else: # SELL
+                entry_dist = level_px - ltp
+                max_dist_pts = max(level_px * (ADVANCED_MAX_ENTRY_TOLERANCE_PCT / 100.0), ADVANCED_MAX_ENTRY_DIST_PTS)
+                if entry_dist > max_dist_pts:
+                    reason = f"LTP ({ltp:.2f}) dropped away from {level_name} ({level_px:.2f}) by -{entry_dist:.2f} pts (> {max_dist_pts:.1f} pts) - awaiting retest near level"
+                    self.tracker.log_rejection(symbol, opt_type, strike, expiry, action, setup_type, ltp, reason)
+                    return False, reason, None
+
         # Filter C: Completed 5M candle confirmation
         pass_c, conf_desc, c_metrics = evaluate_candle_confirmation(action, candle_5m, now, level_px)
         if not pass_c:
@@ -395,8 +466,9 @@ class AdvancedStrategyEngine:
             self.tracker.log_rejection(symbol, opt_type, strike, expiry, action, setup_type, ltp, reason_d, {"status": retest_status})
             return False, reason_d, None
 
-        # Filter E: Risk / Reward check
-        pass_e, reason_e, rr_metrics = evaluate_risk_reward(ltp, sl_candidate, t1_candidate, action, lot_size)
+        # Filter E: Risk / Reward check (ensuring active target is above entry)
+        t_target = t1_candidate if (action == "BUY" and t1_candidate > ltp) or (action == "SELL" and t1_candidate < ltp and t1_candidate > 0) else (t2_candidate if t2_candidate > 0 else t1_candidate)
+        pass_e, reason_e, rr_metrics = evaluate_risk_reward(ltp, sl_candidate, t_target, action, lot_size)
         if not pass_e:
             self.tracker.log_rejection(symbol, opt_type, strike, expiry, action, setup_type, ltp, reason_e, rr_metrics)
             return False, reason_e, None
@@ -543,22 +615,16 @@ class AdvancedStrategyEngine:
 
         step = get_symbol_step(symbol)
 
-        f15 = (daily_focus or {}).get("15M", {})
+        # Advance Strategy trades STRICTLY the Monthly Expiry based on 1-Hour Structure Pivots
+        all_cache_expiries = [s.get("expiry") for s in strikes_dict.values() if s.get("expiry")]
+        target_monthly_expiry = get_monthly_expiry(all_cache_expiries, today)
+        target_expiry = expiry if (expiry and expiry == target_monthly_expiry) else (target_monthly_expiry or expiry)
+        self.monthly_expiry = target_expiry
+
         f1h = (daily_focus or {}).get("1H", {})
-        if not f15 and mtf_pivots:
-            p15 = mtf_pivots.get("15-Min") or mtf_pivots.get("15M") or {}
-            f15 = extract_focus_strikes_from_pivots(p15, step)
         if not f1h and mtf_pivots:
             p1h = mtf_pivots.get("1-Hour") or mtf_pivots.get("1H") or {}
             f1h = extract_focus_strikes_from_pivots(p1h, step)
-
-        f15_ce = set(f15.get("ce_strikes") or [s for s in (f15.get("CE1"), f15.get("CE2"), f15.get("CE3")) if s])
-        f15_pe = set(f15.get("pe_strikes") or [s for s in (f15.get("PE1"), f15.get("PE2"), f15.get("PE3")) if s])
-        f15_p  = set(f15.get("p_strikes") or ([f15.get("P_STRIKE")] if f15.get("P_STRIKE") else []))
-        f15_all = set(f15.get("all_6") or f15.get("all_4") or (list(f15_ce | f15_pe | f15_p)))
-        if f15_all and not f15_ce and not f15_pe:
-            f15_ce = set(f15_all)
-            f15_pe = set(f15_all)
 
         f1h_ce = set(f1h.get("ce_strikes") or [s for s in (f1h.get("CE1"), f1h.get("CE2"), f1h.get("CE3")) if s])
         f1h_pe = set(f1h.get("pe_strikes") or [s for s in (f1h.get("PE1"), f1h.get("PE2"), f1h.get("PE3")) if s])
@@ -571,21 +637,12 @@ class AdvancedStrategyEngine:
         weekly_piv = (mtf_pivots or {}).get("Weekly", {})
         daily_piv = (mtf_pivots or {}).get("Daily", {})
 
-        f_day = extract_focus_strikes_from_pivots(daily_piv, step) if daily_piv else {}
-        f_day_ce = set(f_day.get("ce_strikes") or [])
-        f_day_pe = set(f_day.get("pe_strikes") or [])
-        f_day_p  = set(f_day.get("p_strikes") or [])
-        f_day_all = set(f_day.get("all_6") or f_day.get("all_4") or [])
-
-        # Allowed strikes: STRICTLY those coming from 15M, 1H, or Daily Fibonacci pivot levels
-        all_ce_strikes = f15_ce | f1h_ce | f_day_ce | f15_p | f1h_p | f_day_p
-        all_pe_strikes = f15_pe | f1h_pe | f_day_pe | f15_p | f1h_p | f_day_p
-        all_p_strikes  = f15_p | f1h_p | f_day_p
-        all_allowed_strikes = (
-            f15_all | f1h_all | f_day_all
-            | set((daily_focus or {}).get("all_focus_6", []))
-            | set((daily_focus or {}).get("all_focus", []))
-        )
+        # Allowed strikes: STRICTLY those coming from 1-Hour Structure Fibonacci pivot levels
+        all_ce_strikes = f1h_ce | f1h_p
+        all_pe_strikes = f1h_pe | f1h_p
+        all_p_strikes  = f1h_p
+        all_allowed_strikes = f1h_all
+        self.focus_1h_strikes = set(all_allowed_strikes)
 
         setups = []
         for tok, s_info in strikes_dict.items():
@@ -593,14 +650,15 @@ class AdvancedStrategyEngine:
             stk = int(s_info.get("strike", 0))
             if stk <= 0:
                 continue
-            if expiry and s_info.get("expiry") and s_info.get("expiry") != expiry:
+            # Restrict strictly to Monthly Expiry
+            if target_expiry and s_info.get("expiry") and s_info.get("expiry") != target_expiry:
                 continue
 
-            # STRICT ADVANCE FILTER: Keep strikes IDENTICAL to 15M, 1H & Daily Pivot levels
+            # STRICT ADVANCE FILTER: Keep strikes STRICTLY to 1H Structure Pivot levels
             if all_allowed_strikes:
                 if stk not in all_allowed_strikes:
                     continue
-                # If specific CE/PE roles are established, ensure option type matches (R1/R2 -> CE, S1/S2 -> PE, P -> Both)
+                # Option type matching (1H R1/R2/R3 -> CE, S1/S2/S3 -> PE, P -> Both)
                 if ot == "CE" and all_ce_strikes and stk not in all_ce_strikes:
                     continue
                 if ot == "PE" and all_pe_strikes and stk not in all_pe_strikes:
@@ -617,19 +675,10 @@ class AdvancedStrategyEngine:
             if p <= 0:
                 continue
 
-            # Focus group label strictly based on Fibonacci pivot timeframe
-            if stk in f15_all and stk in f1h_all:
-                fg = "⭐15M & ⏳1H"
-            elif stk in f15_all:
-                fg = "⭐15M Intraday"
-            elif stk in f1h_all:
-                fg = "⏳1H Structure"
-            elif stk in f_day_all:
-                fg = "📅Daily Structure"
-            else:
-                fg = "⭐Pivot Focus"
+            # Focus group is strictly 1-Hour Structure for Advance Strategy
+            fg = "⏳1H Structure"
 
-            s_exp = str(s_info.get("expiry") or expiry or "")
+            s_exp = str(s_info.get("expiry") or target_expiry or "")
             und_spot = float(daily_piv.get("close") or daily_piv.get("C") or daily_piv.get("P") or 0.0)
 
             # 1. BUY Reversal at S2

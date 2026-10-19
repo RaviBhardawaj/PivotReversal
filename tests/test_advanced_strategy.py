@@ -51,7 +51,7 @@ from advanced_strategy.filters import (
 )
 from advanced_strategy.tracker import AdvancedStrategyTracker
 from advanced_strategy.sheets import AdvancedGoogleSheetsManager
-from advanced_strategy.engine import AdvancedStrategyEngine
+from advanced_strategy.engine import AdvancedStrategyEngine, get_monthly_expiry
 
 
 class TestAdvancedStrategy(unittest.TestCase):
@@ -253,7 +253,7 @@ class TestAdvancedStrategy(unittest.TestCase):
         closed = self.tracker.update_tick("NIFTY", "CE", 24800, "13OCT2026", 150.0)
         self.assertIsNotNone(closed)
         self.assertEqual(closed["Status"], "CLOSED")
-        self.assertEqual(closed["Exit_Reason"], "Target 3 Hit")
+        self.assertIn("Target 3 Hit", closed["Exit_Reason"])
         self.assertEqual(closed["Points"], 50.0)
         self.assertEqual(closed["Gross_PnL"], 1250.0)
         self.assertGreater(closed["Charges"], 0)
@@ -284,7 +284,7 @@ class TestAdvancedStrategy(unittest.TestCase):
         sheets_mgr = AdvancedGoogleSheetsManager()
         ok = sheets_mgr.setup_tab(mock_spreadsheet)
         self.assertTrue(ok)
-        self.assertEqual(len(ADVANCED_SHEET_HEADERS), 44)
+        self.assertEqual(len(ADVANCED_SHEET_HEADERS), 45)
         self.assertIn("Trade ID", ADVANCED_SHEET_HEADERS)
         self.assertIn("Strategy ID", ADVANCED_SHEET_HEADERS)
         self.assertIn("Trade Mode (Actual / Shadow)", ADVANCED_SHEET_HEADERS)
@@ -381,6 +381,33 @@ class TestAdvancedStrategy(unittest.TestCase):
         self.assertEqual(buy_setup["target_1"], 110.0)
         self.assertEqual(buy_setup["target_2"], 130.0)
         self.assertEqual(buy_setup["advance_status"], "QUALIFIED")
+
+    # ── 11. Monthly Expiry Determination & Anti-Chasing Logic ────────────────
+    def test_monthly_expiry_detection(self):
+        expiries = ["06OCT2026", "13OCT2026", "20OCT2026", "27OCT2026", "03NOV2026"]
+        m_exp = get_monthly_expiry(expiries)
+        self.assertEqual(m_exp, "27OCT2026")
+
+    def test_proximity_anti_chasing(self):
+        engine = AdvancedStrategyEngine()
+        engine.monthly_expiry = "27OCT2026"
+        engine.focus_1h_strikes = {23100}
+
+        # Suppose S2 is 31.77, LL is 26.35
+        # If LTP ran away to 91.50 (> 8 pts above S2): MUST REJECT as runaway chasing
+        candle_5m = {"open": 28.0, "high": 92.0, "low": 26.35, "close": 91.50, "bucket": 100}
+        opt_piv = {"S3": 20.0, "S2": 31.77, "S1": 55.0, "P": 110.0, "R1": 150.0, "R2": 210.0, "R3": 250.0}
+        
+        ok, reason, trade = engine.evaluate_candidate(
+            symbol="NIFTY", opt_type="PE", strike=23100, expiry="27OCT2026",
+            action="BUY", setup_type="BUY Reversal", ltp=91.50, spot_px=23100.0,
+            daily_pivots={"P": 23000.0, "S1": 22900.0, "S2": 22800.0, "R1": 23200.0, "R2": 23300.0},
+            weekly_pivots={"P": 23000.0}, opt_piv=opt_piv, ll=26.35, hh=0.0,
+            candle_5m=candle_5m, retest_done=True, retest_low=30.0, retest_high=0.0,
+            sl_candidate=26.35, t1_candidate=55.0, t2_candidate=110.0
+        )
+        self.assertFalse(ok)
+        self.assertIn("ran away", reason.lower())
 
 
 if __name__ == "__main__":

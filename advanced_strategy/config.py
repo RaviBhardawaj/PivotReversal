@@ -16,6 +16,12 @@ ADVANCED_REJECTIONS_FILE = os.path.join(BASE_DIR, "advanced_strategy_rejections.
 ADVANCED_STATE_FILE = os.path.join(BASE_DIR, "advanced_strategy_open.json")
 ADVANCED_NEXT_DAY_PLAN_FILE = os.path.join(BASE_DIR, "advanced_strategy_next_day_plan.json")
 
+# ── Advance Strategy Specifics: Monthly Expiry & 1H Structure ───────────────
+ADVANCED_TIMEFRAME = "1H Structure"
+ADVANCED_EXPIRY_MODE = "MONTHLY"
+ADVANCED_MAX_ENTRY_TOLERANCE_PCT = float(os.getenv("ADV_MAX_ENTRY_TOLERANCE_PCT", "5.0"))  # Max 5% above S2 to avoid runaway entry
+ADVANCED_MAX_ENTRY_DIST_PTS = float(os.getenv("ADV_MAX_ENTRY_DIST_PTS", "8.0"))           # Max 8 pts above level
+
 # ── Entry Filters Configuration ──────────────────────────────────────────────
 # Filter A: Weekly and Daily Context
 ADVANCED_REJECT_ON_CONTEXT_CONFLICT = os.getenv("ADV_REJECT_ON_CONTEXT_CONFLICT", "true").lower() in ("true", "1", "yes")

@@ -1683,7 +1683,7 @@ async def get_advanced_strategy_plan():
         ot = s.get("type", "CE")
         stk = int(float(s.get("strike", 0)))
         if hasattr(feed, "get_strike_ltp"):
-            live_v = feed.get_strike_ltp(ot, stk)
+            live_v = feed.get_strike_ltp(ot, stk, s.get("expiry"))
             if live_v > 0:
                 s_dict["ltp"] = round(live_v, 2)
         enriched.append(s_dict)

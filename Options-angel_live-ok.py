@@ -4246,6 +4246,12 @@ class FeedEngine:
                 exps[e] = d
         return sorted(exps, key=exps.get)[:n]
 
+    def get_monthly_expiry(self, symbol: str, ref_date: date = None) -> str:
+        """Finds the monthly expiry for symbol (last expiry of current calendar month)."""
+        all_exps = self.upcoming_expiries(symbol, n=12, from_day=ref_date)
+        from advanced_strategy.engine import get_monthly_expiry as _calc_m
+        return _calc_m(all_exps, ref_date)
+
     def build_next_day_levels(self, symbol: str):
         """After the close (15:45): the next session's strike levels, built from today's candle,
         for the current AND the next expiry, then eod_planner.py, which takes its strike levels
@@ -5849,8 +5855,8 @@ class FeedEngine:
                     # Determine timeframe category for this strike setup
                     f15_focus = self.focus_15m or daily_focus.get("15M", {})
                     f1h_focus = self.focus_1h or daily_focus.get("1H", {})
-                    f15_set = set(f15_focus.get("all_4", []))
-                    f1h_set = set(f1h_focus.get("all_4", []))
+                    f15_set = set(f15_focus.get("all_4", []) + f15_focus.get("all_6", []))
+                    f1h_set = set(f1h_focus.get("all_4", []) + f1h_focus.get("all_6", []))
                     if strike in f15_set and strike in f1h_set:
                         trade_tf = "15M / 1H"
                     elif strike in f15_set:
@@ -5859,6 +5865,10 @@ class FeedEngine:
                         trade_tf = "1H Structure"
                     else:
                         trade_tf = ""   # not a 15M/1H pivot strike → never traded
+
+                    is_1h_structure = bool(strike in f1h_set)
+                    target_m_exp = getattr(self, "monthly_expiry", "") or getattr(self.advanced_engine, "monthly_expiry", "")
+                    is_monthly_exp = bool(target_m_exp and exp and str(exp).strip().upper() == str(target_m_exp).strip().upper())
 
                     # 1H Structure confluence for active trades
                     h1_buy_action = ""
@@ -6032,6 +6042,87 @@ class FeedEngine:
                                 )
                             except Exception as _adv_buy_err:
                                 print(f"[ADV STRATEGY] buy eval error: {_adv_buy_err}")
+
+                    # ── Advance Strategy Dedicated Evaluation (Monthly Expiry & 1H Structure Only) ──
+                    if mkt_open and live_tick and is_monthly_exp and is_1h_structure:
+                        try:
+                            _sym_lot = get_symbol_lot_size(symbol, self.exchange)
+                            _s2_sup = opt_piv.get("S2", 0.0) if opt_piv.get("S2", 0.0) > 0.05 else opt_piv.get("S1", 0.0)
+                            _r2_res = opt_piv.get("R2", 0.0)
+                            
+                            # Advance BUY Reversal: S2 reclaim near level with tight SL at LL
+                            if st_buy.ll > 0 and ltp >= _s2_sup:
+                                _t1_b = st_buy.targets[0] if len(st_buy.targets) > 0 else (opt_piv.get("S1") if _s2_sup == opt_piv.get("S2") else opt_piv.get("P"))
+                                _t2_b = st_buy.targets[1] if len(st_buy.targets) > 1 else opt_piv.get("P")
+                                _t3_b = st_buy.targets[2] if len(st_buy.targets) > 2 else opt_piv.get("R1")
+                                self.advanced_engine.evaluate_candidate(
+                                    symbol=symbol,
+                                    opt_type=opt_type,
+                                    strike=strike,
+                                    expiry=exp,
+                                    action="BUY",
+                                    setup_type="BUY Reversal",
+                                    ltp=round(ltp, 2),
+                                    spot_px=spot,
+                                    daily_pivots=daily_piv_mtf,
+                                    weekly_pivots=mtf.get("Weekly", {}),
+                                    opt_piv=opt_piv,
+                                    ll=st_buy.ll,
+                                    hh=st_buy.hh,
+                                    candle_5m=st_buy.candle_5m,
+                                    retest_done=st_buy.retest_done,
+                                    retest_low=st_buy.retest_low,
+                                    retest_high=st_buy.retest_high,
+                                    sl_candidate=round(st_buy.ll, 2),
+                                    t1_candidate=round(_t1_b, 2),
+                                    t2_candidate=round(_t2_b, 2),
+                                    t3_candidate=round(_t3_b, 2),
+                                    bid=_safe_float(d.get("bid", 0.0)),
+                                    ask=_safe_float(d.get("ask", 0.0)),
+                                    quote_age_s=0.0,
+                                    source_order_id="",
+                                    trade_mode="Shadow",
+                                    lot_size=_sym_lot,
+                                    token=token
+                                )
+
+                            # Advance SELL Reversal: R2 rejection near level with tight SL at HH
+                            if st_sell.hh > 0 and _r2_res > 0 and ltp <= _r2_res:
+                                _t1_s = st_sell.targets[0] if len(st_sell.targets) > 0 else opt_piv.get("R1")
+                                _t2_s = st_sell.targets[1] if len(st_sell.targets) > 1 else opt_piv.get("P")
+                                _t3_s = st_sell.targets[2] if len(st_sell.targets) > 2 else opt_piv.get("S1")
+                                self.advanced_engine.evaluate_candidate(
+                                    symbol=symbol,
+                                    opt_type=opt_type,
+                                    strike=strike,
+                                    expiry=exp,
+                                    action="SELL",
+                                    setup_type="SELL Reversal",
+                                    ltp=round(ltp, 2),
+                                    spot_px=spot,
+                                    daily_pivots=daily_piv_mtf,
+                                    weekly_pivots=mtf.get("Weekly", {}),
+                                    opt_piv=opt_piv,
+                                    ll=st_sell.ll,
+                                    hh=st_sell.hh,
+                                    candle_5m=st_sell.candle_5m,
+                                    retest_done=st_sell.retest_done,
+                                    retest_low=st_sell.retest_low,
+                                    retest_high=st_sell.retest_high,
+                                    sl_candidate=round(st_sell.hh, 2),
+                                    t1_candidate=round(_t1_s, 2),
+                                    t2_candidate=round(_t2_s, 2),
+                                    t3_candidate=round(_t3_s, 2),
+                                    bid=_safe_float(d.get("bid", 0.0)),
+                                    ask=_safe_float(d.get("ask", 0.0)),
+                                    quote_age_s=0.0,
+                                    source_order_id="",
+                                    trade_mode="Shadow",
+                                    lot_size=_sym_lot,
+                                    token=token
+                                )
+                        except Exception as _adv_eval_err:
+                            pass
 
                     # ── Pivot P Continuation check (Section 5 C & D) ──
                     if mkt_open and is_focus_strike and live_tick:
@@ -7641,12 +7732,12 @@ class ControlPanel:
         if not hasattr(self, "adv_plan_tree") or not self.adv_plan_tree.winfo_exists():
             return
         plan = self.advanced_engine.get_next_day_plan()
+        sym = self.symbol_var.get()
+        m_exp = getattr(feed, "monthly_expiry", "") or feed.get_monthly_expiry(sym)
         if not plan or not plan.get("setups"):
-            sym = self.symbol_var.get()
-            exp = self.expiry_var.get()
             plan = self.advanced_engine.build_next_day_plan(
                 symbol=sym,
-                expiry=exp,
+                expiry=m_exp,
                 mtf_pivots=getattr(feed, "mtf_pivots", None),
                 daily_focus=getattr(feed, "daily_focus", None)
             )
@@ -7728,8 +7819,8 @@ class ControlPanel:
 
     def _on_map_advance_levels_click(self):
         sym = self.symbol_var.get()
-        exp = self.expiry_var.get()
-        self._set_status(f"Mapping Advance Strategy Next-Day Levels for {sym}...", "#58a6ff")
+        exp = getattr(feed, "monthly_expiry", "") or feed.get_monthly_expiry(sym)
+        self._set_status(f"Mapping Advance Strategy (Monthly: {exp}) Next-Day Levels for {sym}...", "#58a6ff")
         def _job():
             mapped = feed.fetch_and_map_all_strikes(sym, exp, force_fetch=True)
             plan = self.advanced_engine.build_next_day_plan(
@@ -7741,7 +7832,7 @@ class ControlPanel:
             )
             qual = plan.get("qualified_count", 0)
             total = plan.get("setups_count", 0)
-            self.root.after(0, lambda: self._set_status(f"✅ Auto-mapped Advance Next-Day Levels for {sym}: {qual}/{total} qualified setups", "#3fb950"))
+            self.root.after(0, lambda: self._set_status(f"✅ Auto-mapped Advance Next-Day Levels for {sym} ({exp}): {qual}/{total} qualified setups", "#3fb950"))
             self.root.after(0, self._refresh_advance_display)
         threading.Thread(target=_job, daemon=True).start()
 
@@ -7950,7 +8041,8 @@ class ControlPanel:
             if mode == "ADVANCE":
                 adv_p = self.advanced_engine.get_next_day_plan()
                 if not adv_p or not adv_p.get("setups"):
-                    adv_p = self.advanced_engine.build_next_day_plan(sym, exp, strikes_dict=strikes_dict, mtf_pivots=mtf_all, daily_focus=focus)
+                    m_exp = getattr(feed, "monthly_expiry", "") or feed.get_monthly_expiry(sym)
+                    adv_p = self.advanced_engine.build_next_day_plan(sym, m_exp, strikes_dict=strikes_dict, mtf_pivots=mtf_all, daily_focus=focus)
                 for stp in adv_p.get("setups", []):
                     ot = stp.get("type", "CE")
                     tag = "ce" if ot == "CE" else "pe"
@@ -9403,6 +9495,15 @@ class ControlPanel:
         next_exp = (self.next_exp_var.get() or "").strip()
         if next_exp and next_exp != expiry and (self.use_next_exp.get() or self.expiry_filter_var.get() == "NEXT"):
             expiries_to_load.append(next_exp)
+
+        # Always include monthly expiry for Advance Strategy (1H Structure)
+        m_exp = feed.get_monthly_expiry(symbol)
+        if m_exp:
+            feed.monthly_expiry = m_exp
+            feed.advanced_engine.monthly_expiry = m_exp
+            if m_exp not in expiries_to_load:
+                expiries_to_load.append(m_exp)
+                print(f"[START] Added Monthly Expiry for Advance Strategy: {m_exp}")
 
         self._set_status("Connecting & setting up Google Sheet...")
         for b in getattr(self, "_start_buttons", [self.start_btn]):

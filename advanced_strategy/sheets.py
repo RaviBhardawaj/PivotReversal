@@ -76,7 +76,7 @@ class AdvancedGoogleSheetsManager:
                 pass
 
             end_col = col_to_letter(len(ADVANCED_SHEET_HEADERS))
-            if not existing_headers or existing_headers[:5] != ADVANCED_SHEET_HEADERS[:5]:
+            if not existing_headers or existing_headers != ADVANCED_SHEET_HEADERS:
                 ws.update(values=[ADVANCED_SHEET_HEADERS], range_name=f"A1:{end_col}1")
                 # Format headers
                 try:

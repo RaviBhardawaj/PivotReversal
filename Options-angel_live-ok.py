@@ -112,8 +112,10 @@ def get_symbol_step(symbol: str, exchange: str = "NFO") -> int:
     return 50
 
 def get_symbol_lot_size(symbol: str, exchange: str = "NFO") -> int:
-    """Retrieve official contract lot size for any symbol."""
+    """Retrieve official contract lot size for any symbol (NIFTY 1 lot = 65 qty)."""
     sym = (symbol or "").strip().upper()
+    if sym == "NIFTY":
+        return 65
     if Session.scrip_df is not None:
         df = Session.scrip_df
         sub = df[(df["name"] == sym) & (df["exch_seg"].isin([exchange, "NFO", "BFO", "MCX"]))]
@@ -123,7 +125,7 @@ def get_symbol_lot_size(symbol: str, exchange: str = "NFO") -> int:
                 if ls > 0: return ls
             except Exception:
                 pass
-    defaults = {"NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 25, "MIDCPNIFTY": 50, "SENSEX": 10, "BANKEX": 15}
+    defaults = {"NIFTY": 65, "BANKNIFTY": 15, "FINNIFTY": 25, "MIDCPNIFTY": 50, "SENSEX": 10, "BANKEX": 15}
     return defaults.get(sym, 1)
 
 def get_symbol_spot_token(symbol: str, exchange: str = "NFO") -> tuple:
@@ -4113,6 +4115,36 @@ class FeedEngine:
 
         return 0.0
 
+    def get_strike_depth(self, opt_type: str, strike: int, expiry: str = None) -> dict:
+        """Live LTP, Bid, and Ask depth for (opt_type, strike)."""
+        try:
+            stk_int = int(float(strike))
+        except (ValueError, TypeError):
+            stk_int = strike
+        ot = (str(opt_type) or "").upper().strip()
+        exp_clean = (str(expiry) or "").strip().upper() if expiry else None
+
+        with self.lock:
+            for tok, m in self.token_to_meta.items():
+                if (m.get("opt_type") or "").upper().strip() != ot:
+                    continue
+                try:
+                    m_stk = int(float(m.get("strike", 0)))
+                except (ValueError, TypeError):
+                    m_stk = m.get("strike")
+                if m_stk != stk_int:
+                    continue
+                m_exp = (m.get("expiry") or "").strip().upper()
+                if exp_clean and m_exp and exp_clean not in m_exp and m_exp not in exp_clean:
+                    continue
+                d = self.live_data.get(tok, {})
+                ltp = float(d.get("ltp", 0.0) or 0.0)
+                bid = float(d.get("bid", 0.0) or 0.0)
+                ask = float(d.get("ask", 0.0) or 0.0)
+                return {"ltp": ltp, "bid": bid, "ask": ask}
+        ltp = self.get_strike_ltp(opt_type, stk_int, expiry)
+        return {"ltp": ltp, "bid": 0.0, "ask": 0.0}
+
     def compute_ce_on_support(self, ce_strikes: list) -> bool:
         """
         Reversal pairing rule for one timeframe's 2 CE + 2 PE strikes:
@@ -4587,9 +4619,29 @@ class FeedEngine:
             elif s_live and ltp > 0:
                 s_high, s_low = max(s_high, ltp), min(s_low, ltp) if s_low > 0 else ltp
 
+            best_bid = 0.0
+            best_ask = 0.0
+            b5_buy = message.get("best_5_buy_data")
+            if b5_buy and isinstance(b5_buy, list) and len(b5_buy) > 0:
+                best_bid = float(b5_buy[0].get("price", 0) or 0) / 100.0
+            elif "buy_price" in message:
+                best_bid = float(message.get("buy_price", 0) or 0) / 100.0
+            elif "bid" in message:
+                best_bid = float(message.get("bid", 0) or 0)
+
+            b5_sell = message.get("best_5_sell_data")
+            if b5_sell and isinstance(b5_sell, list) and len(b5_sell) > 0:
+                best_ask = float(b5_sell[0].get("price", 0) or 0) / 100.0
+            elif "sell_price" in message:
+                best_ask = float(message.get("sell_price", 0) or 0) / 100.0
+            elif "ask" in message:
+                best_ask = float(message.get("ask", 0) or 0)
+
             self.live_data[token] = {
                 "s_date": today_s, "s_live": s_live, "s_high": s_high, "s_low": s_low,
                 "ltp":   ltp,
+                "bid":   best_bid if best_bid > 0 else curr.get("bid", 0.0),
+                "ask":   best_ask if best_ask > 0 else curr.get("ask", 0.0),
                 "oi":    oi,
                 "vol":   vol,
                 "chg":   chg,

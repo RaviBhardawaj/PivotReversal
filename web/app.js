@@ -616,7 +616,7 @@
           <td style="font-size:11px">${m5Status}</td>
           <td><span class="${badgeClass}">${stText}</span></td>
           <td style="text-align:center;">
-            <button class="btn-order-fast font-bold" data-sym="${state.symbol || 'NIFTY'}" data-strike="${w.strike}" data-type="${w.type}" data-expiry="${w.expiry || ''}" data-side="${w.side || 'BUY'}" data-cmp="${cmpVal}" data-entry="${entryVal}" data-sl="${slNum}" data-t1="${target1Val}">
+            <button class="btn-order-fast font-bold" data-sym="${state.symbol || 'NIFTY'}" data-strike="${w.strike}" data-type="${w.type}" data-expiry="${w.expiry || ''}" data-side="${w.side || 'BUY'}" data-cmp="${cmpVal}" data-entry="${entryVal}" data-sl="${slNum}" data-t1="${target1Val}" data-bid="${w.bid || 0}" data-ask="${w.ask || 0}">
               ⚡ EXEC
             </button>
           </td>
@@ -637,6 +637,8 @@
           expiry: d.expiry || '',
           action: d.side || 'BUY',
           limit_price: parseFloat(d.cmp) || parseFloat(d.entry) || 0,
+          bid: parseFloat(d.bid) || 0,
+          ask: parseFloat(d.ask) || 0,
           sl: parseFloat(d.sl) || 0,
           t1: parseFloat(d.t1) || 0
         });
@@ -1628,19 +1630,27 @@
       if (els.modalOrderType) els.modalOrderType.textContent = ord.order_type || 'LIMIT';
       if (els.modalOrderQty) {
         const lots = ord.lots || 1;
-        const qty = ord.quantity || ord.total_qty || (lots * 25);
+        const lotUnit = ord.lot_size || getContractLotSize(ord.symbol || state.symbol || 'NIFTY');
+        const qty = ord.quantity || ord.total_qty || (lots * lotUnit);
         els.modalOrderQty.textContent = `${lots} Lot (${qty} Qty)`;
       }
       const ordPrice = ord.price !== undefined ? ord.price : (ord.limit_price || 0);
-      if (els.modalOrderPrice) els.modalOrderPrice.textContent = `₹${Number(ordPrice || 0).toFixed(2)}`;
+      if (els.modalOrderPrice) {
+        let pTxt = `₹${Number(ordPrice || 0).toFixed(2)}`;
+        if (ord.bid || ord.ask) {
+          pTxt += ` (Bid: ₹${Number(ord.bid || 0).toFixed(2)} | Ask: ₹${Number(ord.ask || 0).toFixed(2)})`;
+        }
+        els.modalOrderPrice.textContent = pTxt;
+      }
       const ordSl = ord.stop_loss !== undefined ? ord.stop_loss : (ord.sl || 0);
       if (els.modalOrderSl) els.modalOrderSl.textContent = `₹${Number(ordSl || 0).toFixed(2)}`;
       const ordTgt = ord.target !== undefined ? ord.target : (ord.t1 || 0);
       if (els.modalOrderTarget) els.modalOrderTarget.textContent = `₹${Number(ordTgt || 0).toFixed(2)}`;
 
       const checks = data.checks || [
+        `Buy Limit Placed on Bid/Ask Quote: ₹${Number(ordPrice || 0).toFixed(2)}`,
+        `Contract Lot Size: 1 lot = ${ord.lot_size || 65} qty (${ord.quantity || 65} units)`,
         `Instrument Tradability & Security ID Verified (${ord.security_id || 'Active NFO'})`,
-        `Lot Size Multiple Enforced (${ord.quantity || 25} units)`,
         `Single Active Trade Limit Respected`
       ];
       if (els.modalValidationBox) {
@@ -1774,7 +1784,8 @@
     if (s.includes('SENSEX')) return 10;
     if (s.includes('FINNIFTY')) return 25;
     if (s.includes('MIDCPNIFTY')) return 50;
-    return 25; // default NIFTY
+    if (s.includes('NIFTY')) return 65;
+    return 65; // default NIFTY (1 lot = 65 qty)
   }
 
   async function loadMappedStrikesData() {

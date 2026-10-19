@@ -99,49 +99,69 @@ class AdvancedStrategyTracker:
             print(f"[ADV TRACKER] Snapshot save error: {e}")
 
     def _restore_snapshot(self):
-        """Restores open trades from today after an app restart."""
-        if not os.path.exists(self.state_file):
-            return
-        try:
-            with open(self.state_file) as f:
-                d = json.load(f)
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            if d.get("date") != today_str:
-                return
+        """Restores open trades from today after an app restart (strictly intraday)."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        now_time = datetime.now().time()
 
-            self._closed_today = d.get("closed_today", [])
-            for k_list, count in d.get("sl_counts", []):
-                self._sl_hit_count[tuple(k_list)] = count
-            for k_list in d.get("closed_keys", []):
-                self._closed_keys_today.add(tuple(k_list))
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file) as f:
+                    d = json.load(f)
+                file_date = d.get("date") or today_str
+                if file_date == today_str:
+                    self._closed_today = d.get("closed_today", [])
+                    for k_list, count in d.get("sl_counts", []):
+                        self._sl_hit_count[tuple(k_list)] = count
+                    for k_list in d.get("closed_keys", []):
+                        self._closed_keys_today.add(tuple(k_list))
 
-            now_time = datetime.now().time()
-            for t in d.get("active", []):
-                if t.get("Status") != "ACTIVE":
-                    continue
-                # If app restarted after 3 PM, close remaining open trades
-                if now_time >= EOD_SQUARE_OFF_TIME:
-                    t["Exit_Price"] = t.get("Current_Price", t.get("Entry_Price", 0.0))
-                    t["Exit_Time"] = "15:00:00"
-                    t["Exit_Reason"] = "EOD 3PM Square-off (restart after 3 PM)"
-                    t["Status"] = "CLOSED"
-                    self._calculate_final_pnl(t)
-                    self._closed_today.append(t)
-                    self._update_csv(t)
-                else:
-                    tid = t["Trade_ID"]
-                    self.active_trades[tid] = t
-                    t_key = self._trade_key(
-                        t.get("Underlying_Symbol", ""),
-                        t.get("Option_Type", ""),
-                        t.get("Strike", 0),
-                        t.get("Expiry", ""),
-                        t.get("BUY/SELL", "")
-                    )
-                    self._active_by_key[t_key] = tid
-                    print(f"♻️ [ADV TRACKER] Restored active {t.get('BUY/SELL')} {t.get('Option_Type')} {t.get('Strike')} @ {t.get('Entry_Price')}")
-        except Exception as e:
-            print(f"[ADV TRACKER] Restore snapshot error: {e}")
+                    raw_active = d.get("active", [])
+                    active_list = list(raw_active.values()) if isinstance(raw_active, dict) else (raw_active if isinstance(raw_active, list) else [])
+
+                    for t in active_list:
+                        if not isinstance(t, dict):
+                            continue
+                        if t.get("Date") and t.get("Date") != today_str:
+                            continue  # strictly intraday only
+                        if t.get("Status") not in ("ACTIVE", "OPEN", "⚡ LIVE"):
+                            continue
+
+                        # If app restarted after 3 PM (15:00), square-off remaining open trades
+                        if now_time >= EOD_SQUARE_OFF_TIME:
+                            t["Exit_Price"] = t.get("Current_Price", t.get("Entry_Price", 0.0))
+                            t["Exit_Time"] = "15:00:00"
+                            t["Exit_Reason"] = "EOD 3PM Square-off (restart after 3 PM)"
+                            t["Status"] = "CLOSED"
+                            self._calculate_final_pnl(t)
+                            self._closed_today.append(t)
+                            self._update_csv(t)
+                        else:
+                            tid = t["Trade_ID"]
+                            self.active_trades[tid] = t
+                            t_key = self._trade_key(
+                                t.get("Underlying_Symbol", ""),
+                                t.get("Option_Type", ""),
+                                t.get("Strike", 0),
+                                t.get("Expiry", ""),
+                                t.get("BUY/SELL", "")
+                            )
+                            self._active_by_key[t_key] = tid
+                            print(f"♻️ [ADV TRACKER] Restored active {t.get('BUY/SELL')} {t.get('Option_Type')} {t.get('Strike')} @ {t.get('Entry_Price')}")
+            except Exception as e:
+                print(f"[ADV TRACKER] Restore snapshot error: {e}")
+
+        # Also restore today's closed trades from CSV if not already present
+        if os.path.exists(self.csv_file):
+            try:
+                with open(self.csv_file, mode="r", newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row.get("Date") == today_str and "CLOSED" in str(row.get("Status", "")).upper():
+                            tid = row.get("Trade_ID")
+                            if tid and not any(c.get("Trade_ID") == tid for c in self._closed_today):
+                                self._closed_today.append(row)
+            except Exception as csv_err:
+                print(f"[ADV TRACKER] Closed trades CSV restore error: {csv_err}")
 
     def log_rejection(
         self,
@@ -359,8 +379,16 @@ class AdvancedStrategyTracker:
             t["Max_Pts"] = round(max(0.0, entry - _safe_float(t["Trade_Low"])), 2)
             pts = round(entry - ltp, 2)
 
+        qty = int(t.get("Quantity") or 25)
+        gross = round(pts * qty, 2)
+        turnover = round((entry + ltp) * qty, 2)
+        charges = round((turnover * ADVANCED_EST_CHARGE_PCT / 100.0) + ADVANCED_EST_FLAT_BROKERAGE, 2)
+        net = round(gross - charges, 2)
+
         t["Points"] = pts
-        t["Gross_PnL"] = round(pts * t["Quantity"], 2)
+        t["Gross_PnL"] = gross
+        t["Charges"] = charges
+        t["Net_PnL"] = net
 
         # Check Exit conditions
         exit_triggered = False
@@ -468,7 +496,37 @@ class AdvancedStrategyTracker:
         trade["Net_PnL"] = net
 
     def _to_csv_row(self, t: Dict[str, Any]) -> List[Any]:
-        """Maps internal dict to 44 Google Sheet / CSV columns."""
+        """Maps internal dict to 45 Google Sheet / CSV columns with fallback PnL calculation."""
+        entry = _safe_float(t.get("Entry_Price"))
+        exit_px = _safe_float(t.get("Exit_Price"), entry)
+        action = str(t.get("BUY/SELL", "BUY")).upper()
+        qty = int(t.get("Quantity") or 25)
+
+        pts = t.get("Points")
+        if pts is None or pts == "":
+            pts = round(exit_px - entry, 2) if action == "BUY" else round(entry - exit_px, 2)
+        else:
+            pts = round(_safe_float(pts), 2)
+
+        gross = t.get("Gross_PnL")
+        if gross is None or gross == "":
+            gross = round(pts * qty, 2)
+        else:
+            gross = round(_safe_float(gross), 2)
+
+        charges = t.get("Charges")
+        if charges is None or charges == "":
+            turnover = round((entry + exit_px) * qty, 2)
+            charges = round((turnover * ADVANCED_EST_CHARGE_PCT / 100.0) + ADVANCED_EST_FLAT_BROKERAGE, 2)
+        else:
+            charges = round(_safe_float(charges), 2)
+
+        net = t.get("Net_PnL")
+        if net is None or net == "":
+            net = round(gross - charges, 2)
+        else:
+            net = round(_safe_float(net), 2)
+
         return [
             t.get("Date", ""),
             t.get("Entry_Time", ""),
@@ -484,9 +542,9 @@ class AdvancedStrategyTracker:
             t.get("Option_Type", ""),
             t.get("Strike", ""),
             t.get("Expiry", ""),
-            t.get("BUY/SELL", ""),
-            t.get("Quantity", 25),
-            t.get("Entry_Price", ""),
+            action,
+            qty,
+            round(entry, 2),
             t.get("Option_P", ""),
             t.get("Option_R1", ""),
             t.get("Option_R2", ""),
@@ -504,10 +562,10 @@ class AdvancedStrategyTracker:
             t.get("Target_3", ""),
             t.get("Exit_Price", ""),
             t.get("Exit_Reason", ""),
-            t.get("Gross_PnL", 0.0),
-            t.get("Charges", 0.0),
-            t.get("Net_PnL", 0.0),
-            t.get("Points", 0.0),
+            gross,
+            charges,
+            net,
+            pts,
             t.get("Status", ""),
             t.get("Context_Filter_Result", ""),
             t.get("Risk/Reward", ""),
@@ -534,7 +592,6 @@ class AdvancedStrategyTracker:
             if not rows:
                 return
 
-            header = rows[0]
             tid = trade["Trade_ID"]
             found = False
             for i in range(1, len(rows)):
@@ -565,23 +622,25 @@ class AdvancedStrategyTracker:
         return self._rejections_today[-limit:]
 
     def get_summary_stats(self) -> Dict[str, Any]:
-        """Computes win/loss, points, P&L for Advanced Version."""
-        all_closed = self.get_all_closed_trades()
-        total_trades = len(all_closed)
-        wins = [t for t in all_closed if _safe_float(t.get("Points", 0)) > 0]
-        losses = [t for t in all_closed if _safe_float(t.get("Points", 0)) < 0]
+        """Computes win/loss, points, P&L for Advanced Version (STRICTLY INTRADAY)."""
+        today_closed = self.get_closed_trades()
+        total_trades = len(today_closed)
+        wins = [t for t in today_closed if _safe_float(t.get("Points", 0)) > 0]
+        losses = [t for t in today_closed if _safe_float(t.get("Points", 0)) < 0]
         win_rate = round((len(wins) / total_trades * 100.0), 1) if total_trades > 0 else 0.0
 
-        total_pts = round(sum(_safe_float(t.get("Points", 0)) for t in all_closed), 2)
-        total_gross = round(sum(_safe_float(t.get("Gross_PnL", 0)) for t in all_closed), 2)
-        total_charges = round(sum(_safe_float(t.get("Charges", 0)) for t in all_closed), 2)
-        total_net = round(sum(_safe_float(t.get("Net_PnL", 0)) for t in all_closed), 2)
+        total_pts = round(sum(_safe_float(t.get("Points", 0)) for t in today_closed), 2)
+        total_gross = round(sum(_safe_float(t.get("Gross_PnL", 0)) for t in today_closed), 2)
+        total_charges = round(sum(_safe_float(t.get("Charges", 0)) for t in today_closed), 2)
+        total_net = round(sum(_safe_float(t.get("Net_PnL", 0)) for t in today_closed), 2)
 
         open_pts = round(sum(_safe_float(t.get("Points", 0)) for t in self.active_trades.values()), 2)
         open_gross = round(sum(_safe_float(t.get("Gross_PnL", 0)) for t in self.active_trades.values()), 2)
+        open_net = round(sum(_safe_float(t.get("Net_PnL", 0)) for t in self.active_trades.values()), 2)
 
         return {
             "strategy_id": STRATEGY_ID,
+            "intraday_only": True,
             "total_trades": total_trades,
             "active_trades": len(self.active_trades),
             "wins": len(wins),
@@ -593,5 +652,6 @@ class AdvancedStrategyTracker:
             "total_net_pnl": total_net,
             "open_points": open_pts,
             "open_gross_pnl": open_gross,
+            "open_net_pnl": open_net,
             "rejections_count": len(self._rejections_today)
         }

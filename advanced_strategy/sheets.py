@@ -11,6 +11,8 @@ from typing import Dict, List, Any, Optional
 from .config import (
     ADVANCED_SHEET_TAB_NAME,
     ADVANCED_SHEET_HEADERS,
+    ADVANCED_EST_CHARGE_PCT,
+    ADVANCED_EST_FLAT_BROKERAGE,
 )
 
 
@@ -202,55 +204,106 @@ class AdvancedGoogleSheetsManager:
 
     @staticmethod
     def _format_trade_row(t: Dict[str, Any]) -> List[Any]:
-        """Converts trade dict into 45 column values."""
-        pts = t.get("Points", 0.0)
-        net_pnl = t.get("Net_PnL", 0.0)
-        status = t.get("Status", "ACTIVE")
+        """Converts trade dict into 45 column values with rock-solid PnL and active state."""
+        def _to_float(v, default=0.0):
+            try:
+                if v is None or v == "":
+                    return default
+                return float(v)
+            except:
+                return default
+
+        entry = _to_float(t.get("Entry_Price"))
+        qty = int(t.get("Quantity") or 25)
+        action = str(t.get("BUY/SELL", "BUY")).upper()
+        status_raw = str(t.get("Status", "ACTIVE")).strip()
+        is_active = status_raw in ("ACTIVE", "OPEN", "⚡ LIVE") or not str(t.get("Exit_Price", "")).strip()
+
+        cur_px = _to_float(t.get("Current_Price")) or _to_float(t.get("LTP")) or entry
+        exit_px = cur_px if is_active else _to_float(t.get("Exit_Price"), entry)
+
+        # Points
+        pts = t.get("Points")
+        if pts is None or pts == "":
+            pts = round(exit_px - entry, 2) if action == "BUY" else round(entry - exit_px, 2)
+        else:
+            pts = round(_to_float(pts), 2)
+
+        # Gross PnL
+        gross = t.get("Gross_PnL") or t.get("Gross_PL")
+        if gross is None or gross == "":
+            gross = round(pts * qty, 2)
+        else:
+            gross = round(_to_float(gross), 2)
+
+        # Charges
+        charges = t.get("Charges")
+        if charges is None or charges == "":
+            turnover = round((entry + exit_px) * qty, 2)
+            charges = round((turnover * ADVANCED_EST_CHARGE_PCT / 100.0) + ADVANCED_EST_FLAT_BROKERAGE, 2)
+        else:
+            charges = round(_to_float(charges), 2)
+
+        # Net PnL
+        net_pnl = t.get("Net_PnL") or t.get("Net_PL")
+        if net_pnl is None or net_pnl == "":
+            net_pnl = round(gross - charges, 2)
+        else:
+            net_pnl = round(_to_float(net_pnl), 2)
+
+        if is_active:
+            display_exit_px = f"⚡ CMP: {cur_px:.2f}"
+            display_status = f"🟡 ACTIVE (CMP: {cur_px:.2f})"
+            exit_reason = t.get("Exit_Reason") or f"⚡ LIVE — SL:{t.get('Stop_Loss')} T1:{t.get('Target_1')}"
+        else:
+            display_exit_px = round(exit_px, 2)
+            display_status = f"{'🟢' if net_pnl >= 0 else '🔴'} CLOSED"
+            exit_reason = t.get("Exit_Reason", "")
 
         return [
-            t.get("Date", ""),
-            t.get("Entry_Time", ""),
-            t.get("Exit_Time", ""),
-            t.get("Strategy_ID", "ADVANCED_PIVOT_REVERSAL"),
-            t.get("Trade_ID", ""),
-            t.get("Underlying_Symbol", ""),
-            t.get("Underlying_Price", ""),
-            t.get("Underlying_Zone", ""),
-            t.get("Setup_Type", ""),
-            t.get("Entry_Reason", ""),
-            t.get("Option_Symbol", ""),
-            t.get("Option_Type", ""),
-            t.get("Strike", ""),
-            t.get("Expiry", ""),
-            t.get("BUY/SELL", ""),
-            t.get("Quantity", 25),
-            t.get("Entry_Price", ""),
-            t.get("Option_P", ""),
-            t.get("Option_R1", ""),
-            t.get("Option_R2", ""),
-            t.get("Option_S1", ""),
-            t.get("Option_S2", ""),
-            t.get("Option_R3", ""),
-            t.get("Option_S3", ""),
-            t.get("Liquidity_LL", ""),
-            t.get("Liquidity_HH", ""),
-            t.get("5M_Confirmation", ""),
-            t.get("Retest_Status", ""),
-            t.get("Stop_Loss", ""),
-            t.get("Target_1", ""),
-            t.get("Target_2", ""),
-            t.get("Target_3", ""),
-            t.get("Exit_Price", ""),
-            t.get("Exit_Reason", ""),
-            t.get("Gross_PnL", 0.0),
-            t.get("Charges", 0.0),
-            net_pnl,
-            pts,
-            status,
-            t.get("Context_Filter_Result", ""),
-            t.get("Risk/Reward", ""),
-            t.get("Spread_Check", ""),
-            t.get("Rejection_Reason", ""),
-            t.get("Source_Order_ID", ""),
-            t.get("Trade_Mode", "Shadow"),
+            t.get("Date", ""),             # 1
+            t.get("Entry_Time", ""),       # 2
+            t.get("Exit_Time", "") if not is_active else "", # 3
+            t.get("Strategy_ID", "ADVANCED_PIVOT_REVERSAL"), # 4
+            t.get("Trade_ID", ""),         # 5
+            t.get("Underlying_Symbol", ""),# 6
+            t.get("Underlying_Price", ""), # 7
+            t.get("Underlying_Zone", ""),  # 8
+            t.get("Setup_Type", ""),       # 9
+            t.get("Entry_Reason", ""),     # 10
+            t.get("Option_Symbol", ""),    # 11
+            t.get("Option_Type", ""),      # 12
+            t.get("Strike", ""),           # 13
+            t.get("Expiry", ""),           # 14
+            action,                        # 15
+            qty,                           # 16
+            round(entry, 2),               # 17
+            t.get("Option_P", ""),         # 18
+            t.get("Option_R1", ""),        # 19
+            t.get("Option_R2", ""),        # 20
+            t.get("Option_S1", ""),        # 21
+            t.get("Option_S2", ""),        # 22
+            t.get("Option_R3", ""),        # 23
+            t.get("Option_S3", ""),        # 24
+            t.get("Liquidity_LL", ""),     # 25
+            t.get("Liquidity_HH", ""),     # 26
+            t.get("5M_Confirmation", ""), # 27
+            t.get("Retest_Status", ""),    # 28
+            t.get("Stop_Loss", ""),        # 29
+            t.get("Target_1", ""),         # 30
+            t.get("Target_2", ""),         # 31
+            t.get("Target_3", ""),         # 32
+            display_exit_px,               # 33
+            exit_reason,                   # 34
+            gross,                         # 35 Gross P&L
+            charges,                       # 36 Charges
+            net_pnl,                       # 37 Net P&L
+            pts,                           # 38 Points
+            display_status,                # 39 Status
+            t.get("Context_Filter_Result", ""), # 40
+            t.get("Risk/Reward", ""),      # 41
+            t.get("Spread_Check", ""),     # 42
+            t.get("Rejection_Reason", ""), # 43
+            t.get("Source_Order_ID", ""),  # 44
+            t.get("Trade_Mode", "Shadow"), # 45
         ]

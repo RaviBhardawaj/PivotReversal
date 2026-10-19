@@ -364,7 +364,8 @@ class TestAdvancedStrategy(unittest.TestCase):
             expiry="13OCT2026",
             strikes_dict=strikes_mock,
             mtf_pivots=mtf_pivots_mock,
-            daily_focus=daily_focus_mock
+            daily_focus=daily_focus_mock,
+            save_to_file=False
         )
 
         self.assertIsNotNone(plan)

@@ -579,7 +579,8 @@ class AdvancedStrategyEngine:
         strikes_dict: Optional[Dict[str, Any]] = None,
         mtf_pivots: Optional[Dict[str, Any]] = None,
         daily_focus: Optional[Dict[str, Any]] = None,
-        mode: str = "session"
+        mode: str = "session",
+        save_to_file: bool = True
     ) -> Dict[str, Any]:
         """
         Auto-generates Next-Day Levels and Qualifying Plan Setups for the Advanced Strategy,
@@ -654,14 +655,9 @@ class AdvancedStrategyEngine:
             if target_expiry and s_info.get("expiry") and s_info.get("expiry") != target_expiry:
                 continue
 
-            # STRICT ADVANCE FILTER: Keep strikes STRICTLY to 1H Structure Pivot levels
+            # STRICT ADVANCE FILTER: Keep strikes STRICTLY to 1H Structure Pivot levels (BOTH CE & PE)
             if all_allowed_strikes:
                 if stk not in all_allowed_strikes:
-                    continue
-                # Option type matching (1H R1/R2/R3 -> CE, S1/S2/S3 -> PE, P -> Both)
-                if ot == "CE" and all_ce_strikes and stk not in all_ce_strikes:
-                    continue
-                if ot == "PE" and all_pe_strikes and stk not in all_pe_strikes:
                     continue
 
             s3 = float(s_info.get("S3", 0.0))
@@ -866,12 +862,13 @@ class AdvancedStrategyEngine:
         }
 
         self.next_day_plan = plan
-        try:
-            with open(ADVANCED_NEXT_DAY_PLAN_FILE, "w") as f:
-                json.dump(plan, f, indent=2)
-            print(f"🎯 [ADV STRATEGY] Next-Day Plan saved: {len(setups)} setups ({plan['qualified_count']} qualified) → {ADVANCED_NEXT_DAY_PLAN_FILE}")
-        except Exception as e:
-            print(f"[ADV STRATEGY] Error saving next day plan: {e}")
+        if save_to_file:
+            try:
+                with open(ADVANCED_NEXT_DAY_PLAN_FILE, "w") as f:
+                    json.dump(plan, f, indent=2)
+                print(f"🎯 [ADV STRATEGY] Next-Day Plan saved: {len(setups)} setups ({plan['qualified_count']} qualified) → {ADVANCED_NEXT_DAY_PLAN_FILE}")
+            except Exception as e:
+                print(f"[ADV STRATEGY] Error saving next day plan: {e}")
 
         return plan
 

@@ -2216,6 +2216,7 @@ class ForwardTestTracker:
             'Order_ID':     '',              # filled by live_order_manager
             'Exit_Price':   '',
             'Exit_Time':    '',
+            'Entry_Reason': f"{action} Reclaim ({timeframe})",
             'Exit_Reason':  'ACTIVE',
             'PnL_Pts':      0.0,             # updated every tick
             'Live_PnL':     0.0,             # same — live mirror
@@ -4903,10 +4904,10 @@ class FeedEngine:
                         ft_ws = s
                         break
                 if not ft_ws:
-                    ft_ws = spreadsheet.add_worksheet(title="Forward Test", rows=350, cols=20)
-                elif ft_ws.col_count < 20:
+                    ft_ws = spreadsheet.add_worksheet(title="Forward Test", rows=350, cols=24)
+                elif ft_ws.col_count < 24:
                     try:
-                        ft_ws.add_cols(20 - ft_ws.col_count)
+                        ft_ws.add_cols(24 - ft_ws.col_count)
                     except Exception:
                         pass
 
@@ -5302,6 +5303,10 @@ class FeedEngine:
                 ll_str = f"{t_low:.2f}" if t_low > 0 else "-"
                 max_str = f"🔥 +{max_pts:.2f}" if max_pts > 0 else "0.00"
 
+                entry_reason = t.get('Entry_Reason') or f"{action} Reclaim ({tf})"
+                exit_status  = (f"🎯 T{t.get('Target_Hit', 0)} Hit — SL {t.get('SL', 0)}" if t.get('Target_Hit', 0) > 0
+                                else f"⚡ LIVE — SL {t.get('SL', 0)} / T1 {t.get('Target_1', 0)}")
+
                 return [
                     t.get('Date', ''),
                     t.get('Entry_Time', ''),
@@ -5322,8 +5327,8 @@ class FeedEngine:
                     t.get('Target_3', 0),
                     t.get('Target_4', 0),
                     t.get('Target_5', 0),
-                    (f"🎯 T{t.get('Target_Hit', 0)} Hit — SL {t.get('SL', 0)}" if t.get('Target_Hit', 0) > 0
-                     else f"⚡ LIVE — SL {t.get('SL', 0)} / T1 {t.get('Target_1', 0)}"),
+                    entry_reason,
+                    exit_status,
                     '🟡 ACTIVE',
                     t.get('Trade_ID', ''),
                 ]
@@ -5357,6 +5362,7 @@ class FeedEngine:
                 max_str = f"🔥 +{max_pts:.2f}" if max_pts > 0 else "0.00"
                 hh_c = t_high if t_high > 0 else max(entry, exit_p)
                 ll_c = t_low if t_low > 0 else min(entry, exit_p)
+                entry_reason = r.get('Entry_Reason') or f"{action} Reclaim ({tf})"
 
                 return [
                     r.get('Date', ''),
@@ -5378,6 +5384,7 @@ class FeedEngine:
                     r.get('Target_3', 0),
                     r.get('Target_4', 0),
                     r.get('Target_5', 0),
+                    entry_reason,
                     exit_reason,
                     f"{win_icon} CLOSED",
                     r.get('Trade_ID', ''),
@@ -5422,8 +5429,10 @@ class FeedEngine:
                 'Entry_Price', 'Exit/Current_Px', 'PnL_Pts',
                 'HH After Entry', 'LL After Entry', 'Max Result (Pts)',
                 'SL', 'T1', 'T2', 'T3', 'T4', 'T5',
-                'Reason', 'Status', 'Trade_ID'
+                'Entry Reason', 'Exit Reason', 'Status', 'Trade_ID'
             ]
+            n_cols = len(col_headers)
+            col_letter = chr(ord('A') + n_cols - 1)   # 'W'
 
             # ── Step 5: Assemble the full grid ──────────────────────────────
             pnl_icon = "🟢" if filt_net_pnl >= 0 else "🔴"
@@ -5435,7 +5444,7 @@ class FeedEngine:
                 f"Max Potential: 🔥 {total_max_pts_all:+.2f} pts  |  "
                 f"15M: {pnl_15m:+.2f}  |  1H: {pnl_1h:+.2f}  |  "
                 f"Filter: {current_filter}  |  Updated: {now_str}"
-            ] + [''] * 20
+            ] + [''] * (n_cols - 1)
 
             filter_bar = [
                 "🎯 TIMEFRAME FILTER:",
@@ -5446,24 +5455,22 @@ class FeedEngine:
                 f"Filtered Closed PnL: {pnl_icon} {filt_net_pnl:+.2f} pts",
                 f"Filtered Max Result: 🔥 +{filt_max_pts:+.2f} pts",
                 f"Filtered Live: {live_icon} {filt_live_pnl:+.2f} pts"
-            ] + [''] * 10
+            ] + [''] * max(0, n_cols - 8)
 
-            active_hdr = [f"🟡 ACTIVE TRADES ({filt_active_cnt}) — [Timeframe: {current_filter}] — Live PnL updates every ~6s"] + [''] * 20
-            closed_hdr = [f"✅ CLOSED TRADES ({filt_closed_cnt}) — [Timeframe: {current_filter}] — Newest First"] + [''] * 20
+            active_hdr = [f"🟡 ACTIVE TRADES ({filt_active_cnt}) — [Timeframe: {current_filter}] — Live PnL updates every ~6s"] + [''] * (n_cols - 1)
+            closed_hdr = [f"✅ CLOSED TRADES ({filt_closed_cnt}) — [Timeframe: {current_filter}] — Newest First"] + [''] * (n_cols - 1)
 
             grid = (
                 [dash_row, filter_bar]
                 + [active_hdr]
                 + [col_headers]
-                + (active_sheet_rows if active_sheet_rows else [['— No active trades matching timeframe filter —'] + [''] * 20])
-                + [[''] * 21]
+                + (active_sheet_rows if active_sheet_rows else [['— No active trades matching timeframe filter —'] + [''] * (n_cols - 1)])
+                + [[''] * n_cols]
                 + [closed_hdr]
                 + [col_headers]
-                + (closed_sheet_rows if closed_sheet_rows else [['— No closed trades matching timeframe filter —'] + [''] * 20])
+                + (closed_sheet_rows if closed_sheet_rows else [['— No closed trades matching timeframe filter —'] + [''] * (n_cols - 1)])
             )
 
-            n_cols = 23
-            col_letter = chr(ord('A') + n_cols - 1)   # 'W'
             self.forward_test_sheet.update(
                 values=grid,
                 range_name=f"A1:{col_letter}{len(grid)}"

@@ -91,6 +91,9 @@
     <button class="nav-tab" data-tab="tab-forward-test">
       🧪 TRADE JOURNAL & FORWARD TEST <span class="tab-badge" id="tab-active-count">0</span>
     </button>
+    <button class="nav-tab" data-tab="tab-advanced-strategy">
+      🛡️ ADVANCED VERSION <span class="tab-badge" id="tab-adv-count">0</span>
+    </button>
   </nav>
 
   <!-- TAB 1: OPTION STRATEGY SCANNER -->
@@ -449,6 +452,152 @@
           <tbody id="tbody-ft-closed">
             <tr>
               <td colspan="13" class="empty-state">No trades closed yet for this session.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <!-- TAB 5: ADVANCED VERSION (INDEPENDENT TRACKING & SAFETY FILTERS) -->
+  <main class="tab-pane" id="tab-advanced-strategy">
+    <!-- Advanced Strategy Scoreboard -->
+    <div class="scoreboard-strip" id="adv-scoreboard-strip">
+      <div class="score-card">
+        <span class="score-lbl">STRATEGY</span>
+        <span class="score-val" style="color: #64ffda; font-size: 0.95rem;">ADVANCED PIVOT</span>
+      </div>
+      <div class="score-card">
+        <span class="score-lbl">TOTAL TRADES</span>
+        <span class="score-val" id="adv-stat-total">0</span>
+      </div>
+      <div class="score-card">
+        <span class="score-lbl">ACTIVE / SHADOW</span>
+        <span class="score-val" id="adv-stat-active" style="color: #ffd700;">0</span>
+      </div>
+      <div class="score-card">
+        <span class="score-lbl">WIN RATE</span>
+        <span class="score-val" id="adv-stat-winrate">0.0%</span>
+      </div>
+      <div class="score-card">
+        <span class="score-lbl">TOTAL POINTS</span>
+        <span class="score-val" id="adv-stat-points">0.00</span>
+      </div>
+      <div class="score-card">
+        <span class="score-lbl">GROSS P&L</span>
+        <span class="score-val" id="adv-stat-gross">₹0.00</span>
+      </div>
+      <div class="score-card">
+        <span class="score-lbl">EST. CHARGES</span>
+        <span class="score-val" id="adv-stat-charges">₹0.00</span>
+      </div>
+      <div class="score-card">
+        <span class="score-lbl">NET P&L</span>
+        <span class="score-val" id="adv-stat-net">₹0.00</span>
+      </div>
+      <div class="score-card">
+        <span class="score-lbl">REJECTIONS</span>
+        <span class="score-val" id="adv-stat-rejections" style="color: #ff5252;">0</span>
+      </div>
+    </div>
+
+    <!-- Active Trades Panel -->
+    <div class="panel-section">
+      <div class="panel-header">
+        <h3>ACTIVE & SHADOW POSITIONS <span class="badge badge-gold" id="adv-active-badge">0</span></h3>
+        <span class="panel-sub">Independent trade tracking with safety filters (Writes to Google Sheets tab 'Advanced Strategy')</span>
+      </div>
+      <div class="terminal-table-container">
+        <table class="terminal-table" id="table-adv-active">
+          <thead>
+            <tr>
+              <th>TRADE ID</th>
+              <th>MODE</th>
+              <th>SYMBOL</th>
+              <th>STRIKE</th>
+              <th>TYPE</th>
+              <th>ACTION</th>
+              <th>ENTRY (₹)</th>
+              <th>SL (₹)</th>
+              <th>TARGET 1</th>
+              <th>LTP (₹)</th>
+              <th>POINTS</th>
+              <th>GROSS P&L</th>
+              <th>SETUP TYPE</th>
+              <th>STATUS</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-adv-active">
+            <tr>
+              <td colspan="14" class="empty-state">No active trades in Advanced Strategy currently.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Closed Trades Panel -->
+    <div class="panel-section">
+      <div class="panel-header">
+        <h3>CLOSED TRADES & PnL JOURNAL <span class="badge" id="adv-closed-badge">0</span></h3>
+        <span class="panel-sub">Closed positions with realized Gross P&L, Transaction Charges & Net P&L</span>
+      </div>
+      <div class="terminal-table-container">
+        <table class="terminal-table" id="table-adv-closed">
+          <thead>
+            <tr>
+              <th>DATE</th>
+              <th>ENTRY TIME</th>
+              <th>EXIT TIME</th>
+              <th>TRADE ID</th>
+              <th>MODE</th>
+              <th>SYMBOL</th>
+              <th>STRIKE</th>
+              <th>TYPE</th>
+              <th>ACTION</th>
+              <th>ENTRY (₹)</th>
+              <th>EXIT (₹)</th>
+              <th>POINTS</th>
+              <th>GROSS P&L</th>
+              <th>CHARGES</th>
+              <th>NET P&L</th>
+              <th>EXIT REASON</th>
+              <th>STATUS</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-adv-closed">
+            <tr>
+              <td colspan="17" class="empty-state">No closed trades in Advanced Strategy yet.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Rejections & Filter Evaluations Panel -->
+    <div class="panel-section">
+      <div class="panel-header">
+        <h3>SAFETY FILTER EVALUATIONS & REJECTIONS <span class="badge badge-silver" id="adv-rejections-badge">0</span></h3>
+        <span class="panel-sub">Candidates evaluated by Filters A through G with reasons for hold / rejection</span>
+      </div>
+      <div class="terminal-table-container">
+        <table class="terminal-table" id="table-adv-rejections">
+          <thead>
+            <tr>
+              <th>TIMESTAMP</th>
+              <th>SYMBOL</th>
+              <th>STRIKE</th>
+              <th>TYPE</th>
+              <th>ACTION</th>
+              <th>SETUP</th>
+              <th>LTP (₹)</th>
+              <th>REJECTION / HOLD REASON</th>
+              <th>FILTER AUDIT DETAILS</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-adv-rejections">
+            <tr>
+              <td colspan="9" class="empty-state">No candidate rejections recorded today.</td>
             </tr>
           </tbody>
         </table>

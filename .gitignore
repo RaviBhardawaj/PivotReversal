@@ -8,6 +8,8 @@ config.json
 dhan_config.json
 Dhan API.txt
 dhan_token.json
+.dhan_token
+*.log
 
 # ── Runtime state, caches and market data ─────────
 order_state.json
@@ -17,6 +19,7 @@ dhan_scrip_cache.csv
 *.csv
 *.csv.bak
 next_day_plan*.json
+advanced_strategy_next_day_plan*.json
 multi_symbol_levels.json
 multi_symbol_sheet.json
 strike_pivot_cache.json

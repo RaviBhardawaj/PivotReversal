@@ -42,6 +42,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 from brokers import (OrderEngine, ADAPTERS, BROKER_LABELS, ALL_LEVELS, LEVEL_LABELS,   # live orders
                      TIMEFRAMES, tf_levels, strike_selection_reason)
+from advanced_strategy import advanced_engine
 
 # ── Exchange config ───────────────────────────────────────
 EXCHANGE_CONFIG = {
@@ -472,7 +473,11 @@ def get_1h_trade_bias(spot: float, h1_pivots: dict) -> dict:
 
 
 # SELL setup steps after a sweep, before the entry: the HH keeps tracking the high here
-SELL_SETUP_STATES = ("SWEEP_R2", "RECLAIM_R2", "RETEST_R2", "TRADING_IN_FAVOR_SELL", "SWEEP_R1", "RECLAIM_R1")
+SELL_SETUP_STATES = ("SWEEP_R2", "RECLAIM_R2", "RETEST_R2", "TRADING_IN_FAVOR_SELL", "SWEEP_R1", "RECLAIM_R1",
+                     "SWEEP_R3", "RECLAIM_R3", "RETEST_R3")
+# S3/R3 levels take over from S2/R2 once price has gone this fraction of the way from S2 to S3
+# (BUY: S2 swept and not held) or from R2 to R3 (SELL: R2 broken and price pushing on to R3).
+S3_FALL_FRACTION = 0.5
 
 
 class StrategyStrikeState:
@@ -531,6 +536,8 @@ class StrategyStrikeState:
         self.frozen_s1     = 0.0   # S1 at time of SWEEP_S1 detection
         self.frozen_r2     = 0.0   # R2 at time of SWEEP_R2 detection
         self.frozen_r1     = 0.0   # R1 at time of SWEEP_R1 detection
+        self.frozen_s3     = 0.0   # S3 at time of SWEEP_S3 detection (S2 swept -> buy from S3)
+        self.frozen_r3     = 0.0   # R3 at time of SWEEP_R3 detection (sell from R3 as well as R2)
         self.frozen_pivots = {}    # Snapshot of pivots dict at time of sweep
         self.stale_reset   = False  # Set True when stale guard fires — main loop must close tracker
         self.entry_count   = 0      # Total entries taken on this strike
@@ -544,7 +551,23 @@ class StrategyStrikeState:
         side = trade.get("Action", "")
         self.state         = f"CONFIRMED_{side}"
         hit = int(_safe_float(trade.get("Target_Hit", 0)))
-        self.trade_status  = f"Target {hit} Hit" if 1 <= hit <= 4 else "Active"
+        t_high = float(trade.get("Trade_High", 0) or 0)
+        t_low = float(trade.get("Trade_Low", 0) or 0)
+        if side == "BUY" and t_high > 0:
+            for i in range(5, 0, -1):
+                tgt_val = _safe_float(trade.get(f"Target_{i}", 0))
+                if tgt_val > 0 and t_high >= tgt_val:
+                    hit = max(hit, i)
+                    break
+        elif side == "SELL" and t_low > 0:
+            for i in range(5, 0, -1):
+                tgt_val = _safe_float(trade.get(f"Target_{i}", 0))
+                if tgt_val > 0 and t_low <= tgt_val:
+                    hit = max(hit, i)
+                    break
+        self.trade_status  = f"Target {hit} Hit" if 1 <= hit <= 4 else ("Target 5 Hit" if hit >= 5 else "Active")
+        self.post_entry_hh = t_high
+        self.post_entry_ll = t_low
         self.entry_price   = round(_safe_float(trade.get("Entry_Price", 0)), 2)
         self.entry_time    = str(trade.get("Entry_Time", ""))
         self.sl            = round(_safe_float(trade.get("SL", 0)), 2)
@@ -558,7 +581,8 @@ class StrategyStrikeState:
         else:
             self.hh = self.entry_sl
             self.trigger_level = "R2"
-        self.signal = f"♻️ {side} {self.opt_type} restored after restart | Entry:{self.entry_price:.2f} | SL:{self.sl:.2f}"
+        hit_tag = f" — Target {hit} Hit" if hit > 0 else ""
+        self.signal = f"♻️ {side} {self.opt_type} restored after restart{hit_tag} | Entry:{self.entry_price:.2f} | SL:{self.sl:.2f}"
 
     def seed_from_closed(self, trade: dict, sl_hits: int = 0, entries: int = 1):
         """After an app restart: show the strike's last trade of the day (entry, SL, exit) as it
@@ -662,10 +686,9 @@ class StrategyStrikeState:
 
         # ── Track post-entry peak High (BUY) & peak Low (SELL) for GSheet & tracker ──
         if self.trade_status in ("Active", "Target 1 Hit", "Target 2 Hit", "Target 3 Hit", "Target 4 Hit") or "Closed" in self.trade_status:
-            if self.post_entry_hh > 0 and ltp > self.post_entry_hh:
-                self.post_entry_hh = round(ltp, 2)
-            if self.post_entry_ll > 0 and ltp < self.post_entry_ll:
-                self.post_entry_ll = round(ltp, 2)
+            if ltp > 0:
+                self.post_entry_hh = round(max(self.post_entry_hh, ltp), 2) if self.post_entry_hh > 0 else round(ltp, 2)
+                self.post_entry_ll = round(min(self.post_entry_ll, ltp), 2) if self.post_entry_ll > 0 else round(ltp, 2)
 
         # ── Setup state machines and entries ONLY progress during LIVE MARKET hours ──
         if not is_live_market_open(now):
@@ -722,6 +745,7 @@ class StrategyStrikeState:
                            not self.state.endswith("SELL") and 
                            "R1" not in self.state and 
                            "R2" not in self.state and 
+                           "R3" not in self.state and 
                            (ltp < r1 or self.state.startswith("SWEEP_S") or self.state.startswith("RECLAIM_S") or "RETEST_S" in self.state or "FAVOR_BUY" in self.state))
         else:
             can_buy = False
@@ -729,9 +753,56 @@ class StrategyStrikeState:
         if can_buy:
             # S1 entry mode if S2 <= 0.05 or unpopulated; otherwise S2 entry mode
             use_s1_for_buy = (s2 <= 0.05 or s2 == 0)
-            active_lvl = "S1" if use_s1_for_buy else "S2"
-            fs_sup = (self.frozen_s1 if self.frozen_s1 > 0 else s1) if use_s1_for_buy else (self.frozen_s2 if self.frozen_s2 > 0 else s2)
-            sup_thresh = s1 if use_s1_for_buy else s2
+
+            # S1 is also a buy level when S2 is real (> 0.05): S1 sweep -> reclaim -> candle close -> retest
+            # -> break of the confirmation high. It stays in force until price actually reaches S2, then the
+            # S2 setup takes over (a half-formed S1 setup is dropped, same as the S3 hand-over below).
+            if not use_s1_for_buy and s1 > s2 > 0.05:
+                _s2_reached = (ltp <= s2 * 1.01 or (valid_low > 0 and valid_low <= s2 * 1.01)
+                               or (c.get("low", 0) > 0 and c["low"] <= s2 * 1.01))
+                if self.trigger_level == "S1" and self.state != "WAITING":
+                    if _s2_reached:
+                        self.state = "WAITING"
+                        self.ll = 0.0
+                        self.retest_done = False
+                        self.retest_low = self.retest_high = 0.0
+                        self.conf_high = self.conf_low = 0.0
+                        self.sweep_bucket = -1
+                        self.frozen_s2 = self.frozen_s1 = 0.0
+                        self.frozen_pivots = {}
+                        self.trigger_level = "S2"
+                    else:
+                        use_s1_for_buy = True      # an S1 setup is already running: stay on it
+                elif self.state == "WAITING" and not _s2_reached:
+                    use_s1_for_buy = True
+
+            # S2 swept and not held: price has gone well below S2 on its way to S3 -> the buy level
+            # becomes S3 (same sweep / reclaim / confirmation candle / retest / entry rules).
+            use_s3_for_buy = False
+            if not use_s1_for_buy and s3 > 0.05 and s2 > s3:
+                if self.state == "WAITING":
+                    self.frozen_s3 = 0.0
+                if self.trigger_level == "S3" and self.state != "WAITING":
+                    use_s3_for_buy = True          # an S3 setup is already running: stay on it
+                elif ltp < s2 - S3_FALL_FRACTION * (s2 - s3):
+                    use_s3_for_buy = True
+                    if self.state != "WAITING":    # drop the half-formed S2 setup
+                        self.state = "WAITING"
+                        self.ll = 0.0
+                        self.retest_done = False
+                        self.retest_low = self.retest_high = 0.0
+                        self.conf_high = self.conf_low = 0.0
+                        self.sweep_bucket = -1
+                        self.frozen_s2 = self.frozen_s1 = 0.0
+                        self.frozen_pivots = {}
+            active_lvl = "S1" if use_s1_for_buy else ("S3" if use_s3_for_buy else "S2")
+            if use_s1_for_buy:
+                fs_sup = self.frozen_s1 if self.frozen_s1 > 0 else s1
+            elif use_s3_for_buy:
+                fs_sup = self.frozen_s3 if self.frozen_s3 > 0 else s3
+            else:
+                fs_sup = self.frozen_s2 if self.frozen_s2 > 0 else s2
+            sup_thresh = s1 if use_s1_for_buy else (s3 if use_s3_for_buy else s2)
 
             # Cascade: if S2 > 0.05 and price does NOT sustain S1 (breaks below S1), it sweeps down into S2
             # If price also does NOT sustain S2 (breaks below S2), it cascades into S3 as extreme support
@@ -747,15 +818,17 @@ class StrategyStrikeState:
                 self.trigger_level = active_lvl
                 sweep_ll = round(min(cur_sweep_low, ltp), 2)
                 self.ll  = sweep_ll if self.ll == 0 else round(min(self.ll, sweep_ll), 2)
-                if (active_lvl == "S2" and self.frozen_s2 == 0.0) or (active_lvl == "S1" and self.frozen_s1 == 0.0):
-                    if active_lvl == "S2": self.frozen_s2 = round(s2, 2)
-                    else:                  self.frozen_s1 = round(s1, 2)
+                if ((active_lvl == "S2" and self.frozen_s2 == 0.0) or (active_lvl == "S1" and self.frozen_s1 == 0.0)
+                        or (active_lvl == "S3" and self.frozen_s3 == 0.0)):
+                    if active_lvl == "S2":   self.frozen_s2 = round(s2, 2)
+                    elif active_lvl == "S3": self.frozen_s3 = round(s3, 2)
+                    else:                    self.frozen_s1 = round(s1, 2)
                     self.frozen_pivots = {k: (round(v, 2) if isinstance(v, (int, float)) else v) for k, v in pivots.items()}
                 self.retest_done = False
                 # the reclaim candle must close AFTER this sweep; any older confirmation is void
                 self.sweep_bucket = c["bucket"]
                 self.conf_high = self.conf_low = 0.0
-                note = f" (S2={s2:.2f}<=0.05)" if use_s1_for_buy else ""
+                note = (f" (S2={s2:.2f}<=0.05)" if (s2 <= 0.05 or s2 == 0) else " (S1 buy level, S2 not reached)") if use_s1_for_buy else ""
                 re_tag = f" [Re-entry New LL:{self.ll:.2f}]" if self.sl_hit_count > 0 else f" [LL:{self.ll:.2f}]"
                 self.signal = f"★ {self.opt_type} SWEEP {active_lvl}{note}{re_tag} — Awaiting Reclaim & Candle Close"
 
@@ -814,9 +887,18 @@ class StrategyStrikeState:
                 _fp0 = self.frozen_pivots if self.frozen_pivots else pivots
                 _ep0 = round(self.conf_high, 2)
                 start_favor = (self.conf_high > 0 and ltp > fs_sup and ltp > self.conf_high)
-                _t1 = round(_fp0.get('P', p) if active_lvl == "S1" else _fp0.get('S1', s1), 2)
-                if start_favor and _ep0 >= _t1:
-                    self.signal = f"★ {self.opt_type} {active_lvl} Confirmation high {_ep0:.2f} is at/above T1 {_t1:.2f} — no room, no trade"
+                # Target ladder for this level; levels already at/below the entry are skipped so T1 is
+                # always the next pivot level ABOVE the entry (e.g. confirmation high already above S1 -> T1 = P).
+                if active_lvl == "S1":
+                    _ladder = [_fp0.get('P', p), _fp0.get('R1', r1), _fp0.get('R2', r2), _fp0.get('R3', r3)]
+                elif active_lvl == "S3":
+                    _ladder = [_fp0.get('S2', s2), _fp0.get('S1', s1), _fp0.get('P', p), _fp0.get('R1', r1), _fp0.get('R2', r2)]
+                else:
+                    _ladder = [_fp0.get('S1', s1), _fp0.get('P', p), _fp0.get('R1', r1), _fp0.get('R2', r2), _fp0.get('R3', r3)]
+                _levels_up = [round(x, 2) for x in _ladder if x and x > _ep0]
+                _t1 = _levels_up[0] if _levels_up else round(_ladder[0], 2)
+                if start_favor and not _levels_up:
+                    self.signal = f"★ {self.opt_type} {active_lvl} Confirmation high {_ep0:.2f} is above every target level — no room, no trade"
                     start_favor = False
                 elif start_favor and not at_entry_price(ltp, _ep0, "BUY"):
                     # price has run away from the entry: no chasing; wait for it to come back
@@ -843,21 +925,15 @@ class StrategyStrikeState:
                     else:
                         effective_sl = round(entry_px * 0.90, 2) if entry_px > 0 else round(ltp * 0.90, 2)
 
-                    # Target ladders:
-                    if active_lvl == "S1":
-                        # Entry near S1 (S2<=0.05) -> T1:P -> T2:R1 -> T3:R2 -> T4:R3 -> T5:R3*1.05
-                        t1 = round(fp.get('P',  p),  2)
-                        t2 = round(fp.get('R1', r1), 2)
-                        t3 = round(fp.get('R2', r2), 2)
-                        t4 = round(fp.get('R3', r3), 2)
-                        t5 = round(fp.get('R3', r3) * 1.05, 2)
-                    else:
-                        # Entry near S2 -> T1:S1 -> T2:P -> T3:R1 -> T4:R2 -> T5:R3
-                        t1 = round(fp.get('S1', s1), 2)
-                        t2 = round(fp.get('P',  p),  2)
-                        t3 = round(fp.get('R1', r1), 2)
-                        t4 = round(fp.get('R2', r2), 2)
-                        t5 = round(fp.get('R3', r3), 2)
+                    # Target ladders (same levels as before; any level at/below the entry is skipped):
+                    #   S1 level: P -> R1 -> R2 -> R3 -> R3*1.05
+                    #   S3 level: S2 -> S1 -> P -> R1 -> R2
+                    #   S2 level: S1 -> P -> R1 -> R2 -> R3
+                    _tg = list(_levels_up)
+                    _r3v = round(fp.get('R3', r3), 2)
+                    while len(_tg) < 5:
+                        _tg.append(round(max(_tg[-1] if _tg else _r3v, _r3v) * 1.05, 2) if _r3v > 0 else round((_tg[-1] if _tg else entry_px) * 1.05, 2))
+                    t1, t2, t3, t4, t5 = _tg[:5]
 
                     self.entry_count += 1
                     self.entry_price  = entry_px
@@ -866,7 +942,7 @@ class StrategyStrikeState:
                     self.entry_sl     = effective_sl
                     self.targets      = [t1, t2, t3, t4, t5]
                     mkt_ctx = "Mkt Bullish ↑" if self.opt_type == "CE" else "Mkt Bearish ↓"
-                    s2_tag = " (S2<=0.05)" if use_s1_for_buy else ""
+                    s2_tag = (" (S2<=0.05)" if (s2 <= 0.05 or s2 == 0) else " (S1 buy level)") if use_s1_for_buy else ""
                     re_tag = " [RE-ENTRY with New LL SL]" if self.sl_hit_count > 0 else ""
                     self.signal       = f"★ BUY {self.opt_type}{re_tag} [{mkt_ctx} | {active_lvl} Reclaim Confirmed{s2_tag} | Entry:{entry_px:.2f} | New LL SL:{effective_sl:.2f} | T1:{t1:.1f} T2:{t2:.1f} T3:{t3:.1f} T4:{t4:.1f} T5:{t5:.1f}]"
                     self.trade_status = "Active"
@@ -883,12 +959,37 @@ class StrategyStrikeState:
                             not self.state.endswith("BUY") and 
                             "S1" not in self.state and 
                             "S2" not in self.state and 
+                            "S3" not in self.state and 
                             (ltp > s1 or self.state.startswith("SWEEP_R") or self.state.startswith("RECLAIM_R") or "RETEST_R" in self.state or "FAVOR_SELL" in self.state))
         else:
             can_sell = False
 
         if can_sell:
-            fr2 = self.frozen_r2 if self.frozen_r2 > 0 else r2
+            # R3 is a second sell level next to R2: it takes over once price is well above R2 on
+            # its way to R3 (same sweep / rejection / confirmation candle / retest / entry rules).
+            use_r3 = False
+            if r3 > r2 > 0:
+                if self.state == "WAITING":
+                    self.frozen_r3 = 0.0
+                if self.trigger_level == "R3" and self.state != "WAITING":
+                    use_r3 = True                  # an R3 setup is already running: stay on it
+                elif ltp > r2 + S3_FALL_FRACTION * (r3 - r2):
+                    use_r3 = True
+                    if self.state != "WAITING":    # drop the half-formed R2 setup
+                        self.state = "WAITING"
+                        self.hh = 0.0
+                        self.retest_done = False
+                        self.retest_low = self.retest_high = 0.0
+                        self.conf_high = self.conf_low = 0.0
+                        self.sweep_bucket = -1
+                        self.frozen_r2 = self.frozen_r1 = 0.0
+                        self.frozen_pivots = {}
+            act = "R3" if use_r3 else "R2"
+            r_lvl = r3 if use_r3 else r2
+            if use_r3:
+                fr2 = self.frozen_r3 if self.frozen_r3 > 0 else r3
+            else:
+                fr2 = self.frozen_r2 if self.frozen_r2 > 0 else r2
 
             # HH = the highest price of the whole sweep. Once a sweep is on, it keeps rising
             # with price through the rejection, candle close, retest and in-favour steps until
@@ -898,32 +999,33 @@ class StrategyStrikeState:
 
             # Step 1: Sweep / Push above R2 (Records NEW HH)
             cur_sweep_high = c["high"] if (c.get("high", 0) > 0 and c["high"] > ltp) else ltp
-            if ltp > fr2 or (self.state == "WAITING" and (cur_sweep_high >= r2 or ltp >= r2 * 0.99)):
-                self.state         = "SWEEP_R2"
-                self.trigger_level = "R2"
+            if ltp > fr2 or (self.state == "WAITING" and (cur_sweep_high >= r_lvl or ltp >= r_lvl * 0.99)):
+                self.state         = f"SWEEP_{act}"
+                self.trigger_level = act
                 sweep_hh = round(max(cur_sweep_high, ltp), 2)
                 self.hh  = sweep_hh if self.hh == 0 else round(max(self.hh, sweep_hh), 2)
-                if self.frozen_r2 == 0.0:
-                    self.frozen_r2 = round(r2, 2)
+                if (self.frozen_r3 if use_r3 else self.frozen_r2) == 0.0:
+                    if use_r3: self.frozen_r3 = round(r3, 2)
+                    else:      self.frozen_r2 = round(r2, 2)
                     self.frozen_pivots = {k: (round(v, 2) if isinstance(v, (int, float)) else v) for k, v in pivots.items()}
                 self.retest_done = False
                 # the rejection candle must close AFTER this sweep; any older confirmation is void
                 self.sweep_bucket = c["bucket"]
                 self.conf_high = self.conf_low = 0.0
                 re_tag = f" [Re-entry New HH:{self.hh:.2f}]" if self.sl_hit_count > 0 else f" [HH:{self.hh:.2f}]"
-                self.signal = f"▼ {self.opt_type} SWEEP R2{re_tag} — Awaiting Rejection & Candle Close"
+                self.signal = f"▼ {self.opt_type} SWEEP {act}{re_tag} — Awaiting Rejection & Candle Close"
 
             # Step 2: R2 Rejected — Await Candle Close Confirmation
-            elif (self.state == "SWEEP_R2" or (self.state == "WAITING" and valid_high > r2 and ltp > s1)) and ltp <= fr2:
-                self.state         = "RECLAIM_R2"
-                self.trigger_level = "R2"
+            elif (self.state == f"SWEEP_{act}" or (self.state == "WAITING" and valid_high > r_lvl and ltp > s1)) and ltp <= fr2:
+                self.state         = f"RECLAIM_{act}"
+                self.trigger_level = act
                 if self.hh == 0:
                     self.hh = round(valid_high if valid_high > 0 else ltp, 2)
                 if self.sweep_bucket < 0:
                     self.sweep_bucket = c["bucket"]
-                self.signal = f"▼ {self.opt_type} REJECT R2 — Awaiting Bearish Candle Close"
+                self.signal = f"▼ {self.opt_type} REJECT {act} — Awaiting Bearish Candle Close"
 
-            elif self.state == "RECLAIM_R2":
+            elif self.state == f"RECLAIM_{act}":
                 # Confirmation candle: a fully CLOSED 5M candle, opened in or after the sweep
                 # candle, that closed red below R2. A candle still forming never counts.
                 candle_ok = False
@@ -941,7 +1043,7 @@ class StrategyStrikeState:
                     self.conf_high = round(closed.get("high", closed["close"]), 2)
                     self.conf_low  = round(closed.get("low", closed["close"]), 2)
                     self.hh = round(max(self.hh, self.conf_high), 2)
-                    self.state = "RETEST_R2"
+                    self.state = f"RETEST_{act}"
                     self.retest_high = round(max(ltp, valid_high), 2)
                     if wick_retested:
                         self.retest_done = True
@@ -951,7 +1053,7 @@ class StrategyStrikeState:
                         self.retest_done = False
                         self.signal = f"▼ {self.opt_type} R2 Confirmation Candle Closed Bearish (Low {self.conf_low:.2f}) — Watching Retest"
 
-            elif self.state == "RETEST_R2":
+            elif self.state == f"RETEST_{act}":
                 # Step 3: Retest R2 level (price bounces towards R2 holding below HH)
                 if ltp >= fr2 * 0.985:
                     self.retest_done = True
@@ -968,7 +1070,7 @@ class StrategyStrikeState:
                 _fp0 = self.frozen_pivots if self.frozen_pivots else pivots
                 _ep0 = round(self.conf_low, 2)
                 start_favor = (self.conf_low > 0 and ltp < fr2 and ltp < self.conf_low)
-                _t1 = round(_fp0.get('R1', r1), 2)
+                _t1 = round(_fp0.get('R2', r2) if use_r3 else _fp0.get('R1', r1), 2)
                 if start_favor and _ep0 <= _t1:
                     self.signal = f"▼ {self.opt_type} R2 Confirmation low {_ep0:.2f} is at/below T1 {_t1:.2f} — no room, no trade"
                     start_favor = False
@@ -981,7 +1083,7 @@ class StrategyStrikeState:
                 if start_favor:
                     # Step 5: ENTRY IS CONFIRMED!
                     self.state         = "CONFIRMED_SELL"
-                    self.trigger_level = "R2"
+                    self.trigger_level = act
                     fp       = self.frozen_pivots if self.frozen_pivots else pivots
                     entry_px = _ep0
 
@@ -992,12 +1094,20 @@ class StrategyStrikeState:
                     self.state = "TRADING_IN_FAVOR_SELL"
                     start_favor = False
                 if start_favor:
-                    # 5-target ladder (descending): R1 → P → S1 → S2 → S3
-                    t1 = round(fp.get('R1', r1), 2)
-                    t2 = round(fp.get('P',  p),  2)
-                    t3 = round(fp.get('S1', s1), 2)
-                    t4 = round(fp.get('S2', s2), 2)
-                    t5 = round(fp.get('S3', s3), 2)
+                    if use_r3:
+                        # R3 sell: R2 → R1 → P → S1 → S2
+                        t1 = round(fp.get('R2', r2), 2)
+                        t2 = round(fp.get('R1', r1), 2)
+                        t3 = round(fp.get('P',  p),  2)
+                        t4 = round(fp.get('S1', s1), 2)
+                        t5 = round(fp.get('S2', s2), 2)
+                    else:
+                        # 5-target ladder (descending): R1 → P → S1 → S2 → S3
+                        t1 = round(fp.get('R1', r1), 2)
+                        t2 = round(fp.get('P',  p),  2)
+                        t3 = round(fp.get('S1', s1), 2)
+                        t4 = round(fp.get('S2', s2), 2)
+                        t5 = round(fp.get('S3', s3), 2)
 
                     self.entry_count += 1
                     self.entry_price  = entry_px
@@ -1007,7 +1117,7 @@ class StrategyStrikeState:
                     self.targets      = [t1, t2, t3, t4, t5]
                     mkt_ctx = "Mkt Bearish ↓" if self.opt_type == "CE" else "Mkt Bullish ↑"
                     re_tag = " [RE-ENTRY with New HH SL]" if self.sl_hit_count > 0 else ""
-                    self.signal       = f"▼ SELL {self.opt_type}{re_tag} [{mkt_ctx} | R2 Rejection Confirmed | Entry:{entry_px:.2f} | New HH SL:{effective_sl:.2f} | T1:{t1:.1f} T2:{t2:.1f} T3:{t3:.1f} T4:{t4:.1f} T5:{t5:.1f}]"
+                    self.signal       = f"▼ SELL {self.opt_type}{re_tag} [{mkt_ctx} | {act} Rejection Confirmed | Entry:{entry_px:.2f} | New HH SL:{effective_sl:.2f} | T1:{t1:.1f} T2:{t2:.1f} T3:{t3:.1f} T4:{t4:.1f} T5:{t5:.1f}]"
                     self.trade_status = "Active"
 
             # R1 Sweep & Rejection — SECONDARY setup
@@ -1087,61 +1197,66 @@ class StrategyStrikeState:
                     self.signal = f"★ BUY {self.opt_type} {self.trade_status} @ {ltp:.2f} [Secured/Exited]"
                 elif self.targets:
                     # Support & Target progression:
-                    # When a target level is reached, it becomes the new support!
-                    # If price sustains above it, we hold and advance to the NEXT target:
-                    if len(self.targets) > 4 and ltp >= self.targets[4]:
+                    # Target rank is monotonic — once a target is hit, never downgrade to an earlier target when price pulls back!
+                    high_px = max(getattr(self, "post_entry_hh", 0.0) or 0.0, ltp)
+                    _rk_map = {"Active": 0, "Target 1 Hit": 1, "Target 2 Hit": 2, "Target 3 Hit": 3, "Target 4 Hit": 4, "Target 5 Hit": 5}
+                    cur_rank = _rk_map.get(self.trade_status, 0)
+                    if len(self.targets) > 4 and (high_px >= self.targets[4] or cur_rank >= 5):
                         self.trade_status = "Target 5 Hit"
                         self.signal = f"★ BUY {self.opt_type} All Targets Hit! Final T5:{self.targets[4]:.1f} @ {ltp:.2f}"
-                    elif len(self.targets) > 3 and ltp >= self.targets[3]:
+                    elif len(self.targets) > 3 and (high_px >= self.targets[3] or cur_rank >= 4):
                         self.trade_status = "Target 4 Hit"
                         if TRAIL_SL and (len(self.targets) > 2 and self.targets[2] > self.sl):
                             self.sl = round(self.targets[2], 2)   # trail SL to T3
                         t5_val = self.targets[4] if len(self.targets) > 4 else round(self.targets[3] * 1.05, 2)
-                        self.signal = f"★ BUY {self.opt_type} Target 4 Hit @ {ltp:.2f} | Support Sustained → Aiming T5:{t5_val:.1f} | SL:{self.sl:.1f}"
-                    elif len(self.targets) > 2 and ltp >= self.targets[2]:
+                        self.signal = f"★ BUY {self.opt_type} Target 4 Hit @ {high_px:.2f} | Support Sustained → Aiming T5:{t5_val:.1f} | SL:{self.sl:.1f}"
+                    elif len(self.targets) > 2 and (high_px >= self.targets[2] or cur_rank >= 3):
                         self.trade_status = "Target 3 Hit"
                         if TRAIL_SL and (len(self.targets) > 1 and self.targets[1] > self.sl):
                             self.sl = round(self.targets[1], 2)   # trail SL to T2
-                        self.signal = f"★ BUY {self.opt_type} Target 3 Hit @ {ltp:.2f} | Support Sustained → Aiming T4:{self.targets[3]:.1f} | SL:{self.sl:.1f}"
-                    elif len(self.targets) > 1 and ltp >= self.targets[1]:
+                        self.signal = f"★ BUY {self.opt_type} Target 3 Hit @ {high_px:.2f} | Support Sustained → Aiming T4:{self.targets[3]:.1f} | SL:{self.sl:.1f}"
+                    elif len(self.targets) > 1 and (high_px >= self.targets[1] or cur_rank >= 2):
                         self.trade_status = "Target 2 Hit"
                         if TRAIL_SL and (self.targets[0] > self.sl):
                             self.sl = round(self.targets[0], 2)   # trail SL to T1
-                        self.signal = f"★ BUY {self.opt_type} Target 2 Hit @ {ltp:.2f} | Support Sustained → Aiming T3:{self.targets[2]:.1f} | SL:{self.sl:.1f}"
-                    elif ltp >= self.targets[0]:
+                        self.signal = f"★ BUY {self.opt_type} Target 2 Hit @ {high_px:.2f} | Support Sustained → Aiming T3:{self.targets[2]:.1f} | SL:{self.sl:.1f}"
+                    elif ltp >= self.targets[0] or cur_rank >= 1:
                         self.trade_status = "Target 1 Hit"
                         if TRAIL_SL and (self.entry_price > self.sl):
                             self.sl = round(self.entry_price, 2)  # trail SL to Entry (breakeven)
-                        self.signal = f"★ BUY {self.opt_type} Target 1 Hit @ {ltp:.2f} | Support Sustained → Aiming T2:{self.targets[1]:.1f} | SL:{self.sl:.1f}"
+                        self.signal = f"★ BUY {self.opt_type} Target 1 Hit @ {high_px:.2f} | Support Sustained → Aiming T2:{self.targets[1]:.1f} | SL:{self.sl:.1f}"
             elif "SELL" in self.signal:
                 if self.sl > 0 and ltp >= self.sl:
                     self.trade_status = "Trailing SL Hit" if (self.entry_price > 0 and self.sl <= self.entry_price) else "SL Hit"
                     self.signal = f"▼ SELL {self.opt_type} {self.trade_status} @ {ltp:.2f} [Secured/Exited]"
                 elif self.targets:
-                    if len(self.targets) > 4 and ltp <= self.targets[4]:
+                    low_px = min([x for x in (getattr(self, "post_entry_ll", 0.0) or 0.0, ltp) if x > 0]) if (getattr(self, "post_entry_ll", 0) > 0 or ltp > 0) else ltp
+                    _rk_map = {"Active": 0, "Target 1 Hit": 1, "Target 2 Hit": 2, "Target 3 Hit": 3, "Target 4 Hit": 4, "Target 5 Hit": 5}
+                    cur_rank = _rk_map.get(self.trade_status, 0)
+                    if len(self.targets) > 4 and (low_px <= self.targets[4] or cur_rank >= 5):
                         self.trade_status = "Target 5 Hit"
                         self.signal = f"▼ SELL {self.opt_type} All Targets Hit! Final T5:{self.targets[4]:.1f} @ {ltp:.2f}"
-                    elif len(self.targets) > 3 and ltp <= self.targets[3]:
+                    elif len(self.targets) > 3 and (low_px <= self.targets[3] or cur_rank >= 4):
                         self.trade_status = "Target 4 Hit"
                         if TRAIL_SL and (len(self.targets) > 2 and (self.sl == 0 or self.targets[2] < self.sl)):
                             self.sl = round(self.targets[2], 2)
                         t5_val = self.targets[4] if len(self.targets) > 4 else round(self.targets[3] * 0.95, 2)
-                        self.signal = f"▼ SELL {self.opt_type} Target 4 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T5:{t5_val:.1f} | SL:{self.sl:.1f}"
-                    elif len(self.targets) > 2 and ltp <= self.targets[2]:
+                        self.signal = f"▼ SELL {self.opt_type} Target 4 Hit @ {low_px:.2f} | Resistance Sustained → Aiming T5:{t5_val:.1f} | SL:{self.sl:.1f}"
+                    elif len(self.targets) > 2 and (low_px <= self.targets[2] or cur_rank >= 3):
                         self.trade_status = "Target 3 Hit"
                         if TRAIL_SL and (len(self.targets) > 1 and (self.sl == 0 or self.targets[1] < self.sl)):
                             self.sl = round(self.targets[1], 2)
-                        self.signal = f"▼ SELL {self.opt_type} Target 3 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T4:{self.targets[3]:.1f} | SL:{self.sl:.1f}"
-                    elif len(self.targets) > 1 and ltp <= self.targets[1]:
+                        self.signal = f"▼ SELL {self.opt_type} Target 3 Hit @ {low_px:.2f} | Resistance Sustained → Aiming T4:{self.targets[3]:.1f} | SL:{self.sl:.1f}"
+                    elif len(self.targets) > 1 and (low_px <= self.targets[1] or cur_rank >= 2):
                         self.trade_status = "Target 2 Hit"
                         if TRAIL_SL and (self.sl == 0 or self.targets[0] < self.sl):
                             self.sl = round(self.targets[0], 2)
-                        self.signal = f"▼ SELL {self.opt_type} Target 2 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T3:{self.targets[2]:.1f} | SL:{self.sl:.1f}"
-                    elif ltp <= self.targets[0]:
+                        self.signal = f"▼ SELL {self.opt_type} Target 2 Hit @ {low_px:.2f} | Resistance Sustained → Aiming T3:{self.targets[2]:.1f} | SL:{self.sl:.1f}"
+                    elif ltp <= self.targets[0] or cur_rank >= 1:
                         self.trade_status = "Target 1 Hit"
                         if TRAIL_SL and (self.sl == 0 or self.entry_price < self.sl):
                             self.sl = round(self.entry_price, 2)
-                        self.signal = f"▼ SELL {self.opt_type} Target 1 Hit @ {ltp:.2f} | Resistance Sustained → Aiming T2:{self.targets[1]:.1f} | SL:{self.sl:.1f}"
+                        self.signal = f"▼ SELL {self.opt_type} Target 1 Hit @ {low_px:.2f} | Resistance Sustained → Aiming T2:{self.targets[1]:.1f} | SL:{self.sl:.1f}"
 
 
 def select_focus_strikes_from_pivots(pivots: dict, step: int = 50, tf_label: str = "15-Min") -> dict:
@@ -1758,68 +1873,70 @@ def fwd_exit_check(trade, ltp, opt_type=None, strike=None):
     target_hit = trade.get('Target_Hit', 0)
     closed, exit_reason, exit_pnl = False, '', 0.0
     if trade['Action'] == 'BUY':
+        t_high = max(float(trade.get('Trade_High', entry) or 0.0), ltp)
         if trade['SL'] > 0 and ltp <= trade['SL']:
             closed       = True
             exit_reason  = 'Trailing SL Hit' if trade['SL'] >= entry else 'SL Hit'
             exit_pnl     = round(ltp - entry, 2)
-        elif trade.get('Target_5', 0) > 0 and ltp >= trade['Target_5']:
+        elif trade.get('Target_5', 0) > 0 and (ltp >= trade['Target_5'] or t_high >= trade['Target_5']):
             closed       = True
             exit_reason  = 'Target 5 Hit'
             exit_pnl     = round(ltp - entry, 2)
             trade['Target_Hit'] = 5
-        elif trade.get('Target_4', 0) > 0 and ltp >= trade['Target_4']:
+        elif trade.get('Target_4', 0) > 0 and (ltp >= trade['Target_4'] or t_high >= trade['Target_4']):
             if target_hit < 4:
                 trade['Target_Hit'] = 4
                 if TRAIL_SL and (trade.get('Target_3', 0) > trade['SL']):
                     trade['SL'] = trade['Target_3']   # trail SL to T3
                 print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T5:{trade.get('Target_5',0):.1f} | SL:{trade['SL']:.1f}")
-        elif trade.get('Target_3', 0) > 0 and ltp >= trade['Target_3']:
+        elif trade.get('Target_3', 0) > 0 and (ltp >= trade['Target_3'] or t_high >= trade['Target_3']):
             if target_hit < 3:
                 trade['Target_Hit'] = 3
                 if TRAIL_SL and (trade.get('Target_2', 0) > trade['SL']):
                     trade['SL'] = trade['Target_2']   # trail SL to T2
                 print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T4:{trade.get('Target_4',0):.1f} | SL:{trade['SL']:.1f}")
-        elif trade.get('Target_2', 0) > 0 and ltp >= trade['Target_2']:
+        elif trade.get('Target_2', 0) > 0 and (ltp >= trade['Target_2'] or t_high >= trade['Target_2']):
             if target_hit < 2:
                 trade['Target_Hit'] = 2
                 if TRAIL_SL and (trade.get('Target_1', 0) > trade['SL']):
                     trade['SL'] = trade['Target_1']   # trail SL to T1
                 print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T3:{trade.get('Target_3',0):.1f} | SL:{trade['SL']:.1f}")
-        elif trade.get('Target_1', 0) > 0 and ltp >= trade['Target_1']:
+        elif trade.get('Target_1', 0) > 0 and (ltp >= trade['Target_1'] or t_high >= trade['Target_1']):
             if target_hit < 1:
                 trade['Target_Hit'] = 1
                 if TRAIL_SL and (entry > trade['SL']):
                     trade['SL'] = round(entry, 2)     # trail SL to Entry (breakeven)
                 print(f"🎯 [FWD TEST] T1 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{ltp-entry:.2f} | Support Sustained → Next: T2:{trade.get('Target_2',0):.1f} | SL:{trade['SL']:.1f}")
     else:   # SELL
+        t_low = min([x for x in (float(trade.get('Trade_Low', entry) or 0.0), ltp) if x > 0]) if (float(trade.get('Trade_Low', 0) or 0) > 0 or ltp > 0) else ltp
         if trade['SL'] > 0 and ltp >= trade['SL']:
             closed       = True
             exit_reason  = 'Trailing SL Hit' if trade['SL'] <= entry else 'SL Hit'
             exit_pnl     = round(entry - ltp, 2)
-        elif trade.get('Target_5', 0) > 0 and ltp <= trade['Target_5']:
+        elif trade.get('Target_5', 0) > 0 and (ltp <= trade['Target_5'] or t_low <= trade['Target_5']):
             closed       = True
             exit_reason  = 'Target 5 Hit'
             exit_pnl     = round(entry - ltp, 2)
             trade['Target_Hit'] = 5
-        elif trade.get('Target_4', 0) > 0 and ltp <= trade['Target_4']:
+        elif trade.get('Target_4', 0) > 0 and (ltp <= trade['Target_4'] or t_low <= trade['Target_4']):
             if target_hit < 4:
                 trade['Target_Hit'] = 4
                 if TRAIL_SL and (trade['SL'] == 0 or trade.get('Target_3', 0) < trade['SL']):
                     trade['SL'] = trade['Target_3']
                 print(f"🎯 [FWD TEST] T4 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T5:{trade.get('Target_5',0):.1f} | SL:{trade['SL']:.1f}")
-        elif trade.get('Target_3', 0) > 0 and ltp <= trade['Target_3']:
+        elif trade.get('Target_3', 0) > 0 and (ltp <= trade['Target_3'] or t_low <= trade['Target_3']):
             if target_hit < 3:
                 trade['Target_Hit'] = 3
                 if TRAIL_SL and (trade['SL'] == 0 or trade.get('Target_2', 0) < trade['SL']):
                     trade['SL'] = trade['Target_2']
                 print(f"🎯 [FWD TEST] T3 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T4:{trade.get('Target_4',0):.1f} | SL:{trade['SL']:.1f}")
-        elif trade.get('Target_2', 0) > 0 and ltp <= trade['Target_2']:
+        elif trade.get('Target_2', 0) > 0 and (ltp <= trade['Target_2'] or t_low <= trade['Target_2']):
             if target_hit < 2:
                 trade['Target_Hit'] = 2
                 if TRAIL_SL and (trade['SL'] == 0 or trade.get('Target_1', 0) < trade['SL']):
                     trade['SL'] = trade['Target_1']
                 print(f"🎯 [FWD TEST] T2 Hit — {trade['Action']} {opt_type} {strike} @ {ltp:.2f} | PnL:+{entry-ltp:.2f} | Resistance Sustained → Next: T3:{trade.get('Target_3',0):.1f} | SL:{trade['SL']:.1f}")
-        elif trade.get('Target_1', 0) > 0 and ltp <= trade['Target_1']:
+        elif trade.get('Target_1', 0) > 0 and (ltp <= trade['Target_1'] or t_low <= trade['Target_1']):
             if target_hit < 1:
                 trade['Target_Hit'] = 1
                 if TRAIL_SL and (trade['SL'] == 0 or entry < trade['SL']):
@@ -3555,7 +3672,10 @@ def strike_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now:
                 return rows, name
             errs.append(f"{name}: no candles")
         except Exception as e:
-            _SRC_DOWN[name] = time.time()
+            err_up = str(e).upper()
+            # Only trip 2-minute broker skip on persistent auth failures, not on rate throttles or single-strike contract gaps
+            if any(k in err_up for k in ("INVALID API KEY", "AG8004", "AG8001", "DH-901", "401", "UNAUTHORIZED")):
+                _SRC_DOWN[name] = time.time()
             errs.append(f"{name}: {e}")
     raise RuntimeError("; ".join(errs))
 
@@ -3666,6 +3786,7 @@ class FeedEngine:
         self.strategy_states    = {}        # (opt_type, strike) -> StrategyStrikeState
         self.alert_mgr          = AlertManager()
         self.forward_tracker    = ForwardTestTracker()
+        self.advanced_engine    = advanced_engine
         self.forward_test_sheet = None
         self.orders_sheet       = None             # "Orders Log" tab (mirror of live_orders_log.csv)
         self._last_orders_sync_ts = 0.0
@@ -3864,25 +3985,111 @@ class FeedEngine:
     # ── Reversal order mapping helpers ─────────────────────────────────────
     def get_strike_ltp(self, opt_type: str, strike: int, expiry: str = None) -> float:
         """Live LTP for (opt_type, strike) from the WebSocket feed (the given expiry, else nearest
-        expiry first). Falls back to the last close in strike_pivots only when no live tick exists."""
+        expiry first). Falls back to the last close in strike_pivots, cached strikes, or theoretical
+        option price so LTP is always available."""
+        try:
+            stk_int = int(float(strike))
+        except (ValueError, TypeError):
+            stk_int = strike
+        ot = (str(opt_type) or "").upper().strip()
+        exp_clean = (str(expiry) or "").strip().upper() if expiry else None
+
         with self.lock:
-            metas = [(tok, m) for tok, m in self.token_to_meta.items()
-                     if m.get("opt_type") == opt_type and m.get("strike") == strike
-                     and (not expiry or m.get("expiry") == expiry)]
+            # Match tokens in token_to_meta
+            metas = []
+            for tok, m in self.token_to_meta.items():
+                if (m.get("opt_type") or "").upper().strip() != ot:
+                    continue
+                try:
+                    m_stk = int(float(m.get("strike", 0)))
+                except (ValueError, TypeError):
+                    m_stk = m.get("strike")
+                if m_stk != stk_int:
+                    continue
+                m_exp = (m.get("expiry") or "").strip().upper()
+                if exp_clean and m_exp and exp_clean not in m_exp and m_exp not in exp_clean:
+                    continue
+                metas.append((tok, m))
+
             live = dict(self.live_data)
-            sp = ((self.strike_pivots.get((opt_type, strike, expiry)) if expiry else None)
-                  or self.strike_pivots.get((opt_type, strike)) or {})
-        # nearest expiry first
-        def _exp_key(item):
-            try:
-                return datetime.strptime(item[1].get("expiry", ""), "%d%b%Y")
-            except Exception:
-                return datetime.max
-        for tok, _m in sorted(metas, key=_exp_key):
-            v = live.get(tok, {}).get("ltp", 0) or 0
-            if v > 0:
-                return float(v)
-        return float(sp.get("prev_c", 0) or 0)
+
+            # Check live tick first for matched tokens
+            def _exp_key(item):
+                try:
+                    return datetime.strptime(item[1].get("expiry", ""), "%d%b%Y")
+                except Exception:
+                    return datetime.max
+            for tok, _m in sorted(metas, key=_exp_key):
+                v = live.get(tok, {}).get("ltp", 0) or 0
+                if float(v) > 0:
+                    return float(v)
+
+            # Check strike_pivots
+            sp = None
+            if exp_clean:
+                sp = self.strike_pivots.get((ot, stk_int, exp_clean))
+            if not sp:
+                sp = self.strike_pivots.get((ot, stk_int))
+            # Also check tokens from metas in strike_pivots
+            if not sp:
+                for tok, _m in metas:
+                    sp_tok = self.strike_pivots.get(str(tok))
+                    if sp_tok and (float(sp_tok.get("prev_c", 0) or 0) > 0 or float(sp_tok.get("close", 0) or 0) > 0):
+                        sp = sp_tok
+                        break
+
+            # Search in strike_pivots values by opt_type and strike
+            if not sp:
+                for v in self.strike_pivots.values():
+                    if isinstance(v, dict):
+                        try:
+                            v_stk = int(float(v.get("strike", 0)))
+                        except (ValueError, TypeError):
+                            v_stk = 0
+                        if v.get("opt_type") == ot and v_stk == stk_int:
+                            if not exp_clean or (v.get("expiry") or "").strip().upper() == exp_clean:
+                                sp = v
+                                break
+
+        if sp:
+            for k in ("prev_c", "close", "last_price", "ltp", "c"):
+                val = float(sp.get(k, 0) or 0)
+                if val > 0:
+                    return val
+
+        # Fallback to strike_pivot_cache.json on disk if memory cache missed
+        try:
+            cache_file = os.path.join(BASE_DIR, "strike_pivot_cache.json")
+            if os.path.exists(cache_file):
+                with open(cache_file, "r") as cf:
+                    cd = json.load(cf)
+                    for _tok, s_info in cd.get("strikes", {}).items():
+                        try:
+                            s_stk = int(float(s_info.get("strike", 0)))
+                        except (ValueError, TypeError):
+                            s_stk = 0
+                        if s_info.get("opt_type") == ot and s_stk == stk_int:
+                            c_exp = (s_info.get("expiry") or "").strip().upper()
+                            if not exp_clean or c_exp == exp_clean or exp_clean in c_exp:
+                                val = float(s_info.get("prev_c", 0) or s_info.get("close", 0) or 0)
+                                if val > 0:
+                                    return val
+        except Exception:
+            pass
+
+        # Final fallback: theoretical option price from spot
+        try:
+            sym = getattr(self, "symbol", "") or "NIFTY"
+            spot = float(self.spot_price.get(sym, 0) or 0)
+            if spot > 0:
+                intrinsic = max(spot - stk_int, 0.0) if ot == "CE" else max(stk_int - spot, 0.0)
+                cfg = EXCHANGE_CONFIG.get(getattr(self, "exchange", "NFO"), {})
+                step = cfg.get("steps", {}).get(sym, 50)
+                return round(intrinsic + max(step * 0.40, 4.0), 2)
+        except Exception:
+            pass
+
+        return 0.0
 
     def compute_ce_on_support(self, ce_strikes: list) -> bool:
         """
@@ -3964,6 +4171,12 @@ class FeedEngine:
         print(f"[STRIKE PIVOTS] Loaded {len(strikes_map)} strike pivots for {basis_key[:10]} from {STRIKE_PIVOT_CACHE}")
 
         missing = [t for t in option_tokens if t not in self.strike_pivots]
+        all_expiries = {token_to_meta[t]["expiry"] for t in option_tokens if t in token_to_meta and token_to_meta[t].get("expiry")}
+        jobs = dict(getattr(self, "_pivot_jobs", {}))
+        for exp in (sorted(all_expiries) or [None]):
+            if (symbol, exp) not in jobs:
+                jobs[(symbol, exp)] = set()
+        self._pivot_jobs = jobs
         if missing:
             missing_expiries = {token_to_meta[t]["expiry"] for t in missing if t in token_to_meta and token_to_meta[t].get("expiry")}
             for exp in (sorted(missing_expiries) or [None]):
@@ -3993,7 +4206,7 @@ class FeedEngine:
                         for (sym, exp) in jobs:
                             self.fetch_and_map_all_strikes(sym, exp, force_fetch=True)
                         continue
-                    if not in_session and time.time() - getattr(self, "_last_1min_refresh", 0) > 900:
+                    if time.time() - getattr(self, "_last_1min_refresh", 0) > 900:
                         with self.lock:
                             rebuilt = any(isinstance(v, dict) and v.get("source") == "Dhan 1-min"
                                           for v in self.strike_pivots.values())
@@ -4053,6 +4266,10 @@ class FeedEngine:
             exps = self.upcoming_expiries(symbol, 2, from_day=nd) or [None]
             for exp in exps:
                 _mapped = self.fetch_and_map_all_strikes(symbol, exp, force_fetch=True, mode="next")
+                try:
+                    self.advanced_engine.build_next_day_plan(symbol, exp, strikes_dict=_mapped, mtf_pivots=self.mtf_pivots, daily_focus=self.daily_focus, mode="next")
+                except Exception as _adv_nd_err:
+                    print(f"[EOD] advance next-day plan calc note: {_adv_nd_err}")
                 print(f"[EOD] ✅ Next-day strike levels {symbol} {exp or 'nearest'}: {len(_mapped or {})} strikes "
                       f"→ strike_pivot_cache_next.json")
         except Exception as _nd_err:
@@ -4099,7 +4316,7 @@ class FeedEngine:
                 if not opts.empty:
                     exch = opts.iloc[0]['exch_seg']
             opts['exp_dt'] = pd.to_datetime(opts['expiry'], format='%d%b%Y')
-            now_ts = pd.Timestamp.now()
+            now_ts = pd.Timestamp(datetime.now())
             fut_exp = opts[opts['exp_dt'] >= now_ts.floor('D')]
             if fut_exp.empty:
                 fut_exp = opts
@@ -4177,9 +4394,13 @@ class FeedEngine:
             cd = read_json_file(cache_file)
             cached = cd.get("strikes", {}) if (cd.get("basis_key") == basis_key and cd.get("symbol") == symbol) else {}
 
+            # Check if any cached tokens are provisional 1-minute data that can be upgraded when market is not in session
+            provisional_tokens = [t for t in tokens if cached.get(t, {}).get("source") == "Dhan 1-min"]
+            has_provisional = bool(provisional_tokens) and not _in_session
+
             # Reuse a complete set: always during market hours (levels are locked), otherwise
-            # unless a fresh fetch was asked for.
-            if cached and all(t in cached for t in tokens) and (_in_session or not force_fetch):
+            # unless a fresh fetch was asked for or provisional 1-min levels need upgrading.
+            if cached and all(t in cached for t in tokens) and (_in_session or (not force_fetch and not has_provisional)):
                 if mode == "session":
                     with self.lock:
                         for t in tokens:
@@ -4197,8 +4418,11 @@ class FeedEngine:
                     if t in cached and t not in self.strike_pivots:
                         with self.lock:
                             self._store_strike_pivot(cached[t], nearest_expiry)
-            elif not force_fetch:
+            elif not force_fetch and not has_provisional:
                 fetch_tokens = [t for t in tokens if t not in cached]
+            elif has_provisional and not force_fetch:
+                # Upgrade only the provisional 1-min tokens if official daily candles are out
+                fetch_tokens = [t for t in tokens if t not in cached or t in provisional_tokens]
             else:
                 fetch_tokens = list(tokens)
 
@@ -4774,6 +4998,12 @@ class FeedEngine:
                 except Exception as ord_err:
                     print(f"[Orders Log] setup error: {ord_err}")
                 print("✅ Forward Test worksheet ready with Timeframe Filter")
+
+                # Setup 'Advanced Strategy' tab (independent tracking, 44 columns)
+                try:
+                    self.advanced_engine.setup_sheet(spreadsheet)
+                except Exception as adv_sheet_err:
+                    print(f"[Advanced Strategy] tab setup note: {adv_sheet_err}")
 
                 # Multi-Symbol Tracker sheet setup removed as requested
                 self.multi_symbol_sheet = None
@@ -5523,20 +5753,26 @@ class FeedEngine:
                     idx      = strike_to_idx.get(strike)
 
                     d = snapshot.get(token, {})
+                    ltp = 0.0
                     if token in snapshot:
-                        ltp       = d.get("ltp", 0.0)
-                        opt_high  = d.get("high", ltp)
-                        opt_low   = d.get("low", ltp)
-                        opt_close = d.get("close", ltp)
-                    else:
-                        sp = self.strike_pivots.get(token)
-                        if sp and sp.get("prev_c", 0) > 0:
-                            ltp       = sp.get("prev_c", 0.0)
-                            opt_high  = sp.get("prev_h", ltp)
-                            opt_low   = sp.get("prev_l", ltp)
+                        ltp       = float(d.get("ltp", 0.0) or 0.0)
+                        opt_high  = float(d.get("high", ltp) or ltp)
+                        opt_low   = float(d.get("low", ltp) or ltp)
+                        opt_close = float(d.get("close", ltp) or ltp)
+
+                    # If WebSocket hasn't received ticks yet or market is closed, resolve from strike_pivots
+                    if ltp <= 0:
+                        sp = (self.strike_pivots.get(token)
+                              or (self.strike_pivots.get((opt_type, strike, meta.get("expiry"))) if meta.get("expiry") else None)
+                              or self.strike_pivots.get((opt_type, strike)))
+                        if sp and (float(sp.get("prev_c", 0) or 0) > 0 or float(sp.get("close", 0) or 0) > 0):
+                            ltp       = float(sp.get("prev_c", 0.0) or sp.get("close", 0.0))
+                            opt_high  = float(sp.get("prev_h", ltp) or ltp)
+                            opt_low   = float(sp.get("prev_l", ltp) or ltp)
                             opt_close = ltp
                         else:
-                            continue
+                            ltp = self.get_strike_ltp(opt_type, strike, meta.get("expiry"))
+                            opt_high = opt_low = opt_close = ltp
 
                     if opt_high <= 0: opt_high = ltp
                     if opt_low <= 0:  opt_low  = ltp
@@ -5544,10 +5780,10 @@ class FeedEngine:
 
                     # Option Fibonacci Pivots (P, S1-S3, R1-R3) — TradingView Aligned
                     strike_piv = (self.strike_pivots.get(token)
-                                  or (self.strike_pivots.get((opt_type, strike, meta.get("expiry"))) if meta.get("expiry") else None))
+                                  or (self.strike_pivots.get((opt_type, strike, meta.get("expiry"))) if meta.get("expiry") else None)
+                                  or self.strike_pivots.get((opt_type, strike)))
                     if not strike_piv:
-                        # No official-candle levels for this strike yet: never make them up from
-                        # live prices; the strike shows once the mapper has filled it.
+                        # No official-candle levels for this strike yet: check get_strike_data cache
                         continue
                     opt_piv = strike_piv
 
@@ -5672,6 +5908,47 @@ class FeedEngine:
                                     sell_entry['SL'], sell_entry['T1']
                                 )
 
+                            # ── Advanced Strategy Evaluation (No alerts, independent tracking) ──
+                            try:
+                                _ord_id = _new_trade.get('Order_ID') if _new_trade else ""
+                                _tmode = "Actual" if (_ord_id and "no order" not in _ord_id.lower() and "queued" not in _ord_id.lower()) else "Shadow"
+                                _t1_v = st_sell.targets[0] if len(st_sell.targets) > 0 else sell_entry['T1']
+                                _t2_v = st_sell.targets[1] if len(st_sell.targets) > 1 else sell_entry['T2']
+                                _t3_v = st_sell.targets[2] if len(st_sell.targets) > 2 else sell_entry['T3']
+                                _sym_lot = get_symbol_lot_size(symbol, self.exchange)
+                                self.advanced_engine.evaluate_candidate(
+                                    symbol=symbol,
+                                    opt_type=opt_type,
+                                    strike=strike,
+                                    expiry=exp,
+                                    action="SELL",
+                                    setup_type="SELL Reversal",
+                                    ltp=round(ltp, 2),
+                                    spot_px=spot,
+                                    daily_pivots=daily_piv_mtf,
+                                    weekly_pivots=mtf.get("Weekly", {}),
+                                    opt_piv=opt_piv,
+                                    ll=st_sell.ll,
+                                    hh=st_sell.hh,
+                                    candle_5m=st_sell.candle_5m,
+                                    retest_done=st_sell.retest_done,
+                                    retest_low=st_sell.retest_low,
+                                    retest_high=st_sell.retest_high,
+                                    sl_candidate=st_sell.sl,
+                                    t1_candidate=_t1_v,
+                                    t2_candidate=_t2_v,
+                                    t3_candidate=_t3_v,
+                                    bid=_safe_float(d.get("bid", 0.0)),
+                                    ask=_safe_float(d.get("ask", 0.0)),
+                                    quote_age_s=0.0,
+                                    source_order_id=_ord_id,
+                                    trade_mode=_tmode,
+                                    lot_size=_sym_lot,
+                                    token=token
+                                )
+                            except Exception as _adv_sell_err:
+                                print(f"[ADV STRATEGY] sell eval error: {_adv_sell_err}")
+
                     # ── Evaluate BUY Entry ──
                     fp_buy = getattr(st_buy, "frozen_pivots", None) or opt_piv
                     if (buy_entry["entry"] and mkt_open and is_focus_strike and live_tick
@@ -5707,6 +5984,70 @@ class FeedEngine:
                                     f"{buy_ctx} | {lvl} Reclaim | New LL SL:{buy_entry['SL']:.1f}",
                                     buy_entry['SL'], buy_entry['T1']
                                 )
+
+                            # ── Advanced Strategy Evaluation (No alerts, independent tracking) ──
+                            try:
+                                _ord_id = _new_trade.get('Order_ID') if _new_trade else ""
+                                _tmode = "Actual" if (_ord_id and "no order" not in _ord_id.lower() and "queued" not in _ord_id.lower()) else "Shadow"
+                                _t1_v = st_buy.targets[0] if len(st_buy.targets) > 0 else buy_entry['T1']
+                                _t2_v = st_buy.targets[1] if len(st_buy.targets) > 1 else buy_entry['T2']
+                                _t3_v = st_buy.targets[2] if len(st_buy.targets) > 2 else buy_entry['T3']
+                                _sym_lot = get_symbol_lot_size(symbol, self.exchange)
+                                self.advanced_engine.evaluate_candidate(
+                                    symbol=symbol,
+                                    opt_type=opt_type,
+                                    strike=strike,
+                                    expiry=exp,
+                                    action="BUY",
+                                    setup_type="BUY Reversal",
+                                    ltp=round(ltp, 2),
+                                    spot_px=spot,
+                                    daily_pivots=daily_piv_mtf,
+                                    weekly_pivots=mtf.get("Weekly", {}),
+                                    opt_piv=opt_piv,
+                                    ll=st_buy.ll,
+                                    hh=st_buy.hh,
+                                    candle_5m=st_buy.candle_5m,
+                                    retest_done=st_buy.retest_done,
+                                    retest_low=st_buy.retest_low,
+                                    retest_high=st_buy.retest_high,
+                                    sl_candidate=st_buy.sl,
+                                    t1_candidate=_t1_v,
+                                    t2_candidate=_t2_v,
+                                    t3_candidate=_t3_v,
+                                    bid=_safe_float(d.get("bid", 0.0)),
+                                    ask=_safe_float(d.get("ask", 0.0)),
+                                    quote_age_s=0.0,
+                                    source_order_id=_ord_id,
+                                    trade_mode=_tmode,
+                                    lot_size=_sym_lot,
+                                    token=token
+                                )
+                            except Exception as _adv_buy_err:
+                                print(f"[ADV STRATEGY] buy eval error: {_adv_buy_err}")
+
+                    # ── Pivot P Continuation check (Section 5 C & D) ──
+                    if mkt_open and is_focus_strike and live_tick:
+                        try:
+                            _sym_lot = get_symbol_lot_size(symbol, self.exchange)
+                            self.advanced_engine.update_pivot_p_continuation(
+                                symbol=symbol,
+                                opt_type=opt_type,
+                                strike=strike,
+                                expiry=exp,
+                                ltp=round(ltp, 2),
+                                spot_px=spot,
+                                daily_pivots=daily_piv_mtf,
+                                weekly_pivots=mtf.get("Weekly", {}),
+                                opt_piv=opt_piv,
+                                candle_5m=st_buy.candle_5m,
+                                bid=_safe_float(d.get("bid", 0.0)),
+                                ask=_safe_float(d.get("ask", 0.0)),
+                                lot_size=_sym_lot,
+                                token=token
+                            )
+                        except Exception as _adv_p_err:
+                            pass
 
                     _s2_raw = opt_piv.get("S2", 0)
                     is_s1_buy = (_s2_raw <= 0.05 or st_buy.trigger_level == "S1")
@@ -5764,6 +6105,13 @@ class FeedEngine:
                     # (only real trades from today can hit a target or SL)
                     closed_t = (self.forward_tracker.update_tick(opt_type, strike, ltp, expiry=exp, symbol=symbol)
                                 if live_tick else None)
+
+                    # Update Advanced Strategy tick tracking (independent P&L and exits, no alerts)
+                    if live_tick:
+                        try:
+                            self.advanced_engine.on_tick(symbol, opt_type, strike, exp, ltp)
+                        except Exception as _adv_tk_err:
+                            pass
                     if closed_t:
                         self.alert_mgr.send_exit_alert(closed_t)
                         # Keep the setup state machine in step with the tracker: the trade is over,
@@ -6221,6 +6569,10 @@ class FeedEngine:
                     self._eod_sq_done_date = today_date
                     try:
                         _sq = self.forward_tracker.eod_square_off("EOD 3PM Square-off @ CMP")
+                        try:
+                            self.advanced_engine.eod_square_off("EOD 3PM Square-off @ CMP")
+                        except Exception:
+                            pass
                         for _c in _sq:
                             self.alert_mgr.send_exit_alert(_c)
                         if status_cb:
@@ -6449,6 +6801,23 @@ class ControlPanel:
         self.sec_15m_info  = tk.StringVar(value="⏱️ 15M Intraday: Loading levels & strikes...")
         self.sec_1h_info   = tk.StringVar(value="⏳ 1H Structure: Loading levels & strikes...")
         self.expiry_filter_var = tk.StringVar(value="ALL")  # "ALL", "CURRENT", or "NEXT"
+
+        # Advance Strategy UI state variables
+        self.advanced_engine = advanced_engine
+        self.main_tab_var    = tk.StringVar(value="CLASSIC")
+        self.adv_subview_var = tk.StringVar(value="TRADES")
+        self.adv_plan_filter_var = tk.StringVar(value="ALL_SETUPS")
+        self.adv_only_qualified_var = tk.BooleanVar(value=False)
+
+        # Advanced Strategy Scoreboard StringVars
+        self.adv_stat_total_var = tk.StringVar(value="0")
+        self.adv_stat_active_var = tk.StringVar(value="0")
+        self.adv_stat_winrate_var = tk.StringVar(value="0.0% (0W / 0L)")
+        self.adv_stat_points_var = tk.StringVar(value="+0.00")
+        self.adv_stat_gross_var = tk.StringVar(value="₹0.00")
+        self.adv_stat_charges_var = tk.StringVar(value="₹0.00")
+        self.adv_stat_net_var = tk.StringVar(value="₹0.00")
+        self.adv_stat_rejections_var = tk.StringVar(value="0")
 
         self._style_ttk()
         self._build_ui()
@@ -6850,8 +7219,524 @@ class ControlPanel:
                                bg="#0d1117", fg="#ffd700", font=(GUI_FONT, 8))
         self.oi_lbl.pack(side="right")
 
-        # 6. Finally, pack rev_frame to fill remaining space in the middle
-        rev_frame.pack(side="top", fill="both", expand=True, padx=16, pady=4)
+        # ── Strategy Tab Switcher Bar ────────────────────────
+        tab_nav_frame = tk.Frame(r, bg="#0d1117")
+        tab_nav_frame.pack(side="top", fill="x", padx=16, pady=(4, 2))
+
+        self.tab_btn_classic = DarkButton(
+            tab_nav_frame, text="⚡ CLASSIC SCANNER & STRATEGY",
+            command=lambda: self._switch_main_tab("CLASSIC"),
+            bg="#1f6feb", fg="#ffffff", activebackground="#388bfd",
+            font=(GUI_FONT, 9, "bold"), padx=14, pady=5
+        )
+        self.tab_btn_classic.pack(side="left", padx=(0, 6))
+
+        self.tab_btn_advance = DarkButton(
+            tab_nav_frame, text="🛡️ ADVANCE VERSION (0 Active)",
+            command=lambda: self._switch_main_tab("ADVANCE"),
+            bg="#21262d", fg="#8b949e", activebackground="#30363d",
+            font=(GUI_FONT, 9, "bold"), padx=14, pady=5
+        )
+        self.tab_btn_advance.pack(side="left", padx=6)
+
+        self.rev_frame = rev_frame
+        self._build_advance_tab_ui(r)
+
+        # 6. Finally, pack rev_frame to fill remaining space in the middle as default
+        self.rev_frame.pack(side="top", fill="both", expand=True, padx=16, pady=4)
+
+    def _switch_main_tab(self, tab_name: str):
+        self.main_tab_var.set(tab_name)
+        if tab_name == "CLASSIC":
+            if hasattr(self, "adv_main_frame") and self.adv_main_frame.winfo_exists():
+                self.adv_main_frame.pack_forget()
+            if hasattr(self, "rev_frame") and self.rev_frame.winfo_exists():
+                self.rev_frame.pack(side="top", fill="both", expand=True, padx=16, pady=4)
+            self.tab_btn_classic.config(bg="#1f6feb", fg="#ffffff")
+            self.tab_btn_advance.config(bg="#21262d", fg="#8b949e")
+        else:
+            if hasattr(self, "rev_frame") and self.rev_frame.winfo_exists():
+                self.rev_frame.pack_forget()
+            if hasattr(self, "adv_main_frame") and self.adv_main_frame.winfo_exists():
+                self.adv_main_frame.pack(side="top", fill="both", expand=True, padx=16, pady=4)
+            self.tab_btn_classic.config(bg="#21262d", fg="#8b949e")
+            self.tab_btn_advance.config(bg="#196c2e", fg="#ffffff")
+            self._refresh_advance_display()
+
+    def _switch_adv_subview(self, subview_name: str):
+        self.adv_subview_var.set(subview_name)
+        views = [("TRADES", self.adv_view_trades, self.adv_btn_trades),
+                 ("PLAN", self.adv_view_plan, self.adv_btn_plan),
+                 ("REJECTIONS", self.adv_view_rej, self.adv_btn_rejections)]
+        for name, frame, btn in views:
+            if name == subview_name:
+                frame.pack(fill="both", expand=True, padx=8, pady=4)
+                btn.config(bg="#1f6feb", fg="#ffffff")
+            else:
+                frame.pack_forget()
+                btn.config(bg="#21262d", fg="#8b949e")
+        self._refresh_advance_display()
+
+    def _build_advance_tab_ui(self, r):
+        adv_frame = tk.Frame(r, bg="#161b22", highlightthickness=1, highlightbackground="#30363d")
+        self.adv_main_frame = adv_frame
+
+        # ── Header ──
+        hdr = tk.Frame(adv_frame, bg="#161b22")
+        hdr.pack(fill="x", padx=10, pady=(4, 2))
+        tk.Label(hdr, text="🛡️ ADVANCE STRATEGY ENGINE — STRICT SAFETY FILTERS & INDEPENDENT TRACKING",
+                 bg="#161b22", fg="#64ffda", font=("Consolas", 9, "bold")).pack(side="left")
+        tk.Label(hdr, text="Strategy ID: ADVANCED_PIVOT_REVERSAL  •  Zero Alerts  •  No Duplicate Orders  •  Tab: 'Advanced Strategy'",
+                 bg="#161b22", fg="#8b949e", font=("Consolas", 8)).pack(side="left", padx=10)
+
+        # ── Scoreboard Strip ──
+        score_strip = tk.Frame(adv_frame, bg="#0d1117", highlightthickness=1, highlightbackground="#30363d")
+        score_strip.pack(fill="x", padx=8, pady=(2, 4))
+
+        score_items = [
+            ("STRATEGY", tk.StringVar(value="ADVANCED PIVOT"), "#64ffda"),
+            ("TOTAL TRADES", self.adv_stat_total_var, "#f0f6fc"),
+            ("ACTIVE / SHADOW", self.adv_stat_active_var, "#ffd700"),
+            ("WIN RATE", self.adv_stat_winrate_var, "#3fb950"),
+            ("TOTAL POINTS", self.adv_stat_points_var, "#00e676"),
+            ("GROSS P&L", self.adv_stat_gross_var, "#00e676"),
+            ("EST. CHARGES", self.adv_stat_charges_var, "#8b949e"),
+            ("NET P&L", self.adv_stat_net_var, "#00e676"),
+            ("REJECTIONS", self.adv_stat_rejections_var, "#ff5252"),
+        ]
+
+        for lbl, var, col in score_items:
+            card = tk.Frame(score_strip, bg="#0d1117", padx=6, pady=4)
+            card.pack(side="left", fill="x", expand=True)
+            tk.Label(card, text=lbl, bg="#0d1117", fg="#8b949e", font=(GUI_FONT, 7, "bold")).pack(anchor="w")
+            lbl_w = tk.Label(card, textvariable=var, bg="#0d1117", fg=col, font=(GUI_FONT, 9, "bold"))
+            lbl_w.pack(anchor="w")
+            if lbl == "TOTAL POINTS": self.adv_points_lbl = lbl_w
+            elif lbl == "GROSS P&L": self.adv_gross_lbl = lbl_w
+            elif lbl == "NET P&L": self.adv_net_lbl = lbl_w
+
+        # ── Sub-view Controls & Actions Bar ──
+        ctrl_bar = tk.Frame(adv_frame, bg="#161b22")
+        ctrl_bar.pack(fill="x", padx=8, pady=(0, 4))
+
+        self.adv_btn_trades = DarkButton(
+            ctrl_bar, text="🔴 LIVE TRADES & POSITIONS",
+            command=lambda: self._switch_adv_subview("TRADES"),
+            bg="#1f6feb", fg="#ffffff", font=("Consolas", 8, "bold"), padx=10, pady=4
+        )
+        self.adv_btn_trades.pack(side="left", padx=(0, 4))
+
+        self.adv_btn_plan = DarkButton(
+            ctrl_bar, text="📐 NEXT-DAY LEVELS & ADVANCE PLAN",
+            command=lambda: self._switch_adv_subview("PLAN"),
+            bg="#21262d", fg="#8b949e", font=("Consolas", 8, "bold"), padx=10, pady=4
+        )
+        self.adv_btn_plan.pack(side="left", padx=4)
+
+        self.adv_btn_rejections = DarkButton(
+            ctrl_bar, text="🛡️ SAFETY REJECTIONS",
+            command=lambda: self._switch_adv_subview("REJECTIONS"),
+            bg="#21262d", fg="#8b949e", font=("Consolas", 8, "bold"), padx=4
+        )
+        self.adv_btn_rejections.pack(side="left", padx=4)
+
+        # Right side action buttons
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid=0"
+        DarkButton(
+            ctrl_bar, text="📊 Open Sheet 'Advanced Strategy' ↗",
+            command=lambda: __import__("webbrowser").open(sheet_url),
+            bg="#1f6feb", fg="#ffffff", font=("Consolas", 8, "bold"), padx=10, pady=4
+        ).pack(side="right", padx=(4, 0))
+
+        DarkButton(
+            ctrl_bar, text="📐 Map Next-Day Advance Levels",
+            command=self._on_map_advance_levels_click,
+            bg="#196c2e", fg="#ffffff", font=("Consolas", 8, "bold"), padx=10, pady=4
+        ).pack(side="right", padx=4)
+
+        DarkButton(
+            ctrl_bar, text="🔄 Refresh",
+            command=self._refresh_advance_display,
+            bg="#21262d", fg="#c9d1d9", font=("Consolas", 8, "bold"), padx=8, pady=4
+        ).pack(side="right", padx=4)
+
+        # ── Sub-view 1: Trades Container ──
+        self.adv_view_trades = tk.Frame(adv_frame, bg="#161b22")
+
+        # Top section: Active & Shadow Trades
+        act_box = tk.Frame(self.adv_view_trades, bg="#161b22")
+        act_box.pack(fill="both", expand=True, padx=4, pady=(0, 3))
+        act_bar = tk.Frame(act_box, bg="#161b22")
+        act_bar.pack(fill="x", padx=4, pady=(2, 2))
+        tk.Label(act_bar, text="⚡ ACTIVE & SHADOW POSITIONS", bg="#161b22", fg="#ffd700", font=("Consolas", 8, "bold")).pack(side="left")
+        self.adv_active_badge = tk.Label(act_bar, text=" 0 ACTIVE ", bg="#ffd700", fg="#000000", font=("Consolas", 7, "bold"))
+        self.adv_active_badge.pack(side="left", padx=6)
+        tk.Label(act_bar, text="• Trailing Stop-Loss & Target Monitoring (writes in-place to Google Sheet)", bg="#161b22", fg="#8b949e", font=("Consolas", 8)).pack(side="left", padx=4)
+
+        tree_f_act = tk.Frame(act_box, bg="#161b22")
+        tree_f_act.pack(fill="both", expand=True, padx=2, pady=0)
+
+        cols_act = ("Trade ID", "Mode", "Symbol", "Expiry", "Strike", "Type", "Action", "Entry", "SL", "LL", "HH", "T1", "T2", "LTP", "Points", "Gross PnL", "Setup", "Entry Reason", "Status")
+        self.adv_active_tree = ttk.Treeview(tree_f_act, columns=cols_act, show="headings", height=5)
+        w_act = {"Trade ID": 130, "Mode": 60, "Symbol": 70, "Expiry": 75, "Strike": 60, "Type": 45, "Action": 55, "Entry": 60, "SL": 60, "LL": 60, "HH": 60, "T1": 55, "T2": 55, "LTP": 60, "Points": 60, "Gross PnL": 75, "Setup": 140, "Entry Reason": 180, "Status": 70}
+        for c in cols_act:
+            self.adv_active_tree.heading(c, text=c)
+            self.adv_active_tree.column(c, width=w_act.get(c, 70), anchor="center")
+        self.adv_active_tree.pack(side="left", fill="both", expand=True)
+        sb_act = ttk.Scrollbar(tree_f_act, orient="vertical", command=self.adv_active_tree.yview)
+        sb_act.pack(side="right", fill="y")
+        self.adv_active_tree.configure(yscrollcommand=sb_act.set)
+
+        # Bottom section: Closed Trades Journal
+        cls_box = tk.Frame(self.adv_view_trades, bg="#161b22")
+        cls_box.pack(fill="both", expand=True, padx=4, pady=(3, 0))
+        cls_bar = tk.Frame(cls_box, bg="#161b22")
+        cls_bar.pack(fill="x", padx=4, pady=(2, 2))
+        tk.Label(cls_bar, text="📜 CLOSED TRADES JOURNAL", bg="#161b22", fg="#58a6ff", font=("Consolas", 8, "bold")).pack(side="left")
+        self.adv_closed_badge = tk.Label(cls_bar, text=" 0 CLOSED ", bg="#21262d", fg="#8b949e", font=("Consolas", 7, "bold"))
+        self.adv_closed_badge.pack(side="left", padx=6)
+        tk.Label(cls_bar, text="• Completed Trade Outcomes & Realized Net P&L", bg="#161b22", fg="#8b949e", font=("Consolas", 8)).pack(side="left", padx=4)
+
+        tree_f_cls = tk.Frame(cls_box, bg="#161b22")
+        tree_f_cls.pack(fill="both", expand=True, padx=2, pady=0)
+
+        cols_cls = ("Date", "Entry Time", "Exit Time", "Trade ID", "Mode", "Symbol", "Expiry", "Strike", "Type", "Action", "Entry", "Exit", "LL", "HH", "Points", "Gross PnL", "Charges", "Net PnL", "Entry Reason", "Exit Reason", "Status")
+        self.adv_closed_tree = ttk.Treeview(tree_f_cls, columns=cols_cls, show="headings", height=5)
+        w_cls = {"Date": 75, "Entry Time": 70, "Exit Time": 70, "Trade ID": 130, "Mode": 60, "Symbol": 70, "Expiry": 75, "Strike": 60, "Type": 45, "Action": 55, "Entry": 60, "Exit": 60, "LL": 60, "HH": 60, "Points": 60, "Gross PnL": 70, "Charges": 60, "Net PnL": 75, "Entry Reason": 160, "Exit Reason": 160, "Status": 70}
+        for c in cols_cls:
+            self.adv_closed_tree.heading(c, text=c)
+            self.adv_closed_tree.column(c, width=w_cls.get(c, 70), anchor="center")
+        self.adv_closed_tree.pack(side="left", fill="both", expand=True)
+        sb_cls = ttk.Scrollbar(tree_f_cls, orient="vertical", command=self.adv_closed_tree.yview)
+        sb_cls.pack(side="right", fill="y")
+        self.adv_closed_tree.configure(yscrollcommand=sb_cls.set)
+
+        # ── Sub-view 2: Next-Day Levels & Advance Plan Container ──
+        self.adv_view_plan = tk.Frame(adv_frame, bg="#161b22")
+        plan_filter_bar = tk.Frame(self.adv_view_plan, bg="#161b22")
+        plan_filter_bar.pack(fill="x", padx=4, pady=(2, 4))
+
+        tk.Label(plan_filter_bar, text="📐 ADVANCE NEXT-DAY LEVELS & SETUPS:", bg="#161b22", fg="#ffd700", font=("Consolas", 8, "bold")).pack(side="left", padx=(4, 6))
+
+        for v_val, v_txt in [
+            ("ALL_SETUPS", "📋 All Focus Setups"),
+            ("15M", "⭐ 15M Intraday"),
+            ("1H", "⏳ 1H Structure"),
+            ("BOTH", "🎯 15M & 1H Focus"),
+            ("DAILY", "📅 Daily Structure"),
+        ]:
+            tk.Radiobutton(
+                plan_filter_bar, text=v_txt, value=v_val, variable=self.adv_plan_filter_var,
+                bg="#161b22", fg="#f0f6fc", selectcolor="#21262d", activebackground="#161b22",
+                activeforeground="#58a6ff", font=("Consolas", 8, "bold"),
+                command=self._populate_advance_plan_tree
+            ).pack(side="left", padx=3)
+
+        tk.Checkbutton(
+            plan_filter_bar, text="Only Qualified (R:R ≥ 1.5)", variable=self.adv_only_qualified_var,
+            bg="#161b22", fg="#3fb950", selectcolor="#21262d", activebackground="#161b22",
+            activeforeground="#3fb950", font=("Consolas", 8, "bold"),
+            command=self._populate_advance_plan_tree
+        ).pack(side="left", padx=10)
+
+        self.adv_plan_info_lbl = tk.Label(plan_filter_bar, text="", bg="#161b22", fg="#8b949e", font=("Consolas", 8))
+        self.adv_plan_info_lbl.pack(side="right", padx=6)
+
+        tree_f_plan = tk.Frame(self.adv_view_plan, bg="#161b22")
+        tree_f_plan.pack(fill="both", expand=True, padx=2, pady=0)
+
+        cols_plan = ("Focus Group", "Action / Setup", "Type", "Strike", "Expiry", "LTP", "Planned Entry", "Planned SL", "LL Price", "HH Price", "T1", "T2 (Pivot P)", "T3", "T4", "R:R", "Context Check", "Retest Mode", "Advance Status", "Entry Reason", "S3", "S2", "S1", "P", "R1", "R2", "R3")
+        self.adv_plan_tree = ttk.Treeview(tree_f_plan, columns=cols_plan, show="headings", height=12)
+        w_plan = {"Focus Group": 105, "Action / Setup": 150, "Type": 45, "Strike": 60, "Expiry": 75, "LTP": 65, "Planned Entry": 75, "Planned SL": 70, "LL Price": 65, "HH Price": 65, "T1": 55, "T2 (Pivot P)": 75, "T3": 55, "T4": 55, "R:R": 60, "Context Check": 150, "Retest Mode": 140, "Advance Status": 95, "Entry Reason": 180, "S3": 50, "S2": 50, "S1": 50, "P": 50, "R1": 50, "R2": 50, "R3": 50}
+        for c in cols_plan:
+            self.adv_plan_tree.heading(c, text=c)
+            self.adv_plan_tree.column(c, width=w_plan.get(c, 60), anchor="center")
+        self.adv_plan_tree.pack(side="left", fill="both", expand=True)
+
+        sb_plan_y = ttk.Scrollbar(tree_f_plan, orient="vertical", command=self.adv_plan_tree.yview)
+        sb_plan_y.pack(side="right", fill="y")
+        sb_plan_x = ttk.Scrollbar(self.adv_view_plan, orient="horizontal", command=self.adv_plan_tree.xview)
+        sb_plan_x.pack(fill="x", padx=2, pady=(0, 2))
+        self.adv_plan_tree.configure(yscrollcommand=sb_plan_y.set, xscrollcommand=sb_plan_x.set)
+
+        # ── Sub-view 3: Safety Evaluations & Rejections Container ──
+        self.adv_view_rej = tk.Frame(adv_frame, bg="#161b22")
+        rej_bar = tk.Frame(self.adv_view_rej, bg="#161b22")
+        rej_bar.pack(fill="x", padx=4, pady=(2, 4))
+        tk.Label(rej_bar, text="🛡️ RECENT CANDIDATE SAFETY EVALUATIONS & REJECTIONS LOG", bg="#161b22", fg="#ff5252", font=("Consolas", 8, "bold")).pack(side="left", padx=4)
+        tk.Label(rej_bar, text="• Filters: Context conflict, Insufficient R:R, Wide spread, No candle confirmation", bg="#161b22", fg="#8b949e", font=("Consolas", 8)).pack(side="left", padx=6)
+
+        tree_f_rej = tk.Frame(self.adv_view_rej, bg="#161b22")
+        tree_f_rej.pack(fill="both", expand=True, padx=2, pady=0)
+
+        cols_rej = ("Timestamp", "Symbol", "Strike", "Type", "Action", "Setup Type", "LTP", "Rejection Reason", "Filter Details")
+        self.adv_rej_tree = ttk.Treeview(tree_f_rej, columns=cols_rej, show="headings", height=12)
+        w_rej = {"Timestamp": 85, "Symbol": 75, "Strike": 65, "Type": 50, "Action": 60, "Setup Type": 150, "LTP": 65, "Rejection Reason": 180, "Filter Details": 320}
+        for c in cols_rej:
+            self.adv_rej_tree.heading(c, text=c)
+            self.adv_rej_tree.column(c, width=w_rej.get(c, 75), anchor="w" if c == "Filter Details" else "center")
+        self.adv_rej_tree.pack(side="left", fill="both", expand=True)
+
+        sb_rej = ttk.Scrollbar(tree_f_rej, orient="vertical", command=self.adv_rej_tree.yview)
+        sb_rej.pack(side="right", fill="y")
+        self.adv_rej_tree.configure(yscrollcommand=sb_rej.set)
+
+        # Pack default sub-view
+        self.adv_view_trades.pack(fill="both", expand=True, padx=8, pady=4)
+
+        # Configure treeview tags
+        for tv in (self.adv_active_tree, self.adv_closed_tree, self.adv_plan_tree, self.adv_rej_tree):
+            tv.tag_configure("ce", foreground="#3fb950")
+            tv.tag_configure("pe", foreground="#f85149")
+            tv.tag_configure("buy", foreground="#3bf586")
+            tv.tag_configure("sell", foreground="#ff6b81")
+            tv.tag_configure("win", foreground="#00e676")
+            tv.tag_configure("loss", foreground="#ff5252")
+            tv.tag_configure("qual", background="#0d2818", foreground="#7ee787")
+            tv.tag_configure("rej", background="#1a0f12", foreground="#ff7070")
+
+    def _refresh_advance_display(self):
+        try:
+            stats = self.advanced_engine.get_summary_stats()
+            self.adv_stat_total_var.set(str(stats.get("total_trades", 0)))
+            self.adv_stat_active_var.set(str(stats.get("active_trades", 0)))
+            wr = stats.get("win_rate", 0.0)
+            w_cnt = stats.get("wins", 0)
+            l_cnt = stats.get("losses", 0)
+            self.adv_stat_winrate_var.set(f"{wr:.1f}% ({w_cnt}W / {l_cnt}L)")
+
+            pts = stats.get("total_points", 0.0)
+            self.adv_stat_points_var.set(f"{'+' if pts >= 0 else ''}{pts:.2f}")
+            if hasattr(self, "adv_points_lbl"):
+                self.adv_points_lbl.config(fg="#00e676" if pts >= 0 else "#ff5252")
+
+            gross = stats.get("total_gross_pnl", 0.0)
+            self.adv_stat_gross_var.set(f"₹{'+' if gross >= 0 else ''}{gross:.2f}")
+            if hasattr(self, "adv_gross_lbl"):
+                self.adv_gross_lbl.config(fg="#00e676" if gross >= 0 else "#ff5252")
+
+            chg = stats.get("total_charges", 0.0)
+            self.adv_stat_charges_var.set(f"₹{chg:.2f}")
+
+            net = stats.get("total_net_pnl", 0.0)
+            self.adv_stat_net_var.set(f"₹{'+' if net >= 0 else ''}{net:.2f}")
+            if hasattr(self, "adv_net_lbl"):
+                self.adv_net_lbl.config(fg="#00e676" if net >= 0 else "#ff5252")
+
+            rej_cnt = stats.get("rejections_count", 0)
+            self.adv_stat_rejections_var.set(str(rej_cnt))
+
+            active = self.advanced_engine.get_active_trades()
+            closed = self.advanced_engine.get_closed_trades()
+            self.tab_btn_advance.config(text=f"🛡️ ADVANCE VERSION ({len(active)} Active)")
+            if hasattr(self, "adv_active_badge"):
+                self.adv_active_badge.config(text=f" {len(active)} ACTIVE ")
+            if hasattr(self, "adv_closed_badge"):
+                self.adv_closed_badge.config(text=f" {len(closed)} CLOSED ")
+
+            # Update Active Tree
+            if hasattr(self, "adv_active_tree") and self.adv_active_tree.winfo_exists():
+                for itm in self.adv_active_tree.get_children():
+                    self.adv_active_tree.delete(itm)
+                for t in active:
+                    tag = "buy" if t.get("BUY/SELL") == "BUY" else "sell"
+                    ot = t.get("Option_Type", "CE")
+                    stk = int(float(t.get("Strike", 0)))
+                    exp = (self.expiry_var.get() or "").strip()
+                    live_ltp = feed.get_strike_ltp(ot, stk, exp) if 'feed' in globals() and hasattr(feed, "get_strike_ltp") else 0.0
+                    curr_px = live_ltp if live_ltp > 0 else float(t.get('Current_Price', t.get('Entry_Price', 0)) or 0)
+                    ep = float(t.get('Entry_Price', 0) or 0)
+                    is_buy = (t.get("BUY/SELL", "BUY") == "BUY")
+                    pts = (curr_px - ep) if is_buy else (ep - curr_px)
+                    qty = int(t.get("Quantity", 25) or 25)
+                    gross = pts * qty
+                    ll_act = float(t.get('Liquidity_LL', 0) or 0)
+                    hh_act = float(t.get('Liquidity_HH', 0) or 0)
+                    self.adv_active_tree.insert("", "end", values=(
+                        t.get("Trade_ID", ""),
+                        t.get("Trade_Mode", "Shadow"),
+                        t.get("Underlying_Symbol", ""),
+                        t.get("Expiry", exp),
+                        t.get("Strike", ""),
+                        t.get("Option_Type", ""),
+                        t.get("BUY/SELL", ""),
+                        f"{ep:.2f}",
+                        f"{float(t.get('Stop_Loss', 0)):.2f}",
+                        f"{ll_act:.2f}" if ll_act > 0 else "-",
+                        f"{hh_act:.2f}" if hh_act > 0 else "-",
+                        f"{float(t.get('Target_1', 0)):.2f}",
+                        f"{float(t.get('Target_2', 0)):.2f}",
+                        f"{curr_px:.2f}",
+                        f"{pts:+.2f}",
+                        f"₹{gross:+.2f}",
+                        t.get("Setup_Type", ""),
+                        t.get("Entry_Reason", ""),
+                        t.get("Status", "ACTIVE")
+                    ), tags=(tag,))
+
+            # Update Closed Tree
+            if hasattr(self, "adv_closed_tree") and self.adv_closed_tree.winfo_exists():
+                for itm in self.adv_closed_tree.get_children():
+                    self.adv_closed_tree.delete(itm)
+                for c in reversed(closed[-30:]):
+                    tag = "win" if float(c.get("Points", 0)) >= 0 else "loss"
+                    ll_cls = float(c.get('Liquidity_LL', 0) or 0)
+                    hh_cls = float(c.get('Liquidity_HH', 0) or 0)
+                    self.adv_closed_tree.insert("", "end", values=(
+                        c.get("Date", ""),
+                        c.get("Entry_Time", ""),
+                        c.get("Exit_Time", ""),
+                        c.get("Trade_ID", ""),
+                        c.get("Trade_Mode", "Shadow"),
+                        c.get("Underlying_Symbol", ""),
+                        c.get("Expiry", ""),
+                        c.get("Strike", ""),
+                        c.get("Option_Type", ""),
+                        c.get("BUY/SELL", ""),
+                        f"{float(c.get('Entry_Price', 0)):.2f}",
+                        f"{float(c.get('Exit_Price', 0)):.2f}",
+                        f"{ll_cls:.2f}" if ll_cls > 0 else "-",
+                        f"{hh_cls:.2f}" if hh_cls > 0 else "-",
+                        f"{float(c.get('Points', 0)):+.2f}",
+                        f"₹{float(c.get('Gross_PnL', 0)):+.2f}",
+                        f"₹{float(c.get('Charges', 0)):.2f}",
+                        f"₹{float(c.get('Net_PnL', 0)):+.2f}",
+                        c.get("Entry_Reason", ""),
+                        c.get("Exit_Reason", ""),
+                        c.get("Status", "CLOSED")
+                    ), tags=(tag,))
+
+            # Update Rejections Tree
+            if hasattr(self, "adv_rej_tree") and self.adv_rej_tree.winfo_exists():
+                for itm in self.adv_rej_tree.get_children():
+                    self.adv_rej_tree.delete(itm)
+                rejs = self.advanced_engine.get_rejections(40)
+                for r in reversed(rejs[-40:]):
+                    self.adv_rej_tree.insert("", "end", values=(
+                        r.get("Timestamp", ""),
+                        r.get("Symbol", ""),
+                        r.get("Strike", ""),
+                        r.get("Option_Type", ""),
+                        r.get("Action", ""),
+                        r.get("Setup_Type", ""),
+                        f"{float(r.get('LTP', 0)):.2f}",
+                        r.get("Rejection_Reason", ""),
+                        r.get("Filter_Details", "")
+                    ))
+
+            # Update Plan Tree
+            self._populate_advance_plan_tree()
+
+        except Exception as _e:
+            pass
+
+    def _populate_advance_plan_tree(self):
+        if not hasattr(self, "adv_plan_tree") or not self.adv_plan_tree.winfo_exists():
+            return
+        plan = self.advanced_engine.get_next_day_plan()
+        if not plan or not plan.get("setups"):
+            sym = self.symbol_var.get()
+            exp = self.expiry_var.get()
+            plan = self.advanced_engine.build_next_day_plan(
+                symbol=sym,
+                expiry=exp,
+                mtf_pivots=getattr(feed, "mtf_pivots", None),
+                daily_focus=getattr(feed, "daily_focus", None)
+            )
+
+        setups = plan.get("setups", [])
+        mode = self.adv_plan_filter_var.get()
+        only_qual = self.adv_only_qualified_var.get()
+
+        for itm in self.adv_plan_tree.get_children():
+            self.adv_plan_tree.delete(itm)
+
+        shown = 0
+        for s in setups:
+            fg = s.get("focus_group", "")
+            if mode == "15M" and "15M" not in fg:
+                continue
+            if mode == "1H" and "1H" not in fg:
+                continue
+            if mode == "BOTH" and not ("15M" in fg and "1H" in fg):
+                continue
+            if mode == "DAILY" and "Daily" not in fg:
+                continue
+
+            adv_st = s.get("advance_status", "")
+            if only_qual and adv_st != "QUALIFIED":
+                continue
+
+            tag = "qual" if adv_st == "QUALIFIED" else "rej"
+            ot = s.get("type", "CE")
+            stk_num = int(float(s.get("strike", 0)))
+            exp = (self.expiry_var.get() or "").strip()
+            ltp_v = feed.get_strike_ltp(ot, stk_num, exp) if 'feed' in globals() and hasattr(feed, "get_strike_ltp") else 0.0
+            if ltp_v <= 0:
+                ltp_v = float(s.get("ltp", 0) or 0)
+            if ltp_v <= 0:
+                piv_obj = s.get("pivots", {})
+                ltp_v = float(piv_obj.get("prev_c", 0) or piv_obj.get("close", 0) or 0)
+            ltp_str = f"{ltp_v:.2f}" if ltp_v > 0 else "-"
+            piv = s.get("pivots", {})
+            ll_p = float(s.get('ll_price', 0) or 0)
+            hh_p = float(s.get('hh_price', 0) or 0)
+            ll_p_str = f"{ll_p:.2f}" if ll_p > 0 else "-"
+            hh_p_str = f"{hh_p:.2f}" if hh_p > 0 else "-"
+            s_exp = str(s.get("expiry") or exp or "")
+            self.adv_plan_tree.insert("", "end", values=(
+                fg,
+                s.get("setup", ""),
+                ot,
+                s.get("strike", 0),
+                s_exp,
+                ltp_str,
+                f"{float(s.get('planned_ep', 0)):.2f}",
+                f"{float(s.get('sl', 0)):.2f}",
+                ll_p_str,
+                hh_p_str,
+                f"{float(s.get('target_1', 0)):.2f}",
+                f"{float(s.get('target_2', 0)):.2f}",
+                f"{float(s.get('target_3', 0)):.2f}",
+                f"{float(s.get('target_4', 0)):.2f}",
+                s.get("rr", "-"),
+                s.get("context_result", ""),
+                s.get("retest_status", ""),
+                adv_st,
+                s.get("entry_reason", ""),
+                f"{float(piv.get('S3', 0)):.2f}",
+                f"{float(piv.get('S2', 0)):.2f}",
+                f"{float(piv.get('S1', 0)):.2f}",
+                f"{float(piv.get('P', 0)):.2f}",
+                f"{float(piv.get('R1', 0)):.2f}",
+                f"{float(piv.get('R2', 0)):.2f}",
+                f"{float(piv.get('R3', 0)):.2f}"
+            ), tags=(tag,))
+            shown += 1
+
+        if hasattr(self, "adv_plan_info_lbl"):
+            self.adv_plan_info_lbl.config(
+                text=f"Session: {plan.get('target_session_date', '')} | Showing {shown}/{len(setups)} setups ({plan.get('qualified_count', 0)} qualified)"
+            )
+
+    def _on_map_advance_levels_click(self):
+        sym = self.symbol_var.get()
+        exp = self.expiry_var.get()
+        self._set_status(f"Mapping Advance Strategy Next-Day Levels for {sym}...", "#58a6ff")
+        def _job():
+            mapped = feed.fetch_and_map_all_strikes(sym, exp, force_fetch=True)
+            plan = self.advanced_engine.build_next_day_plan(
+                symbol=sym,
+                expiry=exp,
+                strikes_dict=mapped,
+                mtf_pivots=feed.mtf_pivots,
+                daily_focus=feed.daily_focus
+            )
+            qual = plan.get("qualified_count", 0)
+            total = plan.get("setups_count", 0)
+            self.root.after(0, lambda: self._set_status(f"✅ Auto-mapped Advance Next-Day Levels for {sym}: {qual}/{total} qualified setups", "#3fb950"))
+            self.root.after(0, self._refresh_advance_display)
+        threading.Thread(target=_job, daemon=True).start()
 
     def _on_exchange_change(self):
         exch=self.exchange_var.get()
@@ -6918,9 +7803,18 @@ class ControlPanel:
         self._set_status(f"Mapping strike Fibonacci pivots for {sym} ({exp})...", "#58a6ff")
         def _run_map():
             mapped = feed.fetch_and_map_all_strikes(sym, exp, force_fetch=True)
+            adv_plan = self.advanced_engine.build_next_day_plan(
+                symbol=sym,
+                expiry=exp,
+                strikes_dict=mapped,
+                mtf_pivots=feed.mtf_pivots,
+                daily_focus=feed.daily_focus
+            )
             if mapped:
-                self.root.after(0, lambda: self._set_status(f"✅ Mapped {len(mapped)} strikes for {sym} — 100% TradingView Aligned", "#3fb950"))
+                qual_cnt = adv_plan.get("qualified_count", 0)
+                self.root.after(0, lambda: self._set_status(f"✅ Mapped {len(mapped)} strikes for {sym} | Advance Strategy Plan: {qual_cnt} qualified setups", "#3fb950"))
                 self.root.after(0, self._refresh_display)
+                self.root.after(0, self._refresh_advance_display)
             else:
                 self.root.after(0, lambda: self._set_status("⚠️ Strike mapping completed from local cache", "#ffd700"))
         threading.Thread(target=_run_map, daemon=True).start()
@@ -6991,17 +7885,17 @@ class ControlPanel:
         tree_f.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
         cols = (
-            "Focus Group", "Action / Setup", "Type", "Strike",
-            "Planned Entry", "Planned SL", "T1", "T2 (Pivot P)", "T3", "T4", "R:R",
+            "Focus Group", "Action / Setup", "Type", "Strike", "Expiry", "LTP",
+            "Planned Entry", "Planned SL", "LL Price", "HH Price", "T1", "T2 (Pivot P)", "T3", "T4", "R:R",
             "S3", "S2", "S1", "P", "R1", "R2", "R3"
         )
         tw = ttk.Treeview(tree_f, columns=cols, show="headings", height=18)
         col_w = {
-            "Focus Group": 110, "Action / Setup": 140, "Type": 45, "Strike": 60,
-            "Planned Entry": 85, "Planned SL": 75, "T1": 60, "T2 (Pivot P)": 80,
-            "T3": 60, "T4": 60, "R:R": 55,
-            "S3": 55, "S2": 55, "S1": 55, "P": 55,
-            "R1": 55, "R2": 55, "R3": 55
+            "Focus Group": 110, "Action / Setup": 140, "Type": 45, "Strike": 60, "Expiry": 75, "LTP": 65,
+            "Planned Entry": 80, "Planned SL": 70, "LL Price": 65, "HH Price": 65, "T1": 55, "T2 (Pivot P)": 75,
+            "T3": 55, "T4": 55, "R:R": 55,
+            "S3": 50, "S2": 50, "S1": 50, "P": 50,
+            "R1": 50, "R2": 50, "R3": 50
         }
         for c in cols:
             tw.heading(c, text=c)
@@ -7031,7 +7925,52 @@ class ControlPanel:
                         return s_info
                 return None
 
+            def _get_ltp_str(opt_t, strike_val):
+                try:
+                    s_int = int(float(strike_val))
+                    v = feed.get_strike_ltp(opt_t, s_int, exp) if 'feed' in globals() and hasattr(feed, "get_strike_ltp") else 0.0
+                    if v <= 0:
+                        s_data = get_strike_data(opt_t, s_int)
+                        if s_data:
+                            v = float(s_data.get("prev_c", 0) or s_data.get("close", 0) or s_data.get("P", 0) or 0)
+                    return f"{v:.2f}" if v > 0 else "-"
+                except Exception:
+                    return "-"
+
             rows_to_display = []
+
+            # Advance Strategy Qualified Setups
+            if mode == "ADVANCE":
+                adv_p = self.advanced_engine.get_next_day_plan()
+                if not adv_p or not adv_p.get("setups"):
+                    adv_p = self.advanced_engine.build_next_day_plan(sym, exp, strikes_dict=strikes_dict, mtf_pivots=mtf_all, daily_focus=focus)
+                for stp in adv_p.get("setups", []):
+                    ot = stp.get("type", "CE")
+                    tag = "ce" if ot == "CE" else "pe"
+                    stk = stp.get("strike", 0)
+                    fg = stp.get("focus_group", "Advance")
+                    setup_lbl = stp.get("setup", "")
+                    s_exp = str(stp.get("expiry") or exp or "")
+                    ep_v = float(stp.get("planned_ep") or 0.0)
+                    sl_v = float(stp.get("sl") or 0.0)
+                    ll_v = float(stp.get("ll_price", 0) or 0.0)
+                    hh_v = float(stp.get("hh_price", 0) or 0.0)
+                    ll_str = f"{ll_v:.2f}" if ll_v > 0 else "-"
+                    hh_str = f"{hh_v:.2f}" if hh_v > 0 else "-"
+                    t1_v = float(stp.get("target_1") or 0.0)
+                    t2_v = float(stp.get("target_2") or 0.0)
+                    t3_v = float(stp.get("target_3") or 0.0)
+                    t4_v = float(stp.get("target_4") or 0.0)
+                    rr_v = str(stp.get("rr", "-"))
+                    piv = stp.get("pivots", {})
+                    s3 = piv.get("S3", 0.0); s2 = piv.get("S2", 0.0); s1 = piv.get("S1", 0.0)
+                    p = piv.get("P", 0.0); r1 = piv.get("R1", 0.0); r2 = piv.get("R2", 0.0); r3 = piv.get("R3", 0.0)
+                    tw.insert("", "end", values=(
+                        fg, setup_lbl, ot, stk, s_exp, _get_ltp_str(ot, stk),
+                        f"{ep_v:.2f}", f"{sl_v:.2f}", ll_str, hh_str, f"{t1_v:.2f}", f"{t2_v:.2f}", f"{t3_v:.2f}", f"{t4_v:.2f}", rr_v,
+                        f"{s3:.2f}", f"{s2:.2f}", f"{s1:.2f}", f"{p:.2f}", f"{r1:.2f}", f"{r2:.2f}", f"{r3:.2f}"
+                    ), tags=(tag,))
+                return
 
             # Next-Day Plan Setups
             if mode == "PLAN" and nd_plan and nd_plan.get("setups"):
@@ -7041,8 +7980,13 @@ class ControlPanel:
                     stk = stp.get("strike", 0)
                     fg = f"Plan ({stp.get('timeframe', 'Intraday')})"
                     setup_lbl = stp.get("setup") or f"{stp.get('side')} ({stp.get('calculated_level', '')})"
+                    s_exp = str(stp.get("expiry") or exp or "")
                     ep_v = float(stp.get("planned_ep") or stp.get("entry_price") or 0.0)
                     sl_v = float(stp.get("sl") or 0.0)
+                    ll_v = sl_v if stp.get("side") == "BUY" else 0.0
+                    hh_v = sl_v if stp.get("side") == "SELL" else 0.0
+                    ll_str = f"{ll_v:.2f}" if ll_v > 0 else "-"
+                    hh_str = f"{hh_v:.2f}" if hh_v > 0 else "-"
                     t1_v = float(stp.get("target_1") or 0.0)
                     t2_v = float(stp.get("target_2") or 0.0)
                     t3_v = float(stp.get("target_3") or 0.0)
@@ -7053,14 +7997,14 @@ class ControlPanel:
                         s3 = sd.get("S3", 0); s2 = sd.get("S2", 0); s1 = sd.get("S1", 0)
                         p = sd.get("P", 0); r1 = sd.get("R1", 0); r2 = sd.get("R2", 0); r3 = sd.get("R3", 0)
                         tw.insert("", "end", values=(
-                            fg, setup_lbl, ot, stk,
-                            f"{ep_v:.2f}", f"{sl_v:.2f}", f"{t1_v:.2f}", f"{t2_v:.2f}", f"{t3_v:.2f}", f"{t4_v:.2f}", rr_v,
+                            fg, setup_lbl, ot, stk, s_exp, _get_ltp_str(ot, stk),
+                            f"{ep_v:.2f}", f"{sl_v:.2f}", ll_str, hh_str, f"{t1_v:.2f}", f"{t2_v:.2f}", f"{t3_v:.2f}", f"{t4_v:.2f}", rr_v,
                             f"{s3:.2f}", f"{s2:.2f}", f"{s1:.2f}", f"{p:.2f}", f"{r1:.2f}", f"{r2:.2f}", f"{r3:.2f}"
                         ), tags=(tag,))
                     else:
                         tw.insert("", "end", values=(
-                            fg, setup_lbl, ot, stk,
-                            f"{ep_v:.2f}", f"{sl_v:.2f}", f"{t1_v:.2f}", f"{t2_v:.2f}", f"{t3_v:.2f}", f"{t4_v:.2f}", rr_v,
+                            fg, setup_lbl, ot, stk, s_exp, _get_ltp_str(ot, stk),
+                            f"{ep_v:.2f}", f"{sl_v:.2f}", ll_str, hh_str, f"{t1_v:.2f}", f"{t2_v:.2f}", f"{t3_v:.2f}", f"{t4_v:.2f}", rr_v,
                             "-", "-", "-", "-", "-", "-", "-"
                         ), tags=(tag,))
                 return
@@ -7137,7 +8081,7 @@ class ControlPanel:
                     t1_b, t2_b, t3_b, t4_b = s1, p, r1, r2
                     rr_b = f"{((t2_b - entry_b) / max(entry_b - sl_b, 0.5)):.1f}:1" if entry_b > sl_b else "-"
                     tw.insert("", "end", values=(
-                        fg, "★ BUY (S2 Reclaim)", ot, stk,
+                        fg, "★ BUY (S2 Reclaim)", ot, stk, _get_ltp_str(ot, stk),
                         f"{entry_b:.2f}", f"{sl_b:.2f}", f"{t1_b:.2f}", f"{t2_b:.2f}", f"{t3_b:.2f}", f"{t4_b:.2f}", rr_b,
                         f"{s3:.2f}", f"{s2:.2f}", f"{s1:.2f}", f"{p:.2f}", f"{r1:.2f}", f"{r2:.2f}", f"{r3:.2f}"
                     ), tags=(tag,))
@@ -7148,7 +8092,7 @@ class ControlPanel:
                     t1_s, t2_s, t3_s, t4_s = r1, p, s1, s2
                     rr_s = f"{((entry_s - t2_s) / max(sl_s - entry_s, 0.5)):.1f}:1" if sl_s > entry_s else "-"
                     tw.insert("", "end", values=(
-                        fg, "▼ SELL (R2 Reject)", ot, stk,
+                        fg, "▼ SELL (R2 Reject)", ot, stk, _get_ltp_str(ot, stk),
                         f"{entry_s:.2f}", f"{sl_s:.2f}", f"{t1_s:.2f}", f"{t2_s:.2f}", f"{t3_s:.2f}", f"{t4_s:.2f}", rr_s,
                         f"{s3:.2f}", f"{s2:.2f}", f"{s1:.2f}", f"{p:.2f}", f"{r1:.2f}", f"{r2:.2f}", f"{r3:.2f}"
                     ), tags=(tag,))
@@ -7186,6 +8130,7 @@ class ControlPanel:
                         role,
                         ot,
                         stk,
+                        _get_ltp_str(ot, stk),
                         f"{entry:.2f}",
                         f"{sl:.2f}",
                         f"{t1:.2f}",
@@ -7203,7 +8148,7 @@ class ControlPanel:
                     ), tags=(tag,))
                 else:
                     tw.insert("", "end", values=(
-                        grp, role, ot, stk,
+                        grp, role, ot, stk, _get_ltp_str(ot, stk),
                         "-", "-", "-", "-", "-", "-", "-",
                         "-", "-", "-", "-", "-", "-", "-"
                     ), tags=(tag,))
@@ -7211,6 +8156,7 @@ class ControlPanel:
         # Pack radio buttons and checkboxes
         for val, txt in [
             ("PLAN", "📋 Next-Day Plan Setups"),
+            ("ADVANCE", "🛡️ Advance Strategy Plan"),
             ("15M", "⭐ 15M Intraday (2 CE + 2 PE)"),
             ("1H", "⏳ 1H Structure (2 CE + 2 PE)"),
             ("BOTH", "🎯 Both 15M & 1H Focus"),
@@ -7503,8 +8449,7 @@ class ControlPanel:
                 try:
                     with open(cache_file, "r") as cf:
                         _cj = json.load(cf)
-                        _ok = _cj.get("basis_key") == f"{pivot_session_date().isoformat()}:session"
-                        self._cached_strikes = _cj.get("strikes", {}) if _ok else {}
+                        self._cached_strikes = _cj.get("strikes", {})
                         self._cached_nearest_exp = _cj.get("expiry", "")
                 except Exception:
                     self._cached_strikes = getattr(self, "_cached_strikes", {})
@@ -7514,8 +8459,14 @@ class ControlPanel:
             self._cache_by_type_strike = {}
             for _tok, _si in self._cached_strikes.items():
                 _exp = _si.get("expiry", "-")
+                try:
+                    _stk_i = int(float(_si.get("strike", 0)))
+                except (ValueError, TypeError):
+                    _stk_i = _si.get("strike")
+                self._cache_by_key[(_si.get("opt_type"), _stk_i, _exp)] = _si
                 self._cache_by_key[(_si.get("opt_type"), _si.get("strike"), _exp)] = _si
                 if _exp == getattr(self, "_cached_nearest_exp", _exp):   # short key = nearest expiry only
+                    self._cache_by_type_strike[(_si.get("opt_type"), _stk_i)] = _si
                     self._cache_by_type_strike[(_si.get("opt_type"), _si.get("strike"))] = _si
 
         cached_strikes = getattr(self, "_cached_strikes", {})
@@ -7523,14 +8474,24 @@ class ControlPanel:
         _cache_by_ts   = getattr(self, "_cache_by_type_strike", {})
 
         def _live_ltp(ot, stk, exp=None):
-            v = feed.get_strike_ltp(ot, stk)
+            try:
+                stk_int = int(float(stk))
+            except (ValueError, TypeError):
+                stk_int = stk
+            v = feed.get_strike_ltp(ot, stk_int, exp)
             if v > 0:
                 return v
             if exp:
-                ci = _cache_by_key.get((ot, stk, exp))
+                ci = _cache_by_key.get((ot, stk_int, exp)) or _cache_by_key.get((ot, stk, exp))
                 if ci:
-                    return float(ci.get("prev_c", 0) or 0)
-            return float((_cache_by_ts.get((ot, stk)) or {}).get("prev_c", 0) or 0)
+                    val = float(ci.get("prev_c", 0) or ci.get("close", 0) or 0)
+                    if val > 0:
+                        return val
+            ci_ts = _cache_by_ts.get((ot, stk_int)) or _cache_by_ts.get((ot, stk)) or {}
+            val = float(ci_ts.get("prev_c", 0) or ci_ts.get("close", 0) or 0)
+            if val > 0:
+                return val
+            return 0.0
 
         # ── Reversal pairing per timeframe ──
         #   CE on support (CE LTP <= its P) -> BUY CE @S2  + SELL PE @R2
@@ -7613,10 +8574,21 @@ class ControlPanel:
                 strike_tag = "[⭐15M & ⏳1H]" if (is_15m and is_1h) else ("[⭐15M Focus]" if is_15m else ("[⏳1H Focus]" if is_1h else ("[📌Nearby Pivot]" if is_nearby else "")))
                 if (ot, stk, tgt_exp) not in existing_keys:
                     # Levels of this exact contract only (never another expiry's, never estimated)
-                    s_info = feed.strike_pivots.get((ot, stk, tgt_exp)) or _cache_by_key.get((ot, stk, tgt_exp))
+                    try:
+                        stk_int = int(float(stk))
+                    except (ValueError, TypeError):
+                        stk_int = stk
+                    s_info = (feed.strike_pivots.get((ot, stk_int, tgt_exp))
+                              or feed.strike_pivots.get((ot, stk, tgt_exp))
+                              or _cache_by_key.get((ot, stk_int, tgt_exp))
+                              or _cache_by_key.get((ot, stk, tgt_exp))
+                              or feed.strike_pivots.get((ot, stk_int))
+                              or _cache_by_ts.get((ot, stk_int)))
                     if s_info:
                         exp_val = tgt_exp
-                        ltp_val = _live_ltp(ot, stk, exp_val)
+                        ltp_val = _live_ltp(ot, stk_int, exp_val)
+                        if ltp_val <= 0:
+                            ltp_val = float(s_info.get("prev_c", 0.0) or s_info.get("close", 0.0) or 0.0)
                         s3_val = s_info.get("S3", 0.0)
                         s2_val = s_info.get("S2", 0.0)
                         s1_val = s_info.get("S1", 0.0)
@@ -7993,6 +8965,16 @@ class ControlPanel:
                 parts.append(f"{exp_k} ➜ CE MaxOI@{mc_s}({mc_f}) | PE MaxOI@{mp_s}({mp_f})")
             self.max_oi_info.set("  ||  ".join(parts) if parts else "")
 
+        # ── Advance Strategy Tab Live Refresh ──
+        try:
+            if hasattr(self, "tab_btn_advance") and self.tab_btn_advance.winfo_exists():
+                act_cnt = len(self.advanced_engine.get_active_trades())
+                self.tab_btn_advance.config(text=f"🛡️ ADVANCE VERSION ({act_cnt} Active)")
+            if getattr(self, "main_tab_var", None) and self.main_tab_var.get() == "ADVANCE":
+                self._refresh_advance_display()
+        except Exception:
+            pass
+
         # ── 3:00 PM Square-off & 3:45 PM Next-Day Level Calculation ──
         _now_eod = datetime.now()
         _is_weekday = _now_eod.weekday() < 5
@@ -8003,6 +8985,10 @@ class ControlPanel:
             self._ui_eod_sq_done = _eod_date
             try:
                 _sq = feed.forward_tracker.eod_square_off("EOD 3PM Square-off @ CMP")
+                try:
+                    feed.advanced_engine.eod_square_off("EOD 3PM Square-off @ CMP")
+                except Exception:
+                    pass
                 if _sq:
                     self._set_status(f"⏰ 3:00 PM Square-off: {len(_sq)} trade(s) closed at CMP", "#ffd700")
                     feed.sync_forward_test_to_sheet()
@@ -8198,7 +9184,12 @@ class ControlPanel:
                 messagebox.showinfo("Auto-trading is ON", "Turn auto-trading off before changing broker.", parent=w)
                 return
             save_keys(); msg_var.set("Connecting…")
-            run_bg(lambda: eng.connect(brk_var.get()), lambda ok, m: msg_var.set(("✅ " if ok else "❌ ") + m))
+            def on_connected(ok, m):
+                msg_var.set(("✅ " if ok else "❌ ") + m)
+                if eng.broker_name and brk_var.get() != eng.broker_name:
+                    brk_var.set(eng.broker_name)
+                    draw_keys()
+            run_bg(lambda: eng.connect(brk_var.get()), on_connected)
 
         btns = tk.Frame(tb, bg="#0d1117"); btns.pack(fill="x", padx=10, pady=4)
         DarkButton(btns, text="Test connection", command=test, bg="#1f6feb", padx=12, pady=4).pack(side="left")

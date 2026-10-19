@@ -179,6 +179,7 @@
       if (targetPane) targetPane.classList.add('active');
       if (tabId === 'tab-planner') loadPlannerDeck(state.symbol);
       if (tabId === 'tab-other-symbols' && !state.otherData) calculateOtherSymbols();
+      if (tabId === 'tab-advanced-strategy') loadAdvancedStrategy();
     });
   });
 
@@ -277,6 +278,14 @@
       }
       updateOptionChainTable(state.lastWatchItems, state.lastMaxOi);
       updateForwardTestTables(data.active_trades || [], data.closed_trades || []);
+      if (data.advanced_strategy || data.advanced_active_trades || data.advanced_closed_trades) {
+        updateAdvancedStrategyTables(
+          data.advanced_strategy || {},
+          data.advanced_active_trades || [],
+          data.advanced_closed_trades || [],
+          data.advanced_rejections || []
+        );
+      }
     } else if (data.type === 'TRADE_ALERT') {
       playAlertSound();
       showToast(data.message, 'gold');
@@ -1291,6 +1300,167 @@
         els.btnStopFeed.disabled = false;
       }
     });
+  }
+
+  // ── Advanced Version Strategy Loader & Renderer ──
+  async function loadAdvancedStrategy() {
+    try {
+      const res = await fetch('/api/advanced-strategy/trades');
+      if (!res.ok) return;
+      const data = await res.json();
+      const rejRes = await fetch('/api/advanced-strategy/rejections');
+      const rejData = rejRes.ok ? await rejRes.json() : { rejections: [] };
+      updateAdvancedStrategyTables(
+        data.summary || {},
+        data.active || [],
+        data.closed || [],
+        rejData.rejections || []
+      );
+    } catch (e) {
+      console.warn('Advanced strategy load error:', e);
+    }
+  }
+
+  function updateAdvancedStrategyTables(summary, active, closed, rejections) {
+    const totalEl = document.getElementById('adv-stat-total');
+    const activeEl = document.getElementById('adv-stat-active');
+    const winrateEl = document.getElementById('adv-stat-winrate');
+    const pointsEl = document.getElementById('adv-stat-points');
+    const grossEl = document.getElementById('adv-stat-gross');
+    const chargesEl = document.getElementById('adv-stat-charges');
+    const netEl = document.getElementById('adv-stat-net');
+    const rejEl = document.getElementById('adv-stat-rejections');
+    const advCountBadge = document.getElementById('tab-adv-count');
+    const advActiveBadge = document.getElementById('adv-active-badge');
+    const advClosedBadge = document.getElementById('adv-closed-badge');
+    const advRejBadge = document.getElementById('adv-rejections-badge');
+
+    if (totalEl) totalEl.textContent = summary.total_trades || ((closed ? closed.length : 0) + (active ? active.length : 0));
+    if (activeEl) activeEl.textContent = active ? active.length : 0;
+    if (advCountBadge) advCountBadge.textContent = active ? active.length : 0;
+    if (advActiveBadge) advActiveBadge.textContent = active ? active.length : 0;
+    if (advClosedBadge) advClosedBadge.textContent = closed ? closed.length : 0;
+    if (advRejBadge) advRejBadge.textContent = (rejections && rejections.length) || summary.rejections_count || 0;
+
+    const winRate = Number(summary.win_rate || 0);
+    if (winrateEl) winrateEl.textContent = `${winRate.toFixed(1)}% (${summary.wins || 0}W / ${summary.losses || 0}L)`;
+
+    const pts = Number(summary.total_points || 0);
+    if (pointsEl) {
+      pointsEl.textContent = `${pts >= 0 ? '+' : ''}${pts.toFixed(2)}`;
+      pointsEl.style.color = pts >= 0 ? '#00e676' : '#ff5252';
+    }
+
+    const gross = Number(summary.total_gross_pnl || 0);
+    if (grossEl) {
+      grossEl.textContent = `₹${gross >= 0 ? '+' : ''}${gross.toFixed(2)}`;
+      grossEl.style.color = gross >= 0 ? '#00e676' : '#ff5252';
+    }
+
+    const charges = Number(summary.total_charges || 0);
+    if (chargesEl) chargesEl.textContent = `₹${charges.toFixed(2)}`;
+
+    const net = Number(summary.total_net_pnl || 0);
+    if (netEl) {
+      netEl.textContent = `₹${net >= 0 ? '+' : ''}${net.toFixed(2)}`;
+      netEl.style.color = net >= 0 ? '#00e676' : '#ff5252';
+    }
+
+    if (rejEl) rejEl.textContent = (rejections && rejections.length) || summary.rejections_count || 0;
+
+    // 2. Active Positions Table
+    const tbodyActive = document.getElementById('tbody-adv-active');
+    if (tbodyActive) {
+      if (!active || active.length === 0) {
+        tbodyActive.innerHTML = '<tr><td colspan="14" class="empty-state">No active trades in Advanced Strategy currently.</td></tr>';
+      } else {
+        tbodyActive.innerHTML = active.map(t => {
+          const pts = Number(t.Points || 0);
+          const ptsClass = pts >= 0 ? 'text-green' : 'text-red';
+          const gross = Number(t.Gross_PnL || 0);
+          const grossClass = gross >= 0 ? 'text-green' : 'text-red';
+          return `
+            <tr class="${t['BUY/SELL'] === 'BUY' ? 'buy-row' : 'sell-row'}">
+              <td class="font-mono text-cyan" style="font-size:11px;">${t.Trade_ID || ''}</td>
+              <td><span class="badge ${t.Trade_Mode === 'Actual' ? 'badge-both' : 'badge-silver'}">${t.Trade_Mode || 'Shadow'}</span></td>
+              <td><strong>${t.Underlying_Symbol || ''}</strong></td>
+              <td><strong class="font-mono">${t.Strike || ''}</strong></td>
+              <td><strong class="${t.Option_Type === 'CE' ? 'text-green' : 'text-gold'}">${t.Option_Type || ''}</strong></td>
+              <td><strong class="${t['BUY/SELL'] === 'BUY' ? 'text-green' : 'text-red'}">${t['BUY/SELL'] || ''}</strong></td>
+              <td>${Number(t.Entry_Price || 0).toFixed(2)}</td>
+              <td>${Number(t.Stop_Loss || 0).toFixed(2)}</td>
+              <td>${Number(t.Target_1 || 0).toFixed(2)}</td>
+              <td><strong class="text-cyan font-mono">${Number(t.Current_Price || t.Entry_Price || 0).toFixed(2)}</strong></td>
+              <td class="${ptsClass}"><strong>${pts >= 0 ? '+' : ''}${pts.toFixed(2)}</strong></td>
+              <td class="${grossClass}">₹${gross.toFixed(2)}</td>
+              <td><span class="badge badge-15m">${t.Setup_Type || ''}</span></td>
+              <td><span class="badge badge-gold">ACTIVE</span></td>
+            </tr>
+          `;
+        }).join('');
+      }
+    }
+
+    // 3. Closed Trades Table
+    const tbodyClosed = document.getElementById('tbody-adv-closed');
+    if (tbodyClosed) {
+      if (!closed || closed.length === 0) {
+        tbodyClosed.innerHTML = '<tr><td colspan="17" class="empty-state">No closed trades in Advanced Strategy yet.</td></tr>';
+      } else {
+        tbodyClosed.innerHTML = closed.map(r => {
+          const pts = Number(r.Points || 0);
+          const gross = Number(r.Gross_PnL || 0);
+          const net = Number(r.Net_PnL || 0);
+          const ptsClass = pts >= 0 ? 'text-green' : 'text-red';
+          const netClass = net >= 0 ? 'text-green' : 'text-red';
+          return `
+            <tr class="${r['BUY/SELL'] === 'BUY' ? 'buy-row' : 'sell-row'}">
+              <td>${r.Date || ''}</td>
+              <td>${r.Entry_Time || ''}</td>
+              <td>${r.Exit_Time || ''}</td>
+              <td class="font-mono text-cyan" style="font-size:11px;">${r.Trade_ID || ''}</td>
+              <td><span class="badge ${r.Trade_Mode === 'Actual' ? 'badge-both' : 'badge-silver'}">${r.Trade_Mode || 'Shadow'}</span></td>
+              <td><strong>${r.Underlying_Symbol || ''}</strong></td>
+              <td><strong class="font-mono">${r.Strike || ''}</strong></td>
+              <td><strong class="${r.Option_Type === 'CE' ? 'text-green' : 'text-gold'}">${r.Option_Type || ''}</strong></td>
+              <td><strong class="${r['BUY/SELL'] === 'BUY' ? 'text-green' : 'text-red'}">${r['BUY/SELL'] || ''}</strong></td>
+              <td>${Number(r.Entry_Price || 0).toFixed(2)}</td>
+              <td>${Number(r.Exit_Price || 0).toFixed(2)}</td>
+              <td class="${ptsClass}"><strong>${pts >= 0 ? '+' : ''}${pts.toFixed(2)}</strong></td>
+              <td>₹${gross.toFixed(2)}</td>
+              <td>₹${Number(r.Charges || 0).toFixed(2)}</td>
+              <td class="${netClass}"><strong>₹${net.toFixed(2)}</strong></td>
+              <td>${r.Exit_Reason || ''}</td>
+              <td><span class="badge badge-closed">${r.Status || 'CLOSED'}</span></td>
+            </tr>
+          `;
+        }).join('');
+      }
+    }
+
+    // 4. Candidate Evaluations & Rejections Table
+    const tbodyRej = document.getElementById('tbody-adv-rejections');
+    if (tbodyRej) {
+      if (!rejections || rejections.length === 0) {
+        tbodyRej.innerHTML = '<tr><td colspan="9" class="empty-state">No candidate rejections recorded today.</td></tr>';
+      } else {
+        tbodyRej.innerHTML = rejections.slice(-25).reverse().map(e => `
+          <tr>
+            <td>${e.Timestamp || ''}</td>
+            <td><strong>${e.Symbol || ''}</strong></td>
+            <td><strong class="font-mono">${e.Strike || ''}</strong></td>
+            <td><strong class="${e.Option_Type === 'CE' ? 'text-green' : 'text-gold'}">${e.Option_Type || ''}</strong></td>
+            <td><strong class="${e.Action === 'BUY' ? 'text-green' : 'text-red'}">${e.Action || ''}</strong></td>
+            <td><span class="badge badge-15m">${e.Setup_Type || ''}</span></td>
+            <td>${Number(e.LTP || 0).toFixed(2)}</td>
+            <td style="color:#ff5252;"><strong>${e.Rejection_Reason || ''}</strong></td>
+            <td class="font-mono text-silver" style="font-size:10px; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${encodeURIComponent(e.Filter_Details || '')}">
+              ${e.Filter_Details || '-'}
+            </td>
+          </tr>
+        `).join('');
+      }
+    }
   }
 
   // ── Bootstrap ──

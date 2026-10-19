@@ -37,12 +37,56 @@ class DhanAdapter(BrokerAdapter):
 
     def __init__(self, creds, log=print, cache_dir="."):
         super().__init__(creds, log)
+        self.cache_dir = cache_dir
         self.cache_file = os.path.join(cache_dir, "dhan_scrip_cache.csv")
+        self.token_file = os.path.join(cache_dir, ".dhan_token")
         self._index = None          # {(UNDERLYING, 'YYYY-MM-DD', strike, 'CE'): (security_id, lot)}
         self._http = requests.Session()
+        self._load_cached_token()
+
+    def _load_cached_token(self):
+        """Loads valid token from .dhan_token if present and not already set."""
+        if os.path.exists(self.token_file):
+            try:
+                with open(self.token_file, "r") as f:
+                    tok = f.read().strip()
+                if tok:
+                    DhanAdapter._shared_token = tok
+                    self.creds["DHAN_ACCESS_TOKEN"] = tok
+            except Exception:
+                pass
+
+    def _persist_token(self, token: str):
+        """Saves active token to .dhan_token and updates .env so all processes share it."""
+        token = (token or "").strip()
+        if not token:
+            return
+        DhanAdapter._shared_token = token
+        self.creds["DHAN_ACCESS_TOKEN"] = token
+        try:
+            with open(self.token_file, "w") as f:
+                f.write(token)
+        except Exception:
+            pass
+        # Also update .env
+        env_path = os.path.join(self.cache_dir, ".env")
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r") as f:
+                    content = f.read()
+                import re
+                if "DHAN_ACCESS_TOKEN=" in content:
+                    content = re.sub(r"DHAN_ACCESS_TOKEN=.*", f"DHAN_ACCESS_TOKEN={token}", content)
+                else:
+                    content += f"\nDHAN_ACCESS_TOKEN={token}\n"
+                with open(env_path, "w") as f:
+                    f.write(content)
+            except Exception:
+                pass
 
     # ── HTTP ────────────────────────────────────────────────
     def _headers(self):
+        self._load_cached_token()
         if DhanAdapter._shared_token and self.creds.get("DHAN_ACCESS_TOKEN") != DhanAdapter._shared_token:
             self.creds["DHAN_ACCESS_TOKEN"] = DhanAdapter._shared_token
         return {
@@ -52,44 +96,90 @@ class DhanAdapter(BrokerAdapter):
             "Accept": "application/json",
         }
 
-    def _req(self, method, path, body=None):
+    def _req(self, method, path, body=None, retries=3):
         if body is not None:
             body = dict(body, dhanClientId=self.creds.get("DHAN_CLIENT_ID", ""))
-        try:
-            r = self._http.request(method, API + path, json=body, headers=self._headers(), timeout=10)
-        except Exception as e:
-            raise BrokerError(f"Dhan {method} {path} network error: {type(e).__name__}")
-        try:
-            data = r.json() if r.content else {}
-        except Exception:
-            data = {}
-        if not (200 <= r.status_code < 300):
+        for attempt in range(retries):
+            try:
+                r = self._http.request(method, API + path, json=body, headers=self._headers(), timeout=12)
+            except Exception as e:
+                if attempt == retries - 1:
+                    raise BrokerError(f"Dhan {method} {path} network error: {type(e).__name__}")
+                import time
+                time.sleep(1.0)
+                continue
+            try:
+                data = r.json() if r.content else {}
+            except Exception:
+                data = {}
+            if 200 <= r.status_code < 300:
+                return data
             msg = data.get("errorMessage") or data.get("remarks") or r.text[:200]
             code = data.get("errorCode", r.status_code)
-            raise BrokerError(f"Dhan {path} error {code}: {msg}")
-        return data
+            # Throttling handling (DH-904)
+            if "DH-904" in str(code) or "DH-904" in str(msg) or "RATE LIMIT" in str(msg).upper():
+                import time
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            if attempt == retries - 1:
+                raise BrokerError(f"Dhan {path} error {code}: {msg}")
+        return {}
 
     # ── session ─────────────────────────────────────────────
     def _new_token(self):
-        """Fresh access token from client ID + PIN + TOTP, so nobody has to paste a token every day."""
-        import pyotp
-        totp = pyotp.TOTP(str(self.creds["DHAN_TOTP_SECRET"]).strip().upper().replace(" ", "")).now()
-        try:
-            r = requests.post(AUTH_URL, params={"dhanClientId": self.creds["DHAN_CLIENT_ID"],
-                                                "pin": self.creds["DHAN_PIN"], "totp": totp},
-                              headers={"Accept": "application/json"}, timeout=20)
-            d = r.json()
-        except Exception as e:
-            raise BrokerError(f"Dhan login (PIN + TOTP) failed: {type(e).__name__}")
-        tok = d.get("accessToken") or (d.get("data") or {}).get("accessToken")
-        if not tok:
-            raise BrokerError(f"Dhan login (PIN + TOTP) failed: {d.get('message') or d.get('errorMessage') or r.status_code}")
-        self.creds["DHAN_ACCESS_TOKEN"] = tok
-        DhanAdapter._shared_token = tok
+        """Fresh access token from client ID + PIN + TOTP, with file persistence and retry handling."""
+        import pyotp, time
+        # First check if another process generated a token within the last 2 minutes
+        if os.path.exists(self.token_file):
+            try:
+                mtime = os.path.getmtime(self.token_file)
+                if time.time() - mtime < 120:
+                    self._load_cached_token()
+                    try:
+                        self._req("GET", "/fundlimit")
+                        return
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        for attempt in range(4):
+            totp = pyotp.TOTP(str(self.creds["DHAN_TOTP_SECRET"]).strip().upper().replace(" ", "")).now()
+            try:
+                r = requests.post(AUTH_URL, params={"dhanClientId": self.creds["DHAN_CLIENT_ID"],
+                                                    "pin": self.creds["DHAN_PIN"], "totp": totp},
+                                  headers={"Accept": "application/json"}, timeout=20)
+                d = r.json()
+            except Exception as e:
+                if attempt == 3:
+                    raise BrokerError(f"Dhan login (PIN + TOTP) failed: {type(e).__name__}")
+                time.sleep(2)
+                continue
+
+            tok = d.get("accessToken") or (d.get("data") or {}).get("accessToken")
+            if tok:
+                self._persist_token(tok)
+                return
+            msg = d.get("message") or d.get("errorMessage") or str(r.status_code)
+            if "once every 2 minutes" in str(msg):
+                # Another process just generated or rate-limited; wait and reload cached token
+                time.sleep(3)
+                self._load_cached_token()
+                try:
+                    self._req("GET", "/fundlimit")
+                    return
+                except Exception:
+                    pass
+                if attempt < 3:
+                    time.sleep(15)
+                    continue
+            if attempt == 3:
+                raise BrokerError(f"Dhan login (PIN + TOTP) failed: {msg}")
 
     def login(self):
         if not self.creds.get("DHAN_CLIENT_ID"):
             raise BrokerError("Dhan client ID missing")
+        self._load_cached_token()
         can_generate = bool(self.creds.get("DHAN_PIN") and self.creds.get("DHAN_TOTP_SECRET"))
         if not self.creds.get("DHAN_ACCESS_TOKEN") and not can_generate:
             raise BrokerError("Dhan needs either PIN + TOTP secret, or an access token")
@@ -97,7 +187,7 @@ class DhanAdapter(BrokerAdapter):
             if not self.creds.get("DHAN_ACCESS_TOKEN"):
                 raise BrokerError("no token yet")
             self._req("GET", "/fundlimit")      # cheapest call that proves the token works
-        except BrokerError:
+        except BrokerError as be:
             if not can_generate:
                 raise
             self._new_token()                   # saved token missing or expired → log in again
@@ -120,57 +210,80 @@ class DhanAdapter(BrokerAdapter):
                 "expiryCode": 0, "oi": False,
                 "fromDate": (now - timedelta(days=days)).strftime("%Y-%m-%d"),
                 "toDate": (now + timedelta(days=1)).strftime("%Y-%m-%d")}     # toDate is exclusive
-        try:
-            r = self._http.post(API + "/charts/historical", json=body, headers=self._headers(), timeout=15)
-        except Exception as e:
-            raise BrokerError(f"Dhan historical network error: {type(e).__name__}")
-        try:
-            d = r.json() if r.content else {}
-        except Exception:
-            d = {}
-        if not (200 <= r.status_code < 300):
-            raise BrokerError(f"Dhan historical error {d.get('errorCode', r.status_code)}: "
-                              f"{d.get('errorMessage') or d.get('remarks') or r.text[:200]}")
-        ts, o, h, l, c = (d.get(k) or [] for k in ("timestamp", "open", "high", "low", "close"))
-        ist = timezone(timedelta(hours=5, minutes=30))
-        out = []
-        for i in range(min(len(ts), len(o), len(h), len(l), len(c))):
+        import time
+        for attempt in range(3):
             try:
-                day = datetime.fromtimestamp(float(ts[i]), ist).strftime("%Y-%m-%d")
-                out.append((day, float(o[i]), float(h[i]), float(l[i]), float(c[i])))
-            except Exception:
+                r = self._http.post(API + "/charts/historical", json=body, headers=self._headers(), timeout=15)
+            except Exception as e:
+                if attempt == 2:
+                    raise BrokerError(f"Dhan historical network error: {type(e).__name__}")
+                time.sleep(1.0)
                 continue
-        return out
+            try:
+                d = r.json() if r.content else {}
+            except Exception:
+                d = {}
+            if not (200 <= r.status_code < 300):
+                msg = d.get("errorMessage") or d.get("remarks") or r.text[:200]
+                code = d.get("errorCode", r.status_code)
+                if "DH-904" in str(code) or "DH-904" in str(msg):
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise BrokerError(f"Dhan historical error {code}: {msg}")
+            ts, o, h, l, c = (d.get(k) or [] for k in ("timestamp", "open", "high", "low", "close"))
+            ist = timezone(timedelta(hours=5, minutes=30))
+            out = []
+            for i in range(min(len(ts), len(o), len(h), len(l), len(c))):
+                try:
+                    day = datetime.fromtimestamp(float(ts[i]), ist).strftime("%Y-%m-%d")
+                    out.append((day, float(o[i]), float(h[i]), float(l[i]), float(c[i])))
+                except Exception:
+                    continue
+            return out
+        return []
 
     def intraday_bars(self, security_id, day, segment="NSE_FNO", instrument="OPTIDX"):
         """One session's 1-minute candles [(datetime IST, open, high, low, close), ...],
-        09:15-15:29 only, oldest first. Raises BrokerError with Dhan's message on failure."""
+        09:15-15:30 IST trades inclusive, oldest first. Raises BrokerError with Dhan's message on failure."""
+        import time
+        # fromDate must be 09:00:00 because Dhan historical/intraday treats fromDate as exclusive (> fromDate)
+        # using 09:15:00 would drop the crucial 09:15:00 opening candle!
         body = {"securityId": str(security_id), "exchangeSegment": segment, "instrument": instrument,
                 "interval": "1", "oi": False,
-                "fromDate": f"{day} 09:15:00", "toDate": f"{day} 15:31:00"}
-        try:
-            r = self._http.post(API + "/charts/intraday", json=body, headers=self._headers(), timeout=20)
-        except Exception as e:
-            raise BrokerError(f"Dhan intraday network error: {type(e).__name__}")
-        try:
-            d = r.json() if r.content else {}
-        except Exception:
-            d = {}
-        if not (200 <= r.status_code < 300):
-            raise BrokerError(f"Dhan intraday error {d.get('errorCode', r.status_code)}: "
-                              f"{d.get('errorMessage') or d.get('remarks') or r.text[:200]}")
-        ts, o, h, l, c = (d.get(k) or [] for k in ("timestamp", "open", "high", "low", "close"))
-        ist = timezone(timedelta(hours=5, minutes=30))
-        bars = []
-        for i in range(min(len(ts), len(o), len(h), len(l), len(c))):
+                "fromDate": f"{day} 09:00:00", "toDate": f"{day} 15:35:00"}
+        for attempt in range(3):
             try:
-                t = datetime.fromtimestamp(float(ts[i]), ist)
-            except Exception:
+                r = self._http.post(API + "/charts/intraday", json=body, headers=self._headers(), timeout=20)
+            except Exception as e:
+                if attempt == 2:
+                    raise BrokerError(f"Dhan intraday network error: {type(e).__name__}")
+                time.sleep(1.0)
                 continue
-            if t.strftime("%Y-%m-%d") == day and "09:15" <= t.strftime("%H:%M") <= "15:29":
-                bars.append((t, float(o[i]), float(h[i]), float(l[i]), float(c[i])))
-        bars.sort()
-        return bars
+            try:
+                d = r.json() if r.content else {}
+            except Exception:
+                d = {}
+            if not (200 <= r.status_code < 300):
+                msg = d.get("errorMessage") or d.get("remarks") or r.text[:200]
+                code = d.get("errorCode", r.status_code)
+                if "DH-904" in str(code) or "DH-904" in str(msg):
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise BrokerError(f"Dhan intraday error {code}: {msg}")
+            ts, o, h, l, c = (d.get(k) or [] for k in ("timestamp", "open", "high", "low", "close"))
+            ist = timezone(timedelta(hours=5, minutes=30))
+            bars = []
+            for i in range(min(len(ts), len(o), len(h), len(l), len(c))):
+                try:
+                    t = datetime.fromtimestamp(float(ts[i]), ist)
+                except Exception:
+                    continue
+                # Include full trading session 09:15:00 through 15:30:00
+                if t.strftime("%Y-%m-%d") == day and "09:15" <= t.strftime("%H:%M") <= "15:30":
+                    bars.append((t, float(o[i]), float(h[i]), float(l[i]), float(c[i])))
+            bars.sort()
+            return bars
+        return []
 
     def intraday_day_ohlc(self, security_id, day, segment="NSE_FNO", instrument="OPTIDX"):
         """One session's OHLC rebuilt from Dhan's 1-minute candles (09:15-15:30 IST trades only):

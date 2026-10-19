@@ -31,7 +31,7 @@ class AngelAdapter(BrokerAdapter):
         super().__init__(creds, log)
         self._get_obj = creds.get("_session_getter")      # lambda: Session.obj
         self._relogin = creds.get("_session_relogin")     # logs the app in again (new Session.obj)
-        self._relogin_at = 0.0                            # at most one fresh login per 5 minutes
+        self._relogin_at = time.time()                    # at most one fresh login per 5 minutes; initialized to now so startup never double-logs
         self._variety = {}                                # order_id -> NORMAL / STOPLOSS
 
     def _obj(self):

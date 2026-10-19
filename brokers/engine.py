@@ -240,33 +240,76 @@ class OrderEngine:
             creds["_session_relogin"] = self.session_relogin
         return creds
 
-    def connect(self, name=None):
-        """Log in to the chosen broker. Returns (ok, message). Safe to call again."""
-        name = (name or self.settings["broker"]).upper()
-        if name not in ADAPTERS:
-            return False, f"Unknown broker {name}"
+    def has_creds(self, name):
+        """Check if credentials are configured for the specified broker."""
+        name = (name or "").upper()
+        if name == "DHAN":
+            cid = self.env_reader("DHAN_CLIENT_ID")
+            tok = self.env_reader("DHAN_ACCESS_TOKEN")
+            pin = self.env_reader("DHAN_PIN")
+            totp = self.env_reader("DHAN_TOTP_SECRET")
+            token_file = os.path.join(self.base_dir, ".dhan_token")
+            return bool(cid and (tok or (pin and totp) or os.path.exists(token_file)))
+        elif name == "ANGEL":
+            return bool(self.env_reader("ANGEL_CLIENT_ID") or (self.session_getter and self.session_getter()))
+        elif name == "XTS":
+            return bool(self.env_reader("XTS_API_KEY") and self.env_reader("XTS_API_SECRET"))
+        return False
+
+    def connect(self, name=None, allow_fallback=True):
+        """Log in to the chosen broker. If the chosen broker (e.g. Angel) fails,
+        automatically falls back to the secondary broker (e.g. Dhan) if configured.
+        Returns (ok, message). Safe to call again."""
+        target = (name or self.settings.get("broker", "ANGEL")).upper()
+        if target not in ADAPTERS:
+            return False, f"Unknown broker {target}"
         with self._lock:
-            if any(p["state"] in OPEN_STATES and p.get("broker") != name for p in self.positions.values()):
+            if any(p["state"] in OPEN_STATES and p.get("broker") != target for p in self.positions.values()):
                 return False, "Close today's open positions before switching broker"
+
+        def _do_login(b_name):
+            kw = {"cache_dir": self.base_dir} if b_name == "DHAN" else {}
+            ad = ADAPTERS[b_name](self.creds_for(b_name), log=self.log, **kw)
+            acct = ad.login()
+            return ad, acct
+
+        primary_err = None
+        adapter, account = None, ""
         try:
-            kw = {"cache_dir": self.base_dir} if name == "DHAN" else {}
-            adapter = ADAPTERS[name](self.creds_for(name), log=self.log, **kw)
-            account = adapter.login()
-        except BrokerError as e:
-            with self._lock:
-                self.connected = False
-                self.status_msg = str(e)
-            return False, str(e)
-        except Exception as e:
-            with self._lock:
-                self.connected = False
-                self.status_msg = f"{type(e).__name__}: {e}"
-            return False, self.status_msg
+            adapter, account = _do_login(target)
+        except (BrokerError, Exception) as e:
+            primary_err = str(e)
+            fallback_target = None
+            if allow_fallback:
+                if target == "ANGEL" and self.has_creds("DHAN"):
+                    fallback_target = "DHAN"
+                elif target == "DHAN" and self.has_creds("ANGEL"):
+                    fallback_target = "ANGEL"
+
+            if fallback_target:
+                self.log(f"[ORDERS] ⚠️ {BROKER_LABELS.get(target, target)} login failed ({primary_err}). Automatically falling back to {BROKER_LABELS.get(fallback_target, fallback_target)}...")
+                try:
+                    adapter, account = _do_login(fallback_target)
+                    target = fallback_target
+                    self.log(f"[ORDERS] ✅ Fallback to {BROKER_LABELS.get(target, target)} successful ({account})")
+                except Exception as fb_err:
+                    err_msg = f"{BROKER_LABELS.get(target, target)} failed ({primary_err}); Fallback {BROKER_LABELS.get(fallback_target, fallback_target)} also failed ({fb_err})"
+                    with self._lock:
+                        self.connected = False
+                        self.status_msg = err_msg
+                    return False, err_msg
+            else:
+                with self._lock:
+                    self.connected = False
+                    self.status_msg = primary_err
+                return False, primary_err
+
         with self._lock:
-            self.broker, self.broker_name, self.connected = adapter, name, True
-            self.status_msg = f"Connected: {BROKER_LABELS[name]} {account}"
-            if self.settings["broker"] != name:
-                self.save_settings({"broker": name})
+            self.broker, self.broker_name, self.connected = adapter, target, True
+            fallback_note = f" (fallback from {BROKER_LABELS.get('ANGEL' if target == 'DHAN' else 'DHAN', 'primary')})" if primary_err else ""
+            self.status_msg = f"Connected: {BROKER_LABELS[target]} {account}{fallback_note}"
+            if self.settings.get("broker") != target:
+                self.save_settings({"broker": target})
         self.log(f"[ORDERS] {self.status_msg}")
         self._sync_with_broker(startup=True)
         if self._resume_auto:

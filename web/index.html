@@ -6,7 +6,7 @@
   <title>Quantum Terminal — 15M & 1H Intraday Option Strategy</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css?v=4.2">
+  <link rel="stylesheet" href="/static/style.css?v=5.0">
 </head>
 <body>
   <!-- TERMINAL TOP BAR -->
@@ -46,7 +46,12 @@
       </div>
 
       <div class="header-actions">
-        <div class="mode-tag" id="execution-mode-badge">AUTO-TRADE OFF</div>
+        <div class="broker-badge" id="broker-status-badge" title="Broker Status & Account">
+          <span class="broker-dot offline" id="broker-dot"></span>
+          <span id="broker-name-text">DHAN</span>: <span id="broker-account-text">OFFLINE</span> | <span id="broker-funds-text">MARGIN: --</span>
+        </div>
+        <button id="btn-auto-toggle" class="ctrl-btn" title="Toggle Configured Auto-Trading (Mode B)">⏸ AUTO-TRADE OFF</button>
+        <button id="btn-kill-switch" class="ctrl-btn btn-kill" title="Emergency Kill Switch: Immediately exits all positions and cancels orders">🛑 KILL SWITCH</button>
         <button id="audio-toggle-btn" class="ctrl-btn active" title="Toggle Sound Alerts">🔔 AUDIO</button>
         <a id="sheet-link-btn" href="https://docs.google.com/spreadsheets/d/1TNuwFBf1xtTq7xyu_d32MPoWhSp7HzMdacNSnFV6i2U/edit" target="_blank" class="ctrl-btn btn-sheet">📊 SHEET ↗</a>
       </div>
@@ -56,7 +61,7 @@
   <!-- CLEAN PERFORMANCE STRIP (4 METRICS) -->
   <section class="performance-strip">
     <div class="perf-card">
-      <span class="perf-label">NET CLOSED POINTS</span>
+      <span class="perf-label">NET REALIZED P&L</span>
       <span class="perf-value text-green" id="sc-net-pts">+0.00 pts</span>
       <span class="perf-sub" id="sc-trades-count">0 Closed Trades</span>
     </div>
@@ -66,36 +71,36 @@
       <span class="perf-sub" id="sc-win-loss">0 W | 0 L</span>
     </div>
     <div class="perf-card">
-      <span class="perf-label">ACTIVE TRADES</span>
+      <span class="perf-label">ACTIVE / SHADOW POSITIONS</span>
       <span class="perf-value highlight-cyan" id="sc-live-pts">0 Active</span>
       <span class="perf-sub" id="sc-active-trades-count">Real-time CMP Tracking</span>
     </div>
     <div class="perf-card">
-      <span class="perf-label">TOTAL NET INCL. LIVE</span>
-      <span class="perf-value text-green" id="sc-total-net">+0.00 pts</span>
-      <span class="perf-sub">Total Portfolio Return</span>
+      <span class="perf-label">EST. CHARGES & TAXES</span>
+      <span class="perf-value text-silver" id="sc-total-charges">₹0.00</span>
+      <span class="perf-sub">STT, Exchange & Stamp</span>
     </div>
   </section>
 
   <!-- NAVIGATION TABS -->
   <nav class="terminal-nav">
     <button class="nav-tab active" data-tab="tab-scanner">
-      🎯 OPTION STRATEGY SCANNER
+      🎯 LIVE MARKET MONITOR & SCANNER
     </button>
     <button class="nav-tab" data-tab="tab-planner">
-      📅 NEXT-DAY PLAN (15M + 1H INTRADAY)
-    </button>
-    <button class="nav-tab" data-tab="tab-other-symbols">
-      🌐 OTHER SYMBOLS SCANNER
+      📅 DAILY TRADE PLAN (15M + 1H INTRADAY)
     </button>
     <button class="nav-tab" data-tab="tab-forward-test">
-      🧪 TRADE JOURNAL & FORWARD TEST <span class="tab-badge" id="tab-active-count">0</span>
+      ⚡ ORDER & POSITION TRACKER <span class="tab-badge" id="tab-active-count">0</span>
     </button>
-    <button class="nav-tab" data-tab="tab-advanced-strategy">
-      🛡️ ADVANCED VERSION <span class="tab-badge" id="tab-adv-count">0</span>
+    <button class="nav-tab" data-tab="tab-performance">
+      📊 PERFORMANCE & AUDIT REPORTS
     </button>
     <button class="nav-tab" data-tab="tab-mapped-strikes">
       🎯 MAPPED STRIKES & LOTS <span class="tab-badge" id="tab-mapped-count">0</span>
+    </button>
+    <button class="nav-tab" data-tab="tab-other-symbols">
+      🌐 OTHER SYMBOLS SCANNER
     </button>
   </nav>
 
@@ -220,11 +225,12 @@
             <th>R:R</th>
             <th>5M CONFIRMATION</th>
             <th>STRATEGY STATUS</th>
+            <th>ACTION</th>
           </tr>
         </thead>
         <tbody id="tbody-option-chain">
           <tr>
-            <td colspan="15" class="empty-state">
+            <td colspan="16" class="empty-state">
               Ready to stream live market data. Select symbol and click <strong>▶ START SCANNER</strong>.
             </td>
           </tr>
@@ -462,98 +468,68 @@
     </div>
   </main>
 
-  <!-- TAB 5: ADVANCED VERSION (INDEPENDENT TRACKING & SAFETY FILTERS) -->
-  <main class="tab-pane" id="tab-advanced-strategy">
-    <!-- Advanced Strategy Scoreboard -->
-    <div class="scoreboard-strip" id="adv-scoreboard-strip">
+  <!-- TAB 4: PERFORMANCE & AUDIT REPORTS (SECTION E) -->
+  <main class="tab-pane" id="tab-performance">
+    <!-- Institutional Performance Cards -->
+    <div class="scoreboard-strip" id="perf-scoreboard-strip">
       <div class="score-card">
         <span class="score-lbl">STRATEGY</span>
-        <span class="score-val" style="color: #64ffda; font-size: 0.95rem;">ADVANCED PIVOT</span>
+        <span class="score-val text-cyan" style="font-size: 0.9rem;">15M + 1H PIVOT</span>
       </div>
       <div class="score-card">
         <span class="score-lbl">TOTAL TRADES</span>
-        <span class="score-val" id="adv-stat-total">0</span>
-      </div>
-      <div class="score-card">
-        <span class="score-lbl">ACTIVE / SHADOW</span>
-        <span class="score-val" id="adv-stat-active" style="color: #ffd700;">0</span>
+        <span class="score-val font-mono" id="perf-total-trades">0</span>
       </div>
       <div class="score-card">
         <span class="score-lbl">WIN RATE</span>
-        <span class="score-val" id="adv-stat-winrate">0.0%</span>
+        <span class="score-val highlight-gold font-mono" id="perf-winrate">0.0%</span>
       </div>
       <div class="score-card">
-        <span class="score-lbl">TOTAL POINTS</span>
-        <span class="score-val" id="adv-stat-points">0.00</span>
+        <span class="score-lbl">W / L COUNT</span>
+        <span class="score-val font-mono" id="perf-win-loss" style="font-size: 0.95rem;">0W / 0L</span>
+      </div>
+      <div class="score-card">
+        <span class="score-lbl">NET REALIZED P&L</span>
+        <span class="score-val text-green font-mono" id="perf-net-pnl">₹0.00</span>
       </div>
       <div class="score-card">
         <span class="score-lbl">GROSS P&L</span>
-        <span class="score-val" id="adv-stat-gross">₹0.00</span>
+        <span class="score-val text-green font-mono" id="perf-gross-pnl">₹0.00</span>
       </div>
       <div class="score-card">
-        <span class="score-lbl">EST. CHARGES</span>
-        <span class="score-val" id="adv-stat-charges">₹0.00</span>
+        <span class="score-lbl">CHARGES & TAXES</span>
+        <span class="score-val text-silver font-mono" id="perf-charges">₹0.00</span>
       </div>
       <div class="score-card">
-        <span class="score-lbl">NET P&L</span>
-        <span class="score-val" id="adv-stat-net">₹0.00</span>
+        <span class="score-lbl">AVG WIN</span>
+        <span class="score-val text-green font-mono" id="perf-avg-win">+0.00 pts</span>
       </div>
       <div class="score-card">
-        <span class="score-lbl">REJECTIONS</span>
-        <span class="score-val" id="adv-stat-rejections" style="color: #ff5252;">0</span>
+        <span class="score-lbl">AVG LOSS</span>
+        <span class="score-val text-red font-mono" id="perf-avg-loss">-0.00 pts</span>
       </div>
     </div>
 
-    <!-- Active Trades Panel -->
+    <!-- Closed Trades & Realized P&L Journal -->
     <div class="panel-section">
-      <div class="panel-header">
-        <h3>ACTIVE & SHADOW POSITIONS <span class="badge badge-gold" id="adv-active-badge">0</span></h3>
-        <span class="panel-sub">Independent trade tracking with safety filters (Writes to Google Sheets tab 'Advanced Strategy')</span>
+      <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <h3>CLOSED TRADES & PnL JOURNAL <span class="badge" id="perf-closed-badge">0</span></h3>
+          <span class="panel-sub">Verified trade outcomes with individual & cumulative points, gross P&L, charges, and net P&L</span>
+        </div>
+        <div class="filter-cluster" style="margin:0;">
+          <input type="text" id="perf-trades-filter" class="terminal-input" placeholder="Search by symbol, strike, or ID..." style="width:220px; height:28px;">
+        </div>
       </div>
       <div class="terminal-table-container">
-        <table class="terminal-table" id="table-adv-active">
-          <thead>
-            <tr>
-              <th>TRADE ID</th>
-              <th>MODE</th>
-              <th>SYMBOL</th>
-              <th>STRIKE</th>
-              <th>TYPE</th>
-              <th>ACTION</th>
-              <th>ENTRY (₹)</th>
-              <th>SL (₹)</th>
-              <th>TARGET 1</th>
-              <th>LTP (₹)</th>
-              <th>POINTS</th>
-              <th>GROSS P&L</th>
-              <th>SETUP TYPE</th>
-              <th>STATUS</th>
-            </tr>
-          </thead>
-          <tbody id="tbody-adv-active">
-            <tr>
-              <td colspan="14" class="empty-state">No active trades in Advanced Strategy currently.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Closed Trades Panel -->
-    <div class="panel-section">
-      <div class="panel-header">
-        <h3>CLOSED TRADES & PnL JOURNAL <span class="badge" id="adv-closed-badge">0</span></h3>
-        <span class="panel-sub">Closed positions with realized Gross P&L, Transaction Charges & Net P&L</span>
-      </div>
-      <div class="terminal-table-container">
-        <table class="terminal-table" id="table-adv-closed">
+        <table class="terminal-table" id="table-perf-closed">
           <thead>
             <tr>
               <th>DATE</th>
               <th>ENTRY TIME</th>
               <th>EXIT TIME</th>
               <th>TRADE ID</th>
-              <th>MODE</th>
+              <th>BROKER / MODE</th>
               <th>SYMBOL</th>
               <th>STRIKE</th>
               <th>TYPE</th>
@@ -568,39 +544,44 @@
               <th>STATUS</th>
             </tr>
           </thead>
-          <tbody id="tbody-adv-closed">
+          <tbody id="tbody-perf-closed">
             <tr>
-              <td colspan="17" class="empty-state">No closed trades in Advanced Strategy yet.</td>
+              <td colspan="17" class="empty-state">No closed trades recorded yet for today's session.</td>
             </tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <!-- Rejections & Filter Evaluations Panel -->
-    <div class="panel-section">
-      <div class="panel-header">
-        <h3>SAFETY FILTER EVALUATIONS & REJECTIONS <span class="badge badge-silver" id="adv-rejections-badge">0</span></h3>
-        <span class="panel-sub">Candidates evaluated by Filters A through G with reasons for hold / rejection</span>
+    <!-- Verified Broker Orders Audit Log -->
+    <div class="panel-section mt-16">
+      <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <h3>BROKER ORDERS AUDIT LOG (DHAN & LIVE RECONCILIATION) <span class="badge badge-silver" id="perf-broker-orders-badge">0</span></h3>
+          <span class="panel-sub">Audited broker transmissions from live_orders_log.csv with timestamps, broker IDs & statuses</span>
+        </div>
+        <button id="btn-refresh-broker-orders" class="chip-btn" style="height:26px; font-size:11px;">🔄 Refresh Orders Log</button>
       </div>
       <div class="terminal-table-container">
-        <table class="terminal-table" id="table-adv-rejections">
+        <table class="terminal-table" id="table-perf-broker-orders">
           <thead>
             <tr>
-              <th>TIMESTAMP</th>
+              <th>TIMESTAMP (IST)</th>
+              <th>MODE</th>
               <th>SYMBOL</th>
-              <th>STRIKE</th>
               <th>TYPE</th>
+              <th>STRIKE</th>
               <th>ACTION</th>
-              <th>SETUP</th>
-              <th>LTP (₹)</th>
-              <th>REJECTION / HOLD REASON</th>
-              <th>FILTER AUDIT DETAILS</th>
+              <th>QUANTITY</th>
+              <th>EXEC PRICE (₹)</th>
+              <th>BROKER ORDER ID</th>
+              <th>STATUS</th>
+              <th>REMARK</th>
             </tr>
           </thead>
-          <tbody id="tbody-adv-rejections">
+          <tbody id="tbody-perf-broker-orders">
             <tr>
-              <td colspan="9" class="empty-state">No candidate rejections recorded today.</td>
+              <td colspan="11" class="empty-state">Loading verified broker orders log...</td>
             </tr>
           </tbody>
         </table>
@@ -716,7 +697,44 @@
     </div>
   </main>
 
+  <!-- ORDER EXECUTION PREVIEW MODAL (MODE A MANUAL CONFIRMATION) -->
+  <div id="order-modal-backdrop" class="modal-backdrop" style="display:none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <span class="modal-dot"></span>
+          <span>⚡ CONFIRM DHAN ORDER EXECUTION (MODE A)</span>
+        </div>
+        <button id="modal-close-btn" class="modal-close-x">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="order-summary-grid">
+          <div class="summary-cell"><span class="lbl">BROKER</span><span class="val text-gold" id="modal-order-broker">DHAN (NSE_FNO)</span></div>
+          <div class="summary-cell"><span class="lbl">INSTRUMENT</span><span class="val" id="modal-order-instrument">NIFTY 24800 CE</span></div>
+          <div class="summary-cell"><span class="lbl">TRANSACTION</span><span class="val text-green font-bold" id="modal-order-action">BUY</span></div>
+          <div class="summary-cell"><span class="lbl">ORDER TYPE</span><span class="val" id="modal-order-type">LIMIT</span></div>
+          <div class="summary-cell"><span class="lbl">LOTS & QUANTITY</span><span class="val text-cyan font-bold" id="modal-order-qty">1 Lot (25 Qty)</span></div>
+          <div class="summary-cell"><span class="lbl">LIMIT / TRIGGER PRICE</span><span class="val font-mono" id="modal-order-price">₹0.00</span></div>
+          <div class="summary-cell"><span class="lbl">STOP LOSS</span><span class="val text-red font-mono" id="modal-order-sl">₹0.00</span></div>
+          <div class="summary-cell"><span class="lbl">TARGET 1</span><span class="val text-green font-mono" id="modal-order-target">₹0.00</span></div>
+        </div>
+        <div class="order-validation-box" id="modal-validation-box" style="margin-top:12px; padding:10px; background:var(--bg-app); border-radius:4px; border:1px solid var(--border-prominent);">
+          <div style="font-size:10.5px; font-weight:700; color:var(--text-muted); margin-bottom:4px;">PRE-TRADE SAFETY VALIDATIONS:</div>
+          <div class="val-check text-green" style="font-size:11px;">✔ Instrument Tradability & Security ID Verified</div>
+          <div class="val-check text-green" style="font-size:11px;">✔ Lot Size Multiple Enforced</div>
+          <div class="val-check text-green" style="font-size:11px;">✔ Single Active Trade Limit Respected</div>
+        </div>
+      </div>
+      <div class="modal-footer" style="display:flex; justify-content:flex-end; gap:8px; padding:12px 16px; background:var(--bg-panel); border-top:1px solid var(--border-prominent);">
+        <button id="btn-cancel-modal-order" class="btn btn-secondary">CANCEL</button>
+        <button id="btn-confirm-modal-order" class="btn btn-primary" style="background:#10b981; color:#fff; font-weight:700;">
+          ⚡ TRANSMIT TO DHAN
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast-container" class="toast-container"></div>
-  <script src="/static/app.js?v=4.4"></script>
+  <script src="/static/app.js?v=5.0"></script>
 </body>
 </html>

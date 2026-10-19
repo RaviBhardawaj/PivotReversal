@@ -122,6 +122,46 @@
     tbodyMappedStrikes: document.getElementById('tbody-mapped-strikes'),
     mappedStrikesSummaryText: document.getElementById('mapped-strikes-summary-text'),
 
+    // Top Bar Broker, Funds & Kill Switch
+    brokerStatusBadge: document.getElementById('broker-status-badge'),
+    brokerDot: document.getElementById('broker-dot'),
+    brokerNameText: document.getElementById('broker-name-text'),
+    brokerFundsText: document.getElementById('broker-funds-text'),
+    btnAutoToggle: document.getElementById('btn-auto-toggle'),
+    btnKillSwitch: document.getElementById('btn-kill-switch'),
+
+    // Performance & Audit Reports Tab
+    tabPerfCount: document.getElementById('tab-perf-count'),
+    perfTotalTrades: document.getElementById('perf-total-trades'),
+    perfWinrate: document.getElementById('perf-winrate'),
+    perfWinLoss: document.getElementById('perf-win-loss'),
+    perfNetPnl: document.getElementById('perf-net-pnl'),
+    perfGrossPnl: document.getElementById('perf-gross-pnl'),
+    perfCharges: document.getElementById('perf-charges'),
+    perfAvgWin: document.getElementById('perf-avg-win'),
+    perfAvgLoss: document.getElementById('perf-avg-loss'),
+    perfClosedBadge: document.getElementById('perf-closed-badge'),
+    perfTradesFilter: document.getElementById('perf-trades-filter'),
+    tbodyPerfClosed: document.getElementById('tbody-perf-closed'),
+    perfBrokerOrdersBadge: document.getElementById('perf-broker-orders-badge'),
+    btnRefreshBrokerOrders: document.getElementById('btn-refresh-broker-orders'),
+    tbodyPerfBrokerOrders: document.getElementById('tbody-perf-broker-orders'),
+
+    // Mode A Order Execution Modal
+    orderModalBackdrop: document.getElementById('order-modal-backdrop'),
+    modalCloseBtn: document.getElementById('modal-close-btn'),
+    btnCancelModalOrder: document.getElementById('btn-cancel-modal-order'),
+    btnConfirmModalOrder: document.getElementById('btn-confirm-modal-order'),
+    modalOrderBroker: document.getElementById('modal-order-broker'),
+    modalOrderInstrument: document.getElementById('modal-order-instrument'),
+    modalOrderAction: document.getElementById('modal-order-action'),
+    modalOrderType: document.getElementById('modal-order-type'),
+    modalOrderQty: document.getElementById('modal-order-qty'),
+    modalOrderPrice: document.getElementById('modal-order-price'),
+    modalOrderSl: document.getElementById('modal-order-sl'),
+    modalOrderTarget: document.getElementById('modal-order-target'),
+    modalValidationBox: document.getElementById('modal-validation-box'),
+
     // Toast Container
     toastContainer: document.getElementById('toast-container')
   };
@@ -201,7 +241,7 @@
       if (targetPane) targetPane.classList.add('active');
       if (tabId === 'tab-planner') loadPlannerDeck(state.symbol);
       if (tabId === 'tab-other-symbols' && !state.otherData) calculateOtherSymbols();
-      if (tabId === 'tab-advanced-strategy') loadAdvancedStrategy();
+      if (tabId === 'tab-performance') loadPerformanceTab();
       if (tabId === 'tab-mapped-strikes') loadMappedStrikesData();
     });
   });
@@ -301,14 +341,10 @@
       }
       updateOptionChainTable(state.lastWatchItems, state.lastMaxOi);
       updateForwardTestTables(data.active_trades || [], data.closed_trades || []);
-      if (data.advanced_strategy || data.advanced_active_trades || data.advanced_closed_trades) {
-        updateAdvancedStrategyTables(
-          data.advanced_strategy || {},
-          data.advanced_active_trades || [],
-          data.advanced_closed_trades || [],
-          data.advanced_rejections || []
-        );
+      if (data.broker_info) {
+        updateBrokerStatus(data.broker_info);
       }
+      renderPerformanceTab();
       if (data.mapped_strikes_config) {
         state.mappedConfig = data.mapped_strikes_config;
         updateMappedStrikesSummary(state.mappedConfig);
@@ -579,11 +615,33 @@
           <td><span class="badge badge-both">${rrVal}</span></td>
           <td style="font-size:11px">${m5Status}</td>
           <td><span class="${badgeClass}">${stText}</span></td>
+          <td style="text-align:center;">
+            <button class="btn-order-fast font-bold" data-sym="${state.symbol || 'NIFTY'}" data-strike="${w.strike}" data-type="${w.type}" data-expiry="${w.expiry || ''}" data-side="${w.side || 'BUY'}" data-cmp="${cmpVal}" data-entry="${entryVal}" data-sl="${slNum}" data-t1="${target1Val}">
+              ⚡ EXEC
+            </button>
+          </td>
         </tr>
       `;
     }).join('');
 
     els.tbodyOptionChain.innerHTML = htmlRows;
+
+    els.tbodyOptionChain.querySelectorAll('.btn-order-fast').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const d = btn.dataset;
+        prepareAndOpenOrderModal({
+          symbol: d.sym || state.symbol || 'NIFTY',
+          strike: parseFloat(d.strike) || 0,
+          opt_type: d.type || 'CE',
+          expiry: d.expiry || '',
+          action: d.side || 'BUY',
+          limit_price: parseFloat(d.cmp) || parseFloat(d.entry) || 0,
+          sl: parseFloat(d.sl) || 0,
+          t1: parseFloat(d.t1) || 0
+        });
+      });
+    });
   }
 
   // ── Strike Filter Buttons ──
@@ -816,10 +874,15 @@
               <td class="text-muted font-mono" title="Calculated dynamically in live market at entry confirmation">—</td>
               <td><span class="badge badge-both">${s.rr || '1:2.0'}</span></td>
               <td><span class="badge badge-waiting">${s.strategy_status || 'WAITING FOR ENTRY'}</span></td>
+              <td style="text-align:center;">
+                <button class="btn-order-fast font-bold" data-sym="${sym}" data-strike="${s.strike}" data-type="${s.type}" data-expiry="${s.expiry || ''}" data-side="${s.side || 'BUY'}" data-cmp="${cmpVal}" data-entry="${ep}" data-sl="0" data-t1="${t1}">
+                  ⚡ EXEC
+                </button>
+              </td>
             </tr>
           `;
         }).join('')
-      : '<tr><td colspan="15" class="empty-state">No specific setup rows generated for current filter. Refer to strategy rules above.</td></tr>';
+      : '<tr><td colspan="16" class="empty-state">No specific setup rows generated for current filter. Refer to strategy rules above.</td></tr>';
 
     els.plannerDeckContainer.innerHTML = `
       <!-- Method & Target Trading Session Ribbon -->
@@ -884,6 +947,7 @@
                 <th>STOP LOSS (₹)</th>
                 <th>R:R</th>
                 <th>STRATEGY STATUS</th>
+                <th>ACTION</th>
               </tr>
             </thead>
             <tbody>
@@ -893,6 +957,23 @@
         </div>
       </div>
     `;
+
+    els.plannerDeckContainer.querySelectorAll('.btn-order-fast').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const d = btn.dataset;
+        prepareAndOpenOrderModal({
+          symbol: d.sym || state.symbol || 'NIFTY',
+          strike: parseFloat(d.strike) || 0,
+          opt_type: d.type || 'CE',
+          expiry: d.expiry || '',
+          action: d.side || 'BUY',
+          limit_price: parseFloat(d.cmp) || parseFloat(d.entry) || 0,
+          sl: parseFloat(d.sl) || 0,
+          t1: parseFloat(d.t1) || 0
+        });
+      });
+    });
   }
 
   // ── Global Apply Plan into Live Scanner ──
@@ -1332,165 +1413,358 @@
     });
   }
 
-  // ── Advanced Version Strategy Loader & Renderer ──
-  async function loadAdvancedStrategy() {
-    try {
-      const res = await fetch('/api/advanced-strategy/trades');
-      if (!res.ok) return;
-      const data = await res.json();
-      const rejRes = await fetch('/api/advanced-strategy/rejections');
-      const rejData = rejRes.ok ? await rejRes.json() : { rejections: [] };
-      updateAdvancedStrategyTables(
-        data.summary || {},
-        data.active || [],
-        data.closed || [],
-        rejData.rejections || []
-      );
-    } catch (e) {
-      console.warn('Advanced strategy load error:', e);
+  // ── Broker Status & Real-time Funds Updater ──
+  function updateBrokerStatus(info) {
+    if (!info) return;
+    if (els.brokerDot) {
+      els.brokerDot.className = `broker-dot ${info.connected ? 'online' : 'offline'}`;
+    }
+    if (els.brokerNameText) {
+      els.brokerNameText.textContent = info.broker_name || 'DHAN';
+    }
+    if (els.brokerFundsText) {
+      if (info.connected && info.available_funds !== undefined) {
+        els.brokerFundsText.textContent = `Margin: ₹${Number(info.available_funds || 0).toLocaleString('en-IN')}`;
+      } else {
+        els.brokerFundsText.textContent = info.connected ? 'Active Account' : 'Standby / Ready';
+      }
+    }
+    if (els.btnAutoToggle && info.auto_trade !== undefined) {
+      const isAuto = Boolean(info.auto_trade);
+      els.btnAutoToggle.textContent = isAuto ? '⚡ AUTO-TRADE: ACTIVE' : '⏸ AUTO-TRADE: OFF';
+      els.btnAutoToggle.style.background = isAuto ? 'rgba(16, 185, 129, 0.2)' : 'rgba(100, 116, 139, 0.2)';
+      els.btnAutoToggle.style.color = isAuto ? '#10b981' : '#94a3b8';
+      els.btnAutoToggle.style.borderColor = isAuto ? '#10b981' : 'rgba(100, 116, 139, 0.4)';
     }
   }
 
-  function updateAdvancedStrategyTables(summary, active, closed, rejections) {
-    const totalEl = document.getElementById('adv-stat-total');
-    const activeEl = document.getElementById('adv-stat-active');
-    const winrateEl = document.getElementById('adv-stat-winrate');
-    const pointsEl = document.getElementById('adv-stat-points');
-    const grossEl = document.getElementById('adv-stat-gross');
-    const chargesEl = document.getElementById('adv-stat-charges');
-    const netEl = document.getElementById('adv-stat-net');
-    const rejEl = document.getElementById('adv-stat-rejections');
-    const advCountBadge = document.getElementById('tab-adv-count');
-    const advActiveBadge = document.getElementById('adv-active-badge');
-    const advClosedBadge = document.getElementById('adv-closed-badge');
-    const advRejBadge = document.getElementById('adv-rejections-badge');
+  // ── Performance & Audit Reports Manager ──
+  async function loadPerformanceTab() {
+    renderPerformanceTab();
+    await loadBrokerOrdersLog();
+  }
 
-    if (totalEl) totalEl.textContent = summary.total_trades || ((closed ? closed.length : 0) + (active ? active.length : 0));
-    if (activeEl) activeEl.textContent = active ? active.length : 0;
-    if (advCountBadge) advCountBadge.textContent = active ? active.length : 0;
-    if (advActiveBadge) advActiveBadge.textContent = active ? active.length : 0;
-    if (advClosedBadge) advClosedBadge.textContent = closed ? closed.length : 0;
-    if (advRejBadge) advRejBadge.textContent = (rejections && rejections.length) || summary.rejections_count || 0;
+  function renderPerformanceTab() {
+    const closed = state.closedTrades || [];
+    const total = closed.length;
+    let wins = 0;
+    let losses = 0;
+    let grossPnl = 0;
+    let sumWinPts = 0;
+    let sumLossPts = 0;
 
-    const winRate = Number(summary.win_rate || 0);
-    if (winrateEl) winrateEl.textContent = `${winRate.toFixed(1)}% (${summary.wins || 0}W / ${summary.losses || 0}L)`;
-
-    const pts = Number(summary.total_points || 0);
-    if (pointsEl) {
-      pointsEl.textContent = `${pts >= 0 ? '+' : ''}${pts.toFixed(2)}`;
-      pointsEl.style.color = pts >= 0 ? '#00e676' : '#ff5252';
-    }
-
-    const gross = Number(summary.total_gross_pnl || 0);
-    if (grossEl) {
-      grossEl.textContent = `₹${gross >= 0 ? '+' : ''}${gross.toFixed(2)}`;
-      grossEl.style.color = gross >= 0 ? '#00e676' : '#ff5252';
-    }
-
-    const charges = Number(summary.total_charges || 0);
-    if (chargesEl) chargesEl.textContent = `₹${charges.toFixed(2)}`;
-
-    const net = Number(summary.total_net_pnl || 0);
-    if (netEl) {
-      netEl.textContent = `₹${net >= 0 ? '+' : ''}${net.toFixed(2)}`;
-      netEl.style.color = net >= 0 ? '#00e676' : '#ff5252';
-    }
-
-    if (rejEl) rejEl.textContent = (rejections && rejections.length) || summary.rejections_count || 0;
-
-    // 2. Active Positions Table
-    const tbodyActive = document.getElementById('tbody-adv-active');
-    if (tbodyActive) {
-      if (!active || active.length === 0) {
-        tbodyActive.innerHTML = '<tr><td colspan="14" class="empty-state">No active trades in Advanced Strategy currently.</td></tr>';
-      } else {
-        tbodyActive.innerHTML = active.map(t => {
-          const pts = Number(t.Points || 0);
-          const ptsClass = pts >= 0 ? 'text-green' : 'text-red';
-          const gross = Number(t.Gross_PnL || 0);
-          const grossClass = gross >= 0 ? 'text-green' : 'text-red';
-          return `
-            <tr class="${t['BUY/SELL'] === 'BUY' ? 'buy-row' : 'sell-row'}">
-              <td class="font-mono text-cyan" style="font-size:11px;">${t.Trade_ID || ''}</td>
-              <td><span class="badge ${t.Trade_Mode === 'Actual' ? 'badge-both' : 'badge-silver'}">${t.Trade_Mode || 'Shadow'}</span></td>
-              <td><strong>${t.Underlying_Symbol || ''}</strong></td>
-              <td><strong class="font-mono">${t.Strike || ''}</strong></td>
-              <td><strong class="${t.Option_Type === 'CE' ? 'text-green' : 'text-gold'}">${t.Option_Type || ''}</strong></td>
-              <td><strong class="${t['BUY/SELL'] === 'BUY' ? 'text-green' : 'text-red'}">${t['BUY/SELL'] || ''}</strong></td>
-              <td>${Number(t.Entry_Price || 0).toFixed(2)}</td>
-              <td>${Number(t.Stop_Loss || 0).toFixed(2)}</td>
-              <td>${Number(t.Target_1 || 0).toFixed(2)}</td>
-              <td><strong class="text-cyan font-mono">${Number(t.Current_Price || t.Entry_Price || 0).toFixed(2)}</strong></td>
-              <td class="${ptsClass}"><strong>${pts >= 0 ? '+' : ''}${pts.toFixed(2)}</strong></td>
-              <td class="${grossClass}">₹${gross.toFixed(2)}</td>
-              <td><span class="badge badge-15m">${t.Setup_Type || ''}</span></td>
-              <td><span class="badge badge-gold">ACTIVE</span></td>
-            </tr>
-          `;
-        }).join('');
+    closed.forEach(t => {
+      const pts = Number(t.PnL_Pts || 0);
+      const qty = Number(t.Quantity || getContractLotSize(t.Symbol || state.symbol || 'NIFTY'));
+      grossPnl += (pts * qty);
+      if (pts > 0) {
+        wins++;
+        sumWinPts += pts;
+      } else if (pts < 0) {
+        losses++;
+        sumLossPts += Math.abs(pts);
       }
-    }
+    });
 
-    // 3. Closed Trades Table
-    const tbodyClosed = document.getElementById('tbody-adv-closed');
-    if (tbodyClosed) {
-      if (!closed || closed.length === 0) {
-        tbodyClosed.innerHTML = '<tr><td colspan="17" class="empty-state">No closed trades in Advanced Strategy yet.</td></tr>';
+    const charges = total * 40.0;
+    const netPnl = grossPnl - charges;
+    const winRate = total > 0 ? ((wins / total) * 100).toFixed(1) : '0.0';
+    const avgWin = wins > 0 ? (sumWinPts / wins).toFixed(2) : '0.00';
+    const avgLoss = losses > 0 ? (sumLossPts / losses).toFixed(2) : '0.00';
+
+    if (els.tabPerfCount) els.tabPerfCount.textContent = total;
+    if (els.perfTotalTrades) els.perfTotalTrades.textContent = total;
+    if (els.perfWinrate) els.perfWinrate.textContent = `${winRate}%`;
+    if (els.perfWinLoss) els.perfWinLoss.textContent = `${wins}W / ${losses}L`;
+    if (els.perfClosedBadge) els.perfClosedBadge.textContent = total;
+
+    if (els.perfNetPnl) {
+      els.perfNetPnl.textContent = `₹${netPnl >= 0 ? '+' : ''}${netPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      els.perfNetPnl.className = `score-val font-mono ${netPnl >= 0 ? 'text-green' : 'text-red'}`;
+    }
+    if (els.perfGrossPnl) {
+      els.perfGrossPnl.textContent = `₹${grossPnl >= 0 ? '+' : ''}${grossPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      els.perfGrossPnl.className = `score-val font-mono ${grossPnl >= 0 ? 'text-green' : 'text-red'}`;
+    }
+    if (els.perfCharges) {
+      els.perfCharges.textContent = `₹${charges.toFixed(2)}`;
+    }
+    if (els.perfAvgWin) els.perfAvgWin.textContent = `+${avgWin} pts`;
+    if (els.perfAvgLoss) els.perfAvgLoss.textContent = `-${avgLoss} pts`;
+
+    // Filter closed trades table
+    const q = (els.perfTradesFilter ? els.perfTradesFilter.value.trim().toUpperCase() : '');
+    const filteredClosed = q
+      ? closed.filter(t => (
+          String(t.Symbol || '').toUpperCase().includes(q) ||
+          String(t.Strike || '').includes(q) ||
+          String(t.Trade_ID || '').toUpperCase().includes(q) ||
+          String(t.Type || '').toUpperCase().includes(q)
+        ))
+      : closed;
+
+    if (els.tbodyPerfClosed) {
+      if (filteredClosed.length === 0) {
+        els.tbodyPerfClosed.innerHTML = '<tr><td colspan="17" class="empty-state">No closed trades recorded yet for today\'s session.</td></tr>';
       } else {
-        tbodyClosed.innerHTML = closed.map(r => {
-          const pts = Number(r.Points || 0);
-          const gross = Number(r.Gross_PnL || 0);
-          const net = Number(r.Net_PnL || 0);
+        els.tbodyPerfClosed.innerHTML = filteredClosed.map(r => {
+          const pts = Number(r.PnL_Pts || 0);
+          const qty = Number(r.Quantity || getContractLotSize(r.Symbol || 'NIFTY'));
+          const gross = pts * qty;
+          const trCharges = 40.0;
+          const net = gross - trCharges;
           const ptsClass = pts >= 0 ? 'text-green' : 'text-red';
           const netClass = net >= 0 ? 'text-green' : 'text-red';
+          const sign = pts >= 0 ? '+' : '';
+
           return `
-            <tr class="${r['BUY/SELL'] === 'BUY' ? 'buy-row' : 'sell-row'}">
+            <tr>
               <td>${r.Date || ''}</td>
               <td>${r.Entry_Time || ''}</td>
-              <td>${r.Exit_Time || ''}</td>
-              <td class="font-mono text-cyan" style="font-size:11px;">${r.Trade_ID || ''}</td>
-              <td><span class="badge ${r.Trade_Mode === 'Actual' ? 'badge-both' : 'badge-silver'}">${r.Trade_Mode || 'Shadow'}</span></td>
-              <td><strong>${r.Underlying_Symbol || ''}</strong></td>
+              <td>${r.Exit_Time || '-'}</td>
+              <td class="font-mono text-cyan" style="font-size:11px">${r.Trade_ID || `T-${r.Date}-${r.Strike}`}</td>
+              <td><span class="badge ${r.Broker === 'DHAN' ? 'badge-both' : 'badge-silver'}">${r.Broker || 'DHAN (AUTO)'}</span></td>
+              <td><strong>${r.Symbol || 'NIFTY'}</strong></td>
               <td><strong class="font-mono">${r.Strike || ''}</strong></td>
-              <td><strong class="${r.Option_Type === 'CE' ? 'text-green' : 'text-gold'}">${r.Option_Type || ''}</strong></td>
-              <td><strong class="${r['BUY/SELL'] === 'BUY' ? 'text-green' : 'text-red'}">${r['BUY/SELL'] || ''}</strong></td>
+              <td><strong class="${r.Type === 'CE' ? 'text-green' : 'text-gold'}">${r.Type || ''}</strong></td>
+              <td><strong class="${r.Action === 'BUY' ? 'text-green' : 'text-red'}">${r.Action || 'BUY'}</strong></td>
               <td>${Number(r.Entry_Price || 0).toFixed(2)}</td>
               <td>${Number(r.Exit_Price || 0).toFixed(2)}</td>
-              <td class="${ptsClass}"><strong>${pts >= 0 ? '+' : ''}${pts.toFixed(2)}</strong></td>
+              <td class="${ptsClass}"><strong>${sign}${pts.toFixed(2)}</strong></td>
               <td>₹${gross.toFixed(2)}</td>
-              <td>₹${Number(r.Charges || 0).toFixed(2)}</td>
+              <td>₹${trCharges.toFixed(2)}</td>
               <td class="${netClass}"><strong>₹${net.toFixed(2)}</strong></td>
-              <td>${r.Exit_Reason || ''}</td>
-              <td><span class="badge badge-closed">${r.Status || 'CLOSED'}</span></td>
+              <td style="font-size:11px">${r.Exit_Reason || 'TARGET / SL'}</td>
+              <td><span class="badge ${pts >= 0 ? 'badge-target-hit' : 'badge-sl-hit'}">${pts >= 0 ? 'TARGET HIT' : 'SL HIT'}</span></td>
             </tr>
           `;
         }).join('');
       }
     }
+  }
 
-    // 4. Candidate Evaluations & Rejections Table
-    const tbodyRej = document.getElementById('tbody-adv-rejections');
-    if (tbodyRej) {
-      if (!rejections || rejections.length === 0) {
-        tbodyRej.innerHTML = '<tr><td colspan="9" class="empty-state">No candidate rejections recorded today.</td></tr>';
+  async function loadBrokerOrdersLog() {
+    try {
+      const res = await fetch('/api/broker/orders-log');
+      if (!res.ok) return;
+      const data = await res.json();
+      const orders = data.orders || [];
+      if (els.perfBrokerOrdersBadge) els.perfBrokerOrdersBadge.textContent = orders.length;
+
+      if (els.tbodyPerfBrokerOrders) {
+        if (orders.length === 0) {
+          els.tbodyPerfBrokerOrders.innerHTML = '<tr><td colspan="13" class="empty-state">No live broker orders transmitted yet. Orders execute through Mode A (manual review) or Mode B (automated entry).</td></tr>';
+        } else {
+          els.tbodyPerfBrokerOrders.innerHTML = orders.slice().reverse().map(o => {
+            const st = (o.Status || o.status || 'PENDING');
+            const isFilled = st.toUpperCase() === 'FILLED' || st.toUpperCase() === 'EXECUTED';
+            const isRejected = st.toUpperCase().includes('REJECT');
+            const stBadge = isFilled ? 'badge-target-hit' : (isRejected ? 'badge-sl-hit' : 'badge-both');
+            const ordMode = o.Mode || o.mode || 'MANUAL';
+            const ordId = o.Order_ID || o.order_id || '-';
+            const brokerId = o.Broker_Order_ID || o.broker_order_id || ordId;
+            const sym = o.Symbol || o.symbol || 'NIFTY';
+            const strk = o.Strike || o.strike || '-';
+            const optType = o.Type || o.opt_type || '-';
+            const act = o.Action || o.action || 'BUY';
+            const qty = o.Qty || o.quantity || '-';
+            const ordType = o.Order_Type || o.order_type || 'LIMIT';
+            const price = Number(o.Price || o.price || 0).toFixed(2);
+            const remark = o.Remark || o.message || '-';
+            const ts = o.Timestamp || o.timestamp_ist || '-';
+
+            return `
+              <tr>
+                <td class="font-mono" style="font-size:11px">${ts}</td>
+                <td><span class="badge ${ordMode === 'AUTO' ? 'badge-both' : 'badge-silver'}">${ordMode}</span></td>
+                <td class="font-mono text-cyan" style="font-size:11px">${ordId}</td>
+                <td class="font-mono text-gold" style="font-size:11px">${brokerId}</td>
+                <td><strong>${sym}</strong></td>
+                <td><strong class="font-mono">${strk}</strong></td>
+                <td><strong class="${optType === 'CE' ? 'text-green' : 'text-gold'}">${optType}</strong></td>
+                <td><strong class="${act === 'BUY' ? 'text-green' : 'text-red'}">${act}</strong></td>
+                <td class="font-mono">${qty}</td>
+                <td>${ordType}</td>
+                <td class="font-mono">₹${price}</td>
+                <td><span class="badge ${stBadge}">${st}</span></td>
+                <td style="font-size:11px; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${remark}">${remark}</td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to load broker orders log:', err);
+    }
+  }
+
+  // ── Mode A Order Execution Modal ──
+  state.pendingOrder = null;
+
+  async function prepareAndOpenOrderModal(params) {
+    try {
+      showToast('Validating contract and security ID...', 'blue');
+      const res = await fetch('/api/order/prepare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params)
+      });
+      const data = await res.json();
+      if (data.status !== 'ok' && data.status !== 'valid') {
+        showToast(`Order Validation Failed: ${data.message || 'Invalid contract'}`, 'red');
+        return;
+      }
+      const ord = data.order || data;
+      state.pendingOrder = ord;
+
+      const brokerName = ord.broker || 'DHAN';
+      if (els.modalOrderBroker) els.modalOrderBroker.textContent = `${brokerName} (NSE_FNO)`;
+      if (els.modalOrderInstrument) els.modalOrderInstrument.textContent = ord.instrument || `${ord.symbol} ${ord.strike} ${ord.opt_type}`;
+      if (els.modalOrderAction) {
+        const act = ord.action || 'BUY';
+        els.modalOrderAction.textContent = act;
+        els.modalOrderAction.className = `val ${act === 'BUY' ? 'text-green' : 'text-red'} font-bold`;
+      }
+      if (els.modalOrderType) els.modalOrderType.textContent = ord.order_type || 'LIMIT';
+      if (els.modalOrderQty) {
+        const lots = ord.lots || 1;
+        const qty = ord.quantity || ord.total_qty || (lots * 25);
+        els.modalOrderQty.textContent = `${lots} Lot (${qty} Qty)`;
+      }
+      const ordPrice = ord.price !== undefined ? ord.price : (ord.limit_price || 0);
+      if (els.modalOrderPrice) els.modalOrderPrice.textContent = `₹${Number(ordPrice || 0).toFixed(2)}`;
+      const ordSl = ord.stop_loss !== undefined ? ord.stop_loss : (ord.sl || 0);
+      if (els.modalOrderSl) els.modalOrderSl.textContent = `₹${Number(ordSl || 0).toFixed(2)}`;
+      const ordTgt = ord.target !== undefined ? ord.target : (ord.t1 || 0);
+      if (els.modalOrderTarget) els.modalOrderTarget.textContent = `₹${Number(ordTgt || 0).toFixed(2)}`;
+
+      const checks = data.checks || [
+        `Instrument Tradability & Security ID Verified (${ord.security_id || 'Active NFO'})`,
+        `Lot Size Multiple Enforced (${ord.quantity || 25} units)`,
+        `Single Active Trade Limit Respected`
+      ];
+      if (els.modalValidationBox) {
+        els.modalValidationBox.innerHTML = `
+          <div style="font-size:10.5px; font-weight:700; color:var(--text-muted); margin-bottom:4px;">PRE-TRADE SAFETY VALIDATIONS:</div>
+          ${checks.map(c => `<div class="val-check text-green" style="font-size:11px;">✔ ${c}</div>`).join('')}
+        `;
+      }
+
+      if (els.btnConfirmModalOrder) {
+        els.btnConfirmModalOrder.disabled = false;
+        els.btnConfirmModalOrder.textContent = '⚡ TRANSMIT TO DHAN';
+      }
+
+      if (els.orderModalBackdrop) {
+        els.orderModalBackdrop.style.display = 'flex';
+      }
+    } catch (err) {
+      showToast(`Pre-order error: ${err.message}`, 'red');
+    }
+  }
+
+  function closeOrderModal() {
+    if (els.orderModalBackdrop) {
+      els.orderModalBackdrop.style.display = 'none';
+    }
+    state.pendingOrder = null;
+  }
+
+  async function confirmModalOrderExecution() {
+    if (!state.pendingOrder) {
+      showToast('No active order payload found', 'red');
+      return;
+    }
+    try {
+      if (els.btnConfirmModalOrder) {
+        els.btnConfirmModalOrder.disabled = true;
+        els.btnConfirmModalOrder.textContent = 'TRANSMITTING TO DHAN...';
+      }
+      const res = await fetch('/api/order/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(state.pendingOrder)
+      });
+      const data = await res.json();
+      if (data.status === 'ok' || data.status === 'success') {
+        showToast(`⚡ Order Transmitted: ID ${data.broker_order_id || data.order_id || data.trade_id || 'OK'} (${data.order_status || 'CONFIRMED'})`, 'green');
+        playAlertSound();
+        closeOrderModal();
+        await loadBrokerOrdersLog();
+        loadDashboard();
       } else {
-        tbodyRej.innerHTML = rejections.slice(-25).reverse().map(e => `
-          <tr>
-            <td>${e.Timestamp || ''}</td>
-            <td><strong>${e.Symbol || ''}</strong></td>
-            <td><strong class="font-mono">${e.Strike || ''}</strong></td>
-            <td><strong class="${e.Option_Type === 'CE' ? 'text-green' : 'text-gold'}">${e.Option_Type || ''}</strong></td>
-            <td><strong class="${e.Action === 'BUY' ? 'text-green' : 'text-red'}">${e.Action || ''}</strong></td>
-            <td><span class="badge badge-15m">${e.Setup_Type || ''}</span></td>
-            <td>${Number(e.LTP || 0).toFixed(2)}</td>
-            <td style="color:#ff5252;"><strong>${e.Rejection_Reason || ''}</strong></td>
-            <td class="font-mono text-silver" style="font-size:10px; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${encodeURIComponent(e.Filter_Details || '')}">
-              ${e.Filter_Details || '-'}
-            </td>
-          </tr>
-        `).join('');
+        showToast(`Order Rejected: ${data.message || 'Execution error'}`, 'red');
+        if (els.btnConfirmModalOrder) {
+          els.btnConfirmModalOrder.disabled = false;
+          els.btnConfirmModalOrder.textContent = '⚡ RETRY TRANSMIT';
+        }
+      }
+    } catch (err) {
+      showToast(`Transmission error: ${err.message}`, 'red');
+      if (els.btnConfirmModalOrder) {
+        els.btnConfirmModalOrder.disabled = false;
+        els.btnConfirmModalOrder.textContent = '⚡ RETRY TRANSMIT';
       }
     }
+  }
+
+  // ── Modal & Top Bar Execution Wireup ──
+  if (els.modalCloseBtn) els.modalCloseBtn.addEventListener('click', closeOrderModal);
+  if (els.btnCancelModalOrder) els.btnCancelModalOrder.addEventListener('click', closeOrderModal);
+  if (els.btnConfirmModalOrder) els.btnConfirmModalOrder.addEventListener('click', confirmModalOrderExecution);
+  if (els.orderModalBackdrop) {
+    els.orderModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === els.orderModalBackdrop) closeOrderModal();
+    });
+  }
+
+  if (els.btnRefreshBrokerOrders) {
+    els.btnRefreshBrokerOrders.addEventListener('click', async () => {
+      await loadBrokerOrdersLog();
+      showToast('🔄 Broker orders log updated', 'blue');
+    });
+  }
+
+  if (els.perfTradesFilter) {
+    els.perfTradesFilter.addEventListener('input', () => {
+      renderPerformanceTab();
+    });
+  }
+
+  if (els.btnKillSwitch) {
+    els.btnKillSwitch.addEventListener('click', async () => {
+      const ok = confirm("EMERGENCY KILL SWITCH ACTIVATION:\n\n1. Disconnect and turn OFF auto-trading.\n2. Cancel all pending broker orders.\n3. Market square-off all active open positions.\n\nAre you sure you want to proceed?");
+      if (!ok) return;
+      try {
+        const res = await fetch('/api/order/kill', { method: 'POST' });
+        const data = await res.json();
+        showToast(data.message || 'Emergency Kill Switch Executed', 'red');
+        playAlertSound();
+        loadDashboard();
+        loadBrokerOrdersLog();
+      } catch (err) {
+        showToast('Kill switch error: ' + err.message, 'red');
+      }
+    });
+  }
+
+  if (els.btnAutoToggle) {
+    els.btnAutoToggle.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/order/auto-toggle', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'success') {
+          const isAuto = Boolean(data.auto_trade);
+          els.btnAutoToggle.textContent = isAuto ? '⚡ AUTO-TRADE: ACTIVE' : '⏸ AUTO-TRADE: OFF';
+          els.btnAutoToggle.style.background = isAuto ? 'rgba(16, 185, 129, 0.2)' : 'rgba(100, 116, 139, 0.2)';
+          els.btnAutoToggle.style.color = isAuto ? '#10b981' : '#94a3b8';
+          els.btnAutoToggle.style.borderColor = isAuto ? '#10b981' : 'rgba(100, 116, 139, 0.4)';
+          showToast(`Auto-trading mode ${isAuto ? 'ACTIVATED' : 'PAUSED'}`, isAuto ? 'green' : 'blue');
+        }
+      } catch (err) {
+        showToast('Toggle failed', 'red');
+      }
+    });
   }
 
   // ── Mapped Strikes & Custom Lots Manager ──

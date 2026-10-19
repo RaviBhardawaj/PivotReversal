@@ -1000,6 +1000,15 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
             "status": active_plan.get("status", "NO_STORED_PLAN") if active_plan else "NO_STORED_PLAN",
             "setups_count": len(active_plan.get("setups", [])) if active_plan else 0,
         },
+        "broker_info": {
+            "broker": getattr(getattr(live_order_manager, 'engine', None), 'broker_name', None) or (live_order_manager.engine.settings.get("broker", "DHAN") if getattr(live_order_manager, 'engine', None) else "DHAN"),
+            "connected": getattr(getattr(live_order_manager, 'engine', None), 'connected', False),
+            "auto_trade": getattr(getattr(live_order_manager, 'engine', None), 'auto_trade', False),
+            "account": getattr(getattr(getattr(live_order_manager, 'engine', None), 'broker', None), 'account', ""),
+            "funds": (getattr(getattr(live_order_manager, 'engine', None), 'broker', None).funds() if getattr(getattr(live_order_manager, 'engine', None), 'connected', False) and getattr(getattr(live_order_manager, 'engine', None), 'broker', None) else None),
+            "status_msg": getattr(getattr(live_order_manager, 'engine', None), 'status_msg', "Engine ready"),
+            "positions_count": len(getattr(getattr(live_order_manager, 'engine', None), 'positions', {}))
+        },
         "feed_running": feed.running,
         "exec_mode": live_order_manager.mode,
         "timestamp": now_time,
@@ -1059,7 +1068,7 @@ def background_eod_scheduler():
                     getattr(feed, '_web_eod_plan_date', None) != today_date):
                 feed._web_eod_plan_date = today_date
                 try:
-                    sym = feed.symbol or "NIFTY"
+                    sym = getattr(feed, 'symbol', None) or "NIFTY"
                     print(f"\n[WEB EOD 3:45PM] ⏰ 15:45:00 → Calculating next-day levels for {sym}...")
                     mtf = get_tv_multi_timeframe_pivots(sym, force_refresh=True)
                     if mtf:
@@ -1806,6 +1815,219 @@ async def clear_mapped_strikes():
         raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
     c = mapped_strikes_mgr.clear_strikes()
     return {"status": "ok", "cleared_count": c, "config": mapped_strikes_mgr.get_config()}
+
+
+# ── Broker & Order Management Endpoints ─────────────────────────
+
+@app.get("/api/broker/status")
+async def get_broker_status():
+    engine_obj = getattr(live_order_manager, 'engine', None)
+    if not engine_obj:
+        return {"status": "error", "message": "OrderEngine not initialized"}
+    funds_val = None
+    if engine_obj.connected and engine_obj.broker:
+        try:
+            funds_val = engine_obj.broker.funds()
+        except Exception:
+            funds_val = None
+    return {
+        "status": "ok",
+        "broker": engine_obj.broker_name or engine_obj.settings.get("broker", "DHAN"),
+        "connected": engine_obj.connected,
+        "auto_trade": engine_obj.auto_trade,
+        "account": getattr(getattr(engine_obj, 'broker', None), 'account', ""),
+        "funds": funds_val,
+        "status_msg": engine_obj.status_msg,
+        "settings": engine_obj.settings,
+        "positions_count": len(getattr(engine_obj, 'positions', {}))
+    }
+
+
+@app.post("/api/broker/connect")
+async def connect_broker(payload: Dict[str, Any] = None):
+    engine_obj = getattr(live_order_manager, 'engine', None)
+    if not engine_obj:
+        raise HTTPException(status_code=500, detail="OrderEngine not initialized")
+    target = (payload or {}).get("broker", "DHAN").upper()
+    ok, msg = engine_obj.connect(target)
+    return {
+        "status": "ok" if ok else "error",
+        "message": msg,
+        "connected": engine_obj.connected,
+        "broker": engine_obj.broker_name
+    }
+
+
+@app.post("/api/order/auto-toggle")
+async def toggle_auto_trade(payload: Dict[str, Any] = None):
+    engine_obj = getattr(live_order_manager, 'engine', None)
+    if not engine_obj:
+        raise HTTPException(status_code=500, detail="OrderEngine not initialized")
+    enable = bool((payload or {}).get("enabled", False))
+    ok, msg = engine_obj.set_auto(enable, confirmed=True)
+    return {
+        "status": "ok" if ok else "error",
+        "message": msg,
+        "auto_trade": engine_obj.auto_trade
+    }
+
+
+@app.post("/api/order/kill")
+async def kill_switch():
+    engine_obj = getattr(live_order_manager, 'engine', None)
+    if not engine_obj:
+        raise HTTPException(status_code=500, detail="OrderEngine not initialized")
+    exited_count = engine_obj.kill()
+    return {
+        "status": "ok",
+        "message": f"Kill switch activated. Auto-trading OFF. Exited {exited_count} position(s).",
+        "exited_count": exited_count
+    }
+
+
+@app.post("/api/order/prepare")
+async def prepare_order(payload: Dict[str, Any]):
+    engine_obj = getattr(live_order_manager, 'engine', None)
+    sym = str(payload.get("symbol") or "NIFTY").upper()
+    strike = float(payload.get("strike", 0))
+    opt_type = str(payload.get("opt_type", "CE")).upper()
+    act = str(payload.get("action", "BUY")).upper()
+    lots = max(1, int(payload.get("lots", 1)))
+    exp = str(payload.get("expiry") or getattr(feed, "expiry", "") or "").strip()
+
+    lot_size = 25
+    if "BANKNIFTY" in sym: lot_size = 15
+    elif "SENSEX" in sym: lot_size = 10
+    elif "FINNIFTY" in sym: lot_size = 25
+    elif "MIDCPNIFTY" in sym: lot_size = 50
+
+    total_qty = lots * lot_size
+    ltp = feed.get_strike_ltp(opt_type, int(strike), exp) if hasattr(feed, "get_strike_ltp") else 0.0
+    trig = float(payload.get("trigger_price", 0) or ltp)
+    sl_val = float(payload.get("sl", 0) or (ltp * 0.85 if ltp > 0 else 0))
+    target_val = float(payload.get("target", 0) or (ltp * 1.30 if ltp > 0 else 0))
+
+    b_name = engine_obj.broker_name if engine_obj else "OFFLINE"
+    resolved_id = ""
+    tsym = f"{sym}{exp[:5] if exp else ''}{int(strike)}{opt_type}"
+    if engine_obj and engine_obj.broker:
+        try:
+            sample_inst = {"symbol": sym, "exchange": "NFO", "tsym": tsym, "expiry": exp, "strike": strike, "opt_type": opt_type}
+            r = engine_obj.broker.resolve(sample_inst)
+            resolved_id = str(r.get("inst_id", ""))
+            if r.get("lot_size"):
+                lot_size = int(r["lot_size"])
+                total_qty = lots * lot_size
+        except Exception:
+            resolved_id = ""
+
+    prepared = {
+        "broker": b_name,
+        "symbol": sym,
+        "expiry": exp,
+        "strike": strike,
+        "opt_type": opt_type,
+        "action": act,
+        "lots": lots,
+        "lot_size": lot_size,
+        "quantity": total_qty,
+        "order_type": "LIMIT" if ltp > 0 else "MARKET",
+        "price": round(ltp, 2),
+        "trigger_price": round(trig, 2),
+        "stop_loss": round(sl_val, 2),
+        "target": round(target_val, 2),
+        "security_id": resolved_id,
+        "timestamp_ist": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "READY_FOR_CONFIRMATION"
+    }
+    return {"status": "ok", "order": prepared}
+
+
+@app.post("/api/order/execute")
+async def execute_order(payload: Dict[str, Any]):
+    o = payload.get("order") if isinstance(payload.get("order"), dict) else payload
+    if not o or not o.get("symbol"):
+        raise HTTPException(status_code=400, detail="Missing order details")
+    engine_obj = getattr(live_order_manager, 'engine', None)
+    if not engine_obj:
+        raise HTTPException(status_code=500, detail="OrderEngine not available")
+
+    # If offline or paper/simulation
+    if not engine_obj.connected or not engine_obj.broker:
+        sim_id = f"PV_MAN_{int(time.time())}"
+        trade_record = {
+            "Trade_ID": sim_id,
+            "Symbol": o.get("symbol", "NIFTY"),
+            "Strike": o.get("strike", 0),
+            "Type": o.get("opt_type", "CE"),
+            "Side": o.get("action", "BUY"),
+            "Entry_Price": o.get("price", 0),
+            "Stop_Loss": o.get("stop_loss", 0),
+            "Target_1": o.get("target", 0),
+            "Quantity": o.get("quantity", 25),
+            "Status": "SIMULATED_FILLED",
+            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Broker_Order_ID": f"SIM_{int(time.time())}"
+        }
+        live_order_manager._log_order(
+            mode="SIMULATED",
+            symbol=o.get("symbol", "NIFTY"),
+            opt_type=o.get("opt_type", "CE"),
+            strike=o.get("strike", 0),
+            token="",
+            action=o.get("action", "BUY"),
+            qty=o.get("quantity", 25),
+            price=o.get("price", 0),
+            order_id=trade_record["Broker_Order_ID"],
+            status="FILLED",
+            remark="Manual Web Confirmation (Offline Mode)"
+        )
+        return {
+            "status": "ok",
+            "order_id": trade_record["Broker_Order_ID"],
+            "fill_price": o.get("price", 0),
+            "message": "Simulated order placed (Broker offline)"
+        }
+
+    # Live Broker Placement via engine
+    inst = {
+        "symbol": o.get("symbol", "NIFTY"),
+        "exchange": "NFO",
+        "token": str(o.get("security_id", "")),
+        "tsym": "",
+        "expiry": o.get("expiry", ""),
+        "strike": float(o.get("strike", 0)),
+        "opt_type": o.get("opt_type", "CE"),
+        "lot_size": int(o.get("lot_size", 25)),
+        "lots": int(o.get("lots", 1))
+    }
+    trade = {
+        "Trade_ID": f"PV_MAN_{int(time.time())}",
+        "Symbol": o.get("symbol", "NIFTY"),
+        "Type": o.get("opt_type", "CE"),
+        "Strike": float(o.get("strike", 0)),
+        "Trigger_Price": float(o.get("price", 0)),
+        "Stop_Loss": float(o.get("stop_loss", 0)),
+        "Target_1": float(o.get("target", 0)),
+        "Timeframe": "MANUAL_WEB",
+        "Lots": int(o.get("lots", 1))
+    }
+    res_msg = engine_obj.enter(trade, inst)
+    return {"status": "ok", "message": res_msg, "trade_id": trade["Trade_ID"]}
+
+
+@app.get("/api/broker/orders-log")
+async def get_orders_log():
+    orders = []
+    log_file = ORDER_LOG_FILE if 'ORDER_LOG_FILE' in globals() else "live_orders_log.csv"
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, "r", encoding="utf-8") as f:
+                r = csv.DictReader(f)
+                orders = list(r)
+        except Exception as e:
+            print(f"[OrdersLog] Read error: {e}")
+    return {"status": "ok", "orders": list(reversed(orders[-100:]))}
 
 
 if __name__ == "__main__":

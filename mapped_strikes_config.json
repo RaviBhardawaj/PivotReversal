@@ -1,6 +1,106 @@
 {
   "restrict_to_selected_only": false,
   "default_lots": 1,
-  "strikes": [],
-  "updated_at": "2026-10-19T20:17:24.742988"
+  "strikes": [
+    {
+      "id": "NIFTY_22400_PE",
+      "symbol": "NIFTY",
+      "strike": 22400.0,
+      "opt_type": "PE",
+      "lots": 1,
+      "enabled": true,
+      "source": "1H:S2",
+      "notes": "1H Structure S2 Reclaim",
+      "added_at": "2026-10-19 20:25:44"
+    },
+    {
+      "id": "NIFTY_22600_PE",
+      "symbol": "NIFTY",
+      "strike": 22600.0,
+      "opt_type": "PE",
+      "lots": 1,
+      "enabled": true,
+      "source": "1H:S1",
+      "notes": "1H Structure S1 Reclaim",
+      "added_at": "2026-10-19 20:25:44"
+    },
+    {
+      "id": "NIFTY_22750_PE",
+      "symbol": "NIFTY",
+      "strike": 22750.0,
+      "opt_type": "PE",
+      "lots": 1,
+      "enabled": true,
+      "source": "15M:S2",
+      "notes": "15M Intraday S2 Reclaim",
+      "added_at": "2026-10-19 20:25:44"
+    },
+    {
+      "id": "NIFTY_22850_BOTH",
+      "symbol": "NIFTY",
+      "strike": 22850.0,
+      "opt_type": "BOTH",
+      "lots": 1,
+      "enabled": true,
+      "source": "1H:P",
+      "notes": "1H Structure Pivot Zone",
+      "added_at": "2026-10-19 20:25:44"
+    },
+    {
+      "id": "NIFTY_22850_PE",
+      "symbol": "NIFTY",
+      "strike": 22850.0,
+      "opt_type": "PE",
+      "lots": 1,
+      "enabled": true,
+      "source": "15M:S1",
+      "notes": "15M Intraday S1 Reclaim",
+      "added_at": "2026-10-19 20:25:44"
+    },
+    {
+      "id": "NIFTY_22950_BOTH",
+      "symbol": "NIFTY",
+      "strike": 22950.0,
+      "opt_type": "BOTH",
+      "lots": 1,
+      "enabled": true,
+      "source": "15M:P",
+      "notes": "15M Intraday Pivot Zone",
+      "added_at": "2026-10-19 20:25:44"
+    },
+    {
+      "id": "NIFTY_23100_CE",
+      "symbol": "NIFTY",
+      "strike": 23100.0,
+      "opt_type": "CE",
+      "lots": 1,
+      "enabled": true,
+      "source": "1H:R1",
+      "notes": "1H Structure R1 Reclaim",
+      "added_at": "2026-10-19 20:25:44"
+    },
+    {
+      "id": "NIFTY_23150_CE",
+      "symbol": "NIFTY",
+      "strike": 23150.0,
+      "opt_type": "CE",
+      "lots": 1,
+      "enabled": true,
+      "source": "15M:R2",
+      "notes": "15M Intraday R2 Reclaim",
+      "added_at": "2026-10-19 20:25:44"
+    },
+    {
+      "id": "NIFTY_23300_CE",
+      "symbol": "NIFTY",
+      "strike": 23300.0,
+      "opt_type": "CE",
+      "lots": 1,
+      "enabled": true,
+      "source": "1H:R2",
+      "notes": "1H Structure R2 Reclaim",
+      "added_at": "2026-10-19 20:25:44"
+    }
+  ],
+  "updated_at": "2026-10-20T01:18:27.328796"
 }

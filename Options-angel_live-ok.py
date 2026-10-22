@@ -758,30 +758,8 @@ class StrategyStrikeState:
             can_buy = False
 
         if can_buy:
-            # S1 entry mode if S2 <= 0.05 or unpopulated; otherwise S2 entry mode
+            # S1 entry mode ONLY when S2 <= 0.05 or unpopulated/negative; otherwise S2 is the primary Buyer Area
             use_s1_for_buy = (s2 <= 0.05 or s2 == 0)
-
-            # S1 is also a buy level when S2 is real (> 0.05): S1 sweep -> reclaim -> candle close -> retest
-            # -> break of the confirmation high. It stays in force until price actually reaches S2, then the
-            # S2 setup takes over (a half-formed S1 setup is dropped, same as the S3 hand-over below).
-            if not use_s1_for_buy and s1 > s2 > 0.05:
-                _s2_reached = (ltp <= s2 * 1.01 or (valid_low > 0 and valid_low <= s2 * 1.01)
-                               or (c.get("low", 0) > 0 and c["low"] <= s2 * 1.01))
-                if self.trigger_level == "S1" and self.state != "WAITING":
-                    if _s2_reached:
-                        self.state = "WAITING"
-                        self.ll = 0.0
-                        self.retest_done = False
-                        self.retest_low = self.retest_high = 0.0
-                        self.conf_high = self.conf_low = 0.0
-                        self.sweep_bucket = -1
-                        self.frozen_s2 = self.frozen_s1 = 0.0
-                        self.frozen_pivots = {}
-                        self.trigger_level = "S2"
-                    else:
-                        use_s1_for_buy = True      # an S1 setup is already running: stay on it
-                elif self.state == "WAITING" and not _s2_reached:
-                    use_s1_for_buy = True
 
             # S2 swept and not held: price has gone well below S2 on its way to S3 -> the buy level
             # becomes S3 (same sweep / reclaim / confirmation candle / retest / entry rules).
@@ -835,7 +813,7 @@ class StrategyStrikeState:
                 # the reclaim candle must close AFTER this sweep; any older confirmation is void
                 self.sweep_bucket = c["bucket"]
                 self.conf_high = self.conf_low = 0.0
-                note = (f" (S2={s2:.2f}<=0.05)" if (s2 <= 0.05 or s2 == 0) else " (S1 buy level, S2 not reached)") if use_s1_for_buy else ""
+                note = f" (S2={s2:.2f}<=0.05)" if use_s1_for_buy else ""
                 re_tag = f" [Re-entry New LL:{self.ll:.2f}]" if self.sl_hit_count > 0 else f" [LL:{self.ll:.2f}]"
                 self.signal = f"★ {self.opt_type} SWEEP {active_lvl}{note}{re_tag} — Awaiting Reclaim & Candle Close"
 
@@ -949,7 +927,7 @@ class StrategyStrikeState:
                     self.entry_sl     = effective_sl
                     self.targets      = [t1, t2, t3, t4, t5]
                     mkt_ctx = "Mkt Bullish ↑" if self.opt_type == "CE" else "Mkt Bearish ↓"
-                    s2_tag = (" (S2<=0.05)" if (s2 <= 0.05 or s2 == 0) else " (S1 buy level)") if use_s1_for_buy else ""
+                    s2_tag = " (S2<=0.05)" if use_s1_for_buy else ""
                     re_tag = " [RE-ENTRY with New LL SL]" if self.sl_hit_count > 0 else ""
                     self.signal       = f"★ BUY {self.opt_type}{re_tag} [{mkt_ctx} | {active_lvl} Reclaim Confirmed{s2_tag} | Entry:{entry_px:.2f} | New LL SL:{effective_sl:.2f} | T1:{t1:.1f} T2:{t2:.1f} T3:{t3:.1f} T4:{t4:.1f} T5:{t5:.1f}]"
                     self.trade_status = "Active"

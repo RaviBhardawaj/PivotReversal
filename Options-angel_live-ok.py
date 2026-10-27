@@ -2526,6 +2526,15 @@ class ForwardTestTracker:
                   f"finished from 1-min data: {res['Exit_Reason']} @ {res['Exit_Price']} | PnL:{res['PnL_Pts']:+.2f}")
         return done
 
+    def start_new_day(self, today: str):
+        """The app kept running past midnight: drop yesterday's closed trades and guards so the
+        dashboard and the strikes start the new session clean (open trades are left alone)."""
+        self._closed_today = [c for c in self._closed_today if c.get('Date', today) == today]
+        self._seed_closed_cache = None
+        self._closed_keys_today = {k for k in self._closed_keys_today if k and k[-1] == today}
+        self._sl_hit_count = {k: n for k, n in self._sl_hit_count.items() if k and k[-1] == today}
+        self._save_snapshot()
+
     def get_closed_today(self):
         """Return trades closed in the current session only (no CSV bleed-through)."""
         return list(self._closed_today)
@@ -4283,6 +4292,21 @@ class FeedEngine:
         from advanced_strategy.engine import get_monthly_expiry as _calc_m
         return _calc_m(all_exps, ref_date)
 
+    def roll_day(self, today_date: str) -> bool:
+        """Once per calendar day: drop the previous day's strike states and closed-trade cache.
+        Returns True when a previous day's state was cleared."""
+        prev = getattr(self, "_states_date", None)
+        self._states_date = today_date
+        if prev is None or prev == today_date:
+            return False
+        with self.lock:
+            kept = {k: st for k, st in self.strategy_states.items()
+                    if getattr(st, "trade_status", "") == "Active"}
+            self.strategy_states = kept
+        self.forward_tracker.start_new_day(today_date)
+        print(f"[NEW DAY] {today_date}: cleared {prev} strike states ({len(kept)} open-trade state(s) kept)")
+        return True
+
     def build_next_day_levels(self, symbol: str):
         """After the close (15:45): the next session's strike levels, built from today's candle,
         for the current AND the next expiry, then eod_planner.py, which takes its strike levels
@@ -5648,6 +5672,11 @@ class FeedEngine:
                     today_date != today_focus_date                           # new day
                     or (_market_open and _mkt_open_refresh_date != today_date)  # 09:16 AM trigger
                 )
+
+                # New session while the app kept running (overnight or STOP/START): clear every
+                # strike's state from the previous day, so yesterday's trades (entry, SL, EOD exit,
+                # SL-hit counts) are not shown or carried into today's setups.
+                self.roll_day(today_date)
 
                 if _need_refresh:
                     try:

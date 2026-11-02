@@ -3184,7 +3184,18 @@ def check_option_entry(ltp: float, pivots: dict, opt_type: str = "CE",
     # BUY target ladder always goes UP through pivot levels:
     # Entry near S2 → T1:S1 → T2:P → T3:R1 → T4:R2 → T5:R3
     # Entry near S1 → T1:P  → T2:R1 → T3:R2 → T4:R3 → T5:R3*ext
-    if level == "S1":
+    if level == "S3":
+        # S3 reclaim (S2 was swept): the trade starts down near S3 and climbs the whole ladder
+        if ltp < s3:
+            return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
+        zone = "S3 Reclaim"
+        levels_up = [l for l in [s2, s1, p, r1, r2] if l > ltp]
+        t1 = levels_up[0] if len(levels_up) > 0 else s2
+        t2 = levels_up[1] if len(levels_up) > 1 else s1
+        t3 = levels_up[2] if len(levels_up) > 2 else p
+        t4 = levels_up[3] if len(levels_up) > 3 else r1
+        t5 = levels_up[4] if len(levels_up) > 4 else r2
+    elif level == "S1":
         if ltp < s1:
             return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
         zone = "S1 Reclaim"
@@ -3257,7 +3268,18 @@ def check_option_sell_entry(ltp: float, pivots: dict, opt_type: str = "PE",
     # SELL target ladder always goes DOWN through pivot levels:
     # Entry near R2 → T1:R1 → T2:P → T3:S1 → T4:S2 → T5:S3
     # Entry near R1 → T1:P  → T2:S1 → T3:S2 → T4:S3 → T5:S3*ext
-    if level == "R1":
+    if level == "R3":
+        # R3 rejection (R2 was swept): the trade starts up near R3 and falls the whole ladder
+        if ltp > r3:
+            return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
+        zone = "R3 Rejection"
+        levels_dn = [l for l in [r2, r1, p, s1, s2] if l < ltp]
+        t1 = levels_dn[0] if len(levels_dn) > 0 else r2
+        t2 = levels_dn[1] if len(levels_dn) > 1 else r1
+        t3 = levels_dn[2] if len(levels_dn) > 2 else p
+        t4 = levels_dn[3] if len(levels_dn) > 3 else s1
+        t5 = levels_dn[4] if len(levels_dn) > 4 else s2
+    elif level == "R1":
         if ltp > r1:
             return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
         zone = "R1 Rejection"
@@ -6153,7 +6175,10 @@ class FeedEngine:
                     fp_sell = getattr(st_sell, "frozen_pivots", None) or opt_piv
                     if (sell_entry["entry"] and mkt_open and is_focus_strike and live_tick
                             and at_entry_price(ltp, st_sell.entry_price, "SELL")):
-                        in_sell_zone = (fp_sell["S2"] * 0.95 <= ltp <= fp_sell["R2"] * 1.05)
+                        # An R3 rejection (R2 swept) sells from up near R3: the zone reaches R3 then,
+                        # so every SELL the dashboard shows as live is also recorded.
+                        _top = fp_sell.get("R3", 0) if st_sell.trigger_level == "R3" else 0
+                        in_sell_zone = (fp_sell["S2"] * 0.95 <= ltp <= (_top or fp_sell["R2"]) * 1.05)
                         if in_sell_zone:
                             lvl = st_sell.trigger_level
                             exp_tag = f" {exp}" if exp else ""
@@ -6233,7 +6258,8 @@ class FeedEngine:
                     fp_buy = getattr(st_buy, "frozen_pivots", None) or opt_piv
                     if (buy_entry["entry"] and mkt_open and is_focus_strike and live_tick
                             and at_entry_price(ltp, st_buy.entry_price, "BUY")):
-                        in_buy_zone = (fp_buy["S2"] * 0.95 <= ltp <= fp_buy["R2"] * 1.05)
+                        _bot = fp_buy.get("S3", 0) if st_buy.trigger_level == "S3" else 0   # S3 reclaim (S2 swept)
+                        in_buy_zone = ((_bot or fp_buy["S2"]) * 0.95 <= ltp <= fp_buy["R2"] * 1.05)
                         if in_buy_zone:
                             lvl = st_buy.trigger_level
                             re_lbl = f" [RE-ENTRY #{st_buy.entry_count} New LL SL]" if st_buy.sl_hit_count > 0 else ""

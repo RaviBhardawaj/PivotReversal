@@ -110,3 +110,15 @@ except Exception:
     pass
 assert app.Session.last_error=="Angel One server unreachable (internet/DNS problem)"
 print("Angel login failure recorded for the dashboard: OK")
+
+# 7. R3 rejection SELL / S3 reclaim BUY are real entries (2 Nov: CE 22900 R3 sell @ 310.95 was shown
+#    on the dashboard but never recorded)
+piv=app.calc_fib_pivots(270.0,128.25,192.95)          # CE 22900 03NOV2026, 30 Oct candle
+e=app.check_option_sell_entry(310.95,piv,"CE",hh=466.05,state="CONFIRMED_SELL",level="R3")
+assert e["entry"] and e["zone"]=="R3 Rejection" and e["SL"]==466.05, e
+assert [e["T1"],e["T2"],e["T3"]]==[piv["R2"],piv["R1"],piv["P"]], e
+assert 310.95 <= piv["R3"]*1.05 and 310.95 > piv["R2"]*1.05   # inside the R3 zone, outside the old R2 one
+assert not app.check_option_sell_entry(310.95,piv,"CE",hh=466.05,state="CONFIRMED_SELL",level="R2")["entry"]
+b=app.check_option_entry(piv["S3"]+1,piv,"CE",ll=piv["S3"]-5,state="CONFIRMED_BUY",level="S3")
+assert b["entry"] and b["zone"]=="S3 Reclaim" and b["T1"]==piv["S2"], b
+print("R3 rejection SELL and S3 reclaim BUY are recorded entries: OK")

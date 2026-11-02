@@ -13,6 +13,13 @@ mb=types.ModuleType("tkinter.messagebox"); tk.ttk=ttk; tk.messagebox=mb
 sys.modules.update({"tkinter":tk,"tkinter.ttk":ttk,"tkinter.messagebox":mb})
 _src=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","Options-angel_live-ok.py")
 _spec=importlib.util.spec_from_file_location("app",_src); app=importlib.util.module_from_spec(_spec); _spec.loader.exec_module(app)
+import tempfile
+_T=tempfile.mkdtemp()
+# Fed ticks reach the strategy engines: keep their CSV/JSON logs out of the real app folder
+_adv=app.advanced_engine.tracker
+for _k,_v in list(vars(_adv).items()):
+    if _k.endswith("_file") and isinstance(_v,str):
+        setattr(_adv,_k,os.path.join(_T,os.path.basename(_v)))
 app.trigger_immediate_alert=lambda *a,**k: None
 app.subprocess.run=lambda *a,**k: None
 
@@ -29,6 +36,7 @@ print("Dhan quote -> Angel tick: OK")
 
 # 2. Request maps option tokens straight across and the index to Dhan's ID; unknown indices are skipped
 f=app.FeedEngine()
+f.forward_tracker.filepath=os.path.join(_T,"ft.csv"); f.forward_tracker.state_file=os.path.join(_T,"ft_open.json")
 f.token_list=[{"exchangeType":2,"tokens":["53926","53927"]},{"exchangeType":1,"tokens":["99926000"]},
               {"exchangeType":3,"tokens":["500112"]}]
 req,back=f._dhan_backup_request()

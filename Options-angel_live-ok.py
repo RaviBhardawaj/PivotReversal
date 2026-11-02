@@ -1,3 +1,4 @@
+#!/Library/Frameworks/Python.framework/Versions/3.12/bin/python3
 """
 Angel One - Live Option Chain with Greeks
 Control Panel + Google Sheets Feed
@@ -248,6 +249,39 @@ def traded_today_tick(message: dict, ltp: float, prev_ltp: float = 0.0, now: dat
         return datetime.fromtimestamp(ltt) >= start
     # no trade time in this feed mode: only a price that moved during market hours counts
     return prev_ltp > 0 and abs(ltp - prev_ltp) > 1e-9
+
+
+def dhan_quote_to_tick(token: str, q: dict) -> dict:
+    """One row of Dhan's /marketfeed/quote in the shape of an Angel WebSocket tick (prices in
+    paise), so the Dhan backup prices go through exactly the same tick handling."""
+    def paise(v):
+        try:
+            return round(float(v or 0) * 100)
+        except (TypeError, ValueError):
+            return 0
+    ohlc  = q.get("ohlc") or {}
+    depth = q.get("depth") or {}
+    try:
+        ltt = datetime.strptime(str(q.get("last_trade_time", "")), "%d/%m/%Y %H:%M:%S").timestamp()
+    except ValueError:
+        ltt = 0
+    tick = {
+        "token": str(token),
+        "last_traded_price":        paise(q.get("last_price")),
+        "open_interest":            int(q.get("oi") or 0),
+        "volume_trade_for_the_day": int(q.get("volume") or 0),
+        "closed_price":             paise(ohlc.get("close")),
+        "high_price_of_the_day":    paise(ohlc.get("high")),
+        "low_price_of_the_day":     paise(ohlc.get("low")),
+        "open_price_of_the_day":    paise(ohlc.get("open")),
+        "last_traded_timestamp":    ltt,
+        "source":                   "DHAN",
+    }
+    for side, key in (("buy", "best_5_buy_data"), ("sell", "best_5_sell_data")):
+        lvls = [d for d in (depth.get(side) or []) if isinstance(d, dict) and d.get("price")]
+        if lvls:
+            tick[key] = [{"price": paise(d["price"]), "quantity": d.get("quantity", 0)} for d in lvls]
+    return tick
 
 
 def is_live_market_open(dt: datetime = None) -> bool:
@@ -3331,22 +3365,81 @@ def get_gspread_client():
             gc.session.request = functools.partial(gc.session.request, timeout=20)
         except Exception:
             pass
+    _retry_sheet_requests(gc)
     return gc
+
+
+SHEETS_HEALTH = {"err": "", "at": 0.0}   # last Sheets write that failed even after retries (dashboard alert)
+
+
+def _retry_sheet_requests(gc, tries=4):
+    """Retry a Sheets request that dies on a flaky connection (SSL 'bad record mac', reset,
+    timeout) instead of losing that write. Appends are not retried: Google may already have
+    added the rows, and a retry would write them twice."""
+    try:
+        sess = gc.http_client.session
+    except AttributeError:
+        sess = getattr(gc, "session", None)
+    if sess is None or getattr(sess, "_loc_retry", False):
+        return
+    send = sess.request
+    flaky = (requests.exceptions.SSLError, requests.exceptions.ConnectionError,
+             requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError)
+
+    def request(method, url, *a, **kw):
+        n = 1 if ":append" in str(url) else tries
+        for i in range(n):
+            try:
+                r = send(method, url, *a, **kw)
+                SHEETS_HEALTH["err"] = ""
+                return r
+            except flaky as e:
+                if i == n - 1:
+                    SHEETS_HEALTH["err"], SHEETS_HEALTH["at"] = f"{type(e).__name__}: {str(e)[:100]}", time.time()
+                    raise
+                print(f"[GOOGLE] Sheets request failed ({type(e).__name__}), retry {i + 1}/{n - 1}...")
+                time.sleep(2 ** i)
+    sess.request = request
+    sess._loc_retry = True
 
 # ═══════════════════════════════════════════════════════════
 # SESSION
 # ═══════════════════════════════════════════════════════════
 class Session:
     obj=auth_token=feed_token=scrip_df=None
+    last_error = ""      # why the last Angel login failed ("" after a good login); shown on the dashboard
 
     @classmethod
     def login(cls):
-        totp=pyotp.TOTP(TOTP_SECRET).now()
-        cls.obj=SmartConnect(api_key=API_KEY)
-        s=cls.obj.generateSession(CLIENT_ID,MPIN,totp)
-        if not s["status"]: raise Exception(s["message"])
-        cls.auth_token=s["data"]["jwtToken"]
-        cls.feed_token=cls.obj.getfeedToken()
+        try:
+            totp=pyotp.TOTP(TOTP_SECRET).now()
+            cls.obj=SmartConnect(api_key=API_KEY)
+            s=cls.obj.generateSession(CLIENT_ID,MPIN,totp)
+            if not s["status"]: raise Exception(s["message"])
+            cls.auth_token=s["data"]["jwtToken"]
+            cls.feed_token=cls.obj.getfeedToken()
+        except Exception as e:
+            msg = str(e)
+            if "NameResolution" in msg or "Failed to resolve" in msg:
+                msg = "Angel One server unreachable (internet/DNS problem)"
+            elif "Max retries" in msg or "timed out" in msg.lower():
+                msg = "Angel One server not responding"
+            cls.last_error = msg[:160]
+            raise
+        cls.last_error = ""
+
+    @classmethod
+    def login_in_background(cls, every=60):
+        """Keep trying the Angel login until it works (the app runs on Dhan prices meanwhile)."""
+        def _loop():
+            while not cls.auth_token:
+                time.sleep(every)
+                try:
+                    cls.login()
+                    print("[ANGEL] ✅ Login succeeded")
+                except Exception as e:
+                    print(f"[ANGEL] Login still failing: {cls.last_error or e}")
+        threading.Thread(target=_loop, daemon=True).start()
 
     @classmethod
     def load_scrip(cls):
@@ -3813,6 +3906,10 @@ class FeedEngine:
         self._ws_watchdog_thread = None            # background health monitor thread
         self._last_reconnect_time = 0.0            # rate-limit reconnects
         self._ws_reconnect_lock = threading.Lock() # lock for clean reconnects
+        self._last_angel_tick   = time.time()      # last tick from Angel's WebSocket itself (not the Dhan backup)
+        self.data_source        = "ANGEL"          # where live prices come from now: ANGEL, DHAN (backup) or NONE
+        self.feed_alert         = ""               # loud dashboard message while prices are not from Angel
+        self._dhan_backup_thread = None
 
     def prepare(self, exchange, symbol, expiries, n_strikes):
         """
@@ -4340,7 +4437,11 @@ class FeedEngine:
         symbol = symbol or "NIFTY"
         try:
             if not Session.auth_token or not Session.feed_token:
-                Session.login()
+                try:
+                    Session.login()
+                except Exception as le:
+                    # Levels come from Dhan first; an Angel outage must not stop the mapping
+                    print(f"[STRIKE MAPPER] Angel login failed ({Session.last_error or le}); using Dhan")
             if Session.scrip_df is None:
                 Session.load_scrip()
             df = Session.scrip_df
@@ -4761,6 +4862,7 @@ class FeedEngine:
 
         def _data(wsapp, message):
             if gen == self._ws_gen:
+                self._last_angel_tick = time.time()
                 self.on_data(wsapp, message)
 
         def _err(wsapp, error=None, *a):
@@ -4829,15 +4931,16 @@ class FeedEngine:
                     pass
 
                 # Every 3rd failed attempt, refresh the login: an expired JWT/feed token
-                # makes every reconnect fail until the session is renewed.
-                if self._ws_fail_count % 3 == 0:
+                # makes every reconnect fail until the session is renewed. With no session at
+                # all (login failed at startup) every attempt tries to log in.
+                if self._ws_fail_count % 3 == 0 or not Session.auth_token:
                     try:
                         print("[WS] 🔑 Refreshing Angel One session before reconnect...")
                         Session.login()
                     except Exception as le:
                         print(f"[WS] Session refresh failed: {le}")
 
-                self._last_tick_time = time.time()
+                self._last_tick_time = self._last_angel_tick = time.time()
                 try:
                     self.sws = self._new_ws()
                     print("[WS] 🚀 Reconnect thread spawned.")
@@ -4854,7 +4957,7 @@ class FeedEngine:
             if not self.token_list:
                 continue
             now = time.time()
-            no_tick = now - self._last_tick_time
+            no_tick = now - self._last_angel_tick   # Dhan backup ticks must not hide a dead Angel socket
             last_pong = getattr(self.sws, "last_pong_timestamp", None) if self.sws else None
             pong_age = (now - last_pong) if last_pong else None
             if self._ws_session_open():
@@ -4869,13 +4972,117 @@ class FeedEngine:
                     self._schedule_reconnect(reason="watchdog heartbeat lost")
 
     def start_ws(self):
-        self._last_tick_time = time.time()
+        self._last_tick_time = self._last_angel_tick = time.time()
         self._ws_fail_count = 0
         self._reconnect_pending = False
-        self.sws = self._new_ws()
+        try:
+            self.sws = self._new_ws()
+        except Exception as e:
+            # No Angel session (login failed): the watchdog keeps retrying, Dhan feeds prices meanwhile
+            print(f"[WS] Angel WebSocket could not start ({Session.last_error or e}); retrying in the background")
+            self.sws = None
         if not self._ws_watchdog_thread or not self._ws_watchdog_thread.is_alive():
             self._ws_watchdog_thread = threading.Thread(target=self._ws_watchdog_loop, daemon=True)
             self._ws_watchdog_thread.start()
+        if not self._dhan_backup_thread or not self._dhan_backup_thread.is_alive():
+            self._dhan_backup_thread = threading.Thread(target=self._dhan_backup_loop, daemon=True)
+            self._dhan_backup_thread.start()
+
+    # ── Dhan backup prices ─────────────────────────────────
+    # Angel index token -> Dhan index security ID (segment IDX_I)
+    _DHAN_INDEX_IDS = {"99926000": 13, "99926009": 25, "99926037": 27, "99926074": 442,
+                       "99919000": 51, "1": 51}
+    _DHAN_SEGMENTS  = {1: "NSE_EQ", 2: "NSE_FNO", 3: "BSE_EQ", 5: "MCX_COMM", 7: "BSE_FNO"}
+    DHAN_TAKEOVER_S = 20     # seconds without an Angel tick in market hours before Dhan takes over
+
+    def _dhan_backup_request(self):
+        """({segment: [security ids]}, {(segment, id): angel token}) for every subscribed token.
+        F&O and stock tokens are exchange tokens, the same numbers Dhan uses."""
+        index_tokens = {t for c in EXCHANGE_CONFIG.values() for t in c.get("spot_tokens", {}).values()}
+        req, back = {}, {}
+        for item in self.token_list:
+            seg = self._DHAN_SEGMENTS.get(item.get("exchangeType"))
+            for tok in item.get("tokens", []):
+                tok = str(tok)
+                if tok in self._DHAN_INDEX_IDS:
+                    s, sid = "IDX_I", self._DHAN_INDEX_IDS[tok]
+                elif seg and tok.isdigit() and tok not in index_tokens:
+                    s, sid = seg, int(tok)
+                else:
+                    continue       # an index Dhan has no known ID for: never guess
+                req.setdefault(s, []).append(sid)
+                back[(s, str(sid))] = tok
+        return req, back
+
+    def _dhan_backup_poll(self):
+        """One round of Dhan quotes for every subscribed contract, fed in as ticks. Returns how many."""
+        req, back = self._dhan_backup_request()
+        items = [(s, i) for s, ids in req.items() for i in ids]
+        if not items:
+            return 0
+        ad = _dhan_data_login()
+        n = 0
+        for k in range(0, len(items), 1000):          # Dhan: up to 1000 contracts a call, 1 call a second
+            if k:
+                time.sleep(1.1)
+            part = {}
+            for s, i in items[k:k + 1000]:
+                part.setdefault(s, []).append(i)
+            data = (ad._req("POST", "/marketfeed/quote", part) or {}).get("data") or {}
+            for s, rows in data.items():
+                if not isinstance(rows, dict):
+                    continue
+                for sid, q in rows.items():
+                    tok = back.get((s, str(sid)))
+                    if tok and isinstance(q, dict) and q.get("last_price"):
+                        self.on_data(None, dhan_quote_to_tick(tok, q))
+                        n += 1
+        return n
+
+    def _set_data_source(self, src, alert=""):
+        changed = src != self.data_source
+        self.data_source, self.feed_alert = src, alert
+        if not changed:
+            return
+        print(f"[FEED] Live prices from {src}" + (f": {alert}" if alert else ""))
+        if alert:
+            trigger_immediate_alert("⚠️ LiveOptionChain data problem", alert)
+            threading.Thread(target=lambda: subprocess.run(
+                ["afplay", "-v", "0.8", "/System/Library/Sounds/Sosumi.aiff"], capture_output=True),
+                daemon=True).start()
+        else:
+            trigger_immediate_alert("LiveOptionChain", "Angel One live prices are back", sound=False)
+        if self.status_cb:
+            try: self.status_cb(alert or "● Angel One live prices are back", "#f85149" if alert else "#3fb950")
+            except Exception: pass
+
+    def _dhan_backup_loop(self):
+        """When Angel sends no prices in market hours (login refused, Angel unreachable, socket
+        dead) poll the same contracts from Dhan so levels, entries and exits keep running. Angel
+        takes over again as soon as its ticks come back."""
+        while self.running:
+            time.sleep(1.5)
+            if not self.running:
+                break
+            if not self.token_list or not self._ws_session_open():
+                if self.data_source != "ANGEL":
+                    self._set_data_source("ANGEL")
+                continue
+            silent = time.time() - self._last_angel_tick
+            if silent < self.DHAN_TAKEOVER_S:
+                if self.data_source != "ANGEL":
+                    self._set_data_source("ANGEL")
+                continue
+            why = Session.last_error or f"no Angel prices for {int(silent)}s"
+            try:
+                n = self._dhan_backup_poll()
+                if not n:
+                    raise RuntimeError("Dhan returned no prices")
+                self._set_data_source("DHAN", f"ANGEL ONE DOWN ({why}). Live prices now come from Dhan.")
+            except Exception as e:
+                self._set_data_source("NONE", f"NO LIVE PRICES: Angel One down ({why}) and Dhan backup "
+                                              f"failed ({str(e)[:100]}). No trades are being taken.")
+                time.sleep(5)
 
     def stop_ws(self):
         self.running = False
@@ -7267,6 +7474,14 @@ class ControlPanel:
                                   font=(GUI_FONT, 9), anchor="w")
         self.status_lbl.pack(fill="x", padx=8, pady=3)
 
+        # 1b. Red alert banner: shown only while live prices or the Google Sheet are failing
+        self._alert_holder = tk.Frame(r, bg="#0d1117")
+        self._alert_holder.pack(side="bottom", fill="x", padx=16)
+        self.alert_banner = tk.Label(self._alert_holder, text="", bg="#b62324", fg="#ffffff",
+                                     font=(GUI_FONT, 12, "bold"), anchor="w", justify="left",
+                                     wraplength=1100, padx=10, pady=6)
+        r.after(3000, self._refresh_alert_banner)
+
         # 2. Main Live Scanner Start / Stop Action Buttons (PROMINENT, PINNED AT BOTTOM)
         bf = tk.Frame(r, bg="#0d1117")
         bf.pack(side="bottom", fill="x", padx=16, pady=4)
@@ -8659,6 +8874,30 @@ class ControlPanel:
         self.status_var.set(msg)
         self.status_lbl.config(fg=color)
 
+    def _alert_text(self):
+        """What the red banner says now ("" = all healthy)."""
+        msgs = []
+        if feed.running and feed.feed_alert:
+            msgs.append(f"⚠️ {feed.feed_alert}")
+        elif not Session.auth_token and Session.last_error:
+            msgs.append(f"⚠️ ANGEL ONE LOGIN FAILED: {Session.last_error} (retrying every minute)")
+        if SHEETS_HEALTH["err"] and time.time() - SHEETS_HEALTH["at"] < 180:
+            msgs.append(f"⚠️ GOOGLE SHEET WRITE FAILED: {SHEETS_HEALTH['err']} (retrying on the next sync)")
+        return "\n".join(msgs)
+
+    def _refresh_alert_banner(self):
+        try:
+            msg = self._alert_text()
+            if msg:
+                self.alert_banner.config(text=msg)
+                if not self.alert_banner.winfo_manager():
+                    self.alert_banner.pack(fill="x", pady=(2, 2))
+            elif self.alert_banner.winfo_manager():
+                self.alert_banner.pack_forget()
+        except Exception as e:
+            print(f"[UI] alert banner error: {e}")
+        self.root.after(2000, self._refresh_alert_banner)
+
     # ═══════════════════════════════════════════════════════
     # LIVE ORDERS — slim bar + Settings window
     # ═══════════════════════════════════════════════════════
@@ -9113,7 +9352,13 @@ class ControlPanel:
 # ═══════════════════════════════════════════════════════════
 if __name__=="__main__":
     print("Logging in to Angel One...")
-    Session.login()
+    try:
+        Session.login()
+    except Exception as e:
+        # Never stop the app over an Angel outage: prices come from Dhan until the login works
+        print(f"⚠️  Angel One login failed: {Session.last_error or e}")
+        print("   Starting anyway — live prices from Dhan; the Angel login is retried every minute")
+        Session.login_in_background()
     print("Loading instrument list (cached once per day)...")
     Session.load_scrip()
 

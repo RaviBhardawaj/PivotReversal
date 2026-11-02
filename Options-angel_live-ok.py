@@ -2423,6 +2423,42 @@ class ForwardTestTracker:
             return trade
         return None
 
+    def record_unlogged(self, st, symbol, expiry, exit_px, exit_time="15:00:00",
+                        reason="EOD 3PM Square-off @ CMP (shown on dashboard, entry not recorded live)"):
+        """A trade the strategy confirmed (shown live on the dashboard) that never reached the
+        trade log: written as a CLOSED row at exit_px so the sheet always matches the dashboard.
+        Bookkeeping only, never sends an order. Returns the row, or None if already recorded."""
+        side = "BUY" if st.mode == "BUY" else "SELL"
+        ep = _safe_float(st.entry_price)
+        exit_px = _safe_float(exit_px)
+        if ep <= 0 or exit_px <= 0 or not st.entry_time:
+            return None
+        same = lambda t: (t.get('Action') == side and t.get('Type') == st.opt_type
+                          and int(_safe_float(t.get('Strike', 0))) == int(st.strike)
+                          and (t.get('Expiry', '') or '') == (expiry or ''))
+        if any(same(t) for t in list(self.get_active_trades()) + list(self._today_closed())):
+            return None
+        now = datetime.now()
+        tg = (list(st.targets) + [0.0] * 5)[:5]
+        sl = _safe_float(getattr(st, 'entry_sl', 0)) or _safe_float(st.sl)
+        pnl = round((ep - exit_px) if side == "SELL" else (exit_px - ep), 2)
+        hhmmss = str(st.entry_time).replace(':', '')
+        trade = {
+            'Trade_ID': f"{symbol}_{st.opt_type}_{st.strike}{'_' + expiry if expiry else ''}_{now:%Y%m%d}_{hhmmss}",
+            'Date': now.strftime('%Y-%m-%d'), 'Entry_Time': st.entry_time, 'Timeframe': '15M Intraday',
+            'Symbol': symbol, 'Type': st.opt_type, 'Strike': st.strike, 'Expiry': expiry, 'Action': side,
+            'Entry_Price': round(ep, 2), 'SL': round(sl, 2), 'Initial_SL': round(sl, 2),
+            'Target_1': tg[0], 'Target_2': tg[1], 'Target_3': tg[2], 'Target_4': tg[3], 'Target_5': tg[4],
+            'Trade_High': round(max(ep, exit_px), 2), 'Trade_Low': round(min(ep, exit_px), 2),
+            'Max_Pts': max(pnl, 0.0), 'Exit_Price': round(exit_px, 2), 'Exit_Time': exit_time,
+            'Exit_Reason': reason, 'PnL_Pts': pnl, 'Status': 'CLOSED',
+        }
+        self._append_row(trade)
+        self._closed_today.append(trade)
+        print(f"📝 [FWD TEST] Recorded dashboard-only {side} {st.opt_type} {st.strike} {expiry} "
+              f"@ {ep:.2f} → {exit_px:.2f} | PnL {pnl:+.2f} pts")
+        return trade
+
     def _today_closed(self):
         """Today's closed trades: the trade log plus this session's closes (by Trade_ID)."""
         today = datetime.now().strftime('%Y-%m-%d')
@@ -4402,6 +4438,47 @@ class FeedEngine:
         from advanced_strategy.engine import get_monthly_expiry as _calc_m
         return _calc_m(all_exps, ref_date)
 
+    _OPEN_TRADE_STATUSES = ("Active", "Target 1 Hit", "Target 2 Hit", "Target 3 Hit", "Target 4 Hit")
+
+    def _eod_exit_price(self, symbol, st, token):
+        """The 15:00 square-off price of a strike: the 14:59 one-minute close from Dhan, or the
+        last live price when Dhan has no candles."""
+        try:
+            bars = dhan_minute_bars(symbol, st.expiry, st.strike, st.opt_type, datetime.now().strftime("%Y-%m-%d"))
+            b = [x for x in bars if x[0].time() < EOD_SQUARE_OFF_TIME]
+            if b:
+                return b[-1][4]
+        except Exception as e:
+            print(f"[EOD] 1-min candles for {st.opt_type} {st.strike} unavailable ({e}); using last price")
+        return _safe_float(self.live_data.get(token, {}).get("ltp", 0))
+
+    def eod_close_day(self, symbol: str):
+        """15:45 day close: every trade the dashboard still shows as live but the trade log never
+        got is recorded at its 15:00 price, then today's trades leave the dashboard so it shows
+        only the next session's plan. The trade log and the sheet keep everything."""
+        meta_by_key = {(m["opt_type"], m["strike"], m.get("expiry", "")): t for t, m in self.token_to_meta.items()}
+        with self.lock:
+            states = list({id(s): s for s in self.strategy_states.values()}.values())
+        added = 0
+        for st in states:
+            if st.trade_status not in self._OPEN_TRADE_STATUSES or not st.entry_time:
+                continue
+            tok = meta_by_key.get((st.opt_type, st.strike, st.expiry or ""), "")
+            if self.forward_tracker.record_unlogged(st, symbol, st.expiry or "", self._eod_exit_price(symbol, st, tok)):
+                added += 1
+        if added:
+            print(f"[EOD] Recorded {added} dashboard trade(s) that were never written live")
+        with self.lock:
+            self.strategy_states.clear()
+            self.forward_tracker._closed_today = []
+            self._dash_reset_date = datetime.now().strftime("%Y-%m-%d")
+        self._last_ft_sync_ts = 0.0
+        self.sync_forward_test_to_sheet()
+        print("[EOD] ✅ Today's trades cleared from the dashboard (kept in the trade log and the sheet)")
+        if self.status_cb:
+            try: self.status_cb(f"🌙 Day closed — {added} missed trade(s) recorded, dashboard cleared for tomorrow", "#58a6ff")
+            except Exception: pass
+
     def build_next_day_levels(self, symbol: str):
         """After the close (15:45): the next session's strike levels, built from today's candle,
         for the current AND the next expiry, then eod_planner.py, which takes its strike levels
@@ -4411,6 +4488,10 @@ class FeedEngine:
             if getattr(self, "_next_levels_date", None) == today:
                 return
             self._next_levels_date = today
+        try:
+            self.eod_close_day(symbol)
+        except Exception as e:
+            print(f"[EOD] day close error: {e}")
         try:
             print(f"\n[EOD] ⏰ 15:45 → Calculating NEXT-DAY levels for {symbol}...")
             _mtf = get_tv_multi_timeframe_pivots(symbol, force_refresh=True)
@@ -6086,18 +6167,21 @@ class FeedEngine:
 
                     # ── Dual State Machine tracking (BUY on S2/S1, SELL on R2/R1) ──
                     exp = meta.get("expiry", "")
+                    now_day = datetime.now().strftime("%Y-%m-%d")
                     with self.lock:
                         buy_key  = (opt_type, strike, exp, "BUY") if exp else (opt_type, strike, "BUY")
                         sell_key = (opt_type, strike, exp, "SELL") if exp else (opt_type, strike, "SELL")
                         st_buy   = self.strategy_states.get(buy_key)
                         if not st_buy:
                             st_buy = StrategyStrikeState(opt_type, strike, expiry=exp, mode="BUY")
-                            self.forward_tracker.seed_state(st_buy, symbol)
+                            if getattr(self, '_dash_reset_date', None) != now_day:   # day closed: don't bring today's trades back
+                                self.forward_tracker.seed_state(st_buy, symbol)
                             self.strategy_states[buy_key] = st_buy
                         st_sell  = self.strategy_states.get(sell_key)
                         if not st_sell:
                             st_sell = StrategyStrikeState(opt_type, strike, expiry=exp, mode="SELL")
-                            self.forward_tracker.seed_state(st_sell, symbol)
+                            if getattr(self, '_dash_reset_date', None) != now_day:   # day closed: don't bring today's trades back
+                                self.forward_tracker.seed_state(st_sell, symbol)
                             self.strategy_states[sell_key] = st_sell
 
                         legacy_key = (opt_type, strike, exp) if exp else (opt_type, strike)

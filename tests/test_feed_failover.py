@@ -122,3 +122,24 @@ assert not app.check_option_sell_entry(310.95,piv,"CE",hh=466.05,state="CONFIRME
 b=app.check_option_entry(piv["S3"]+1,piv,"CE",ll=piv["S3"]-5,state="CONFIRMED_BUY",level="S3")
 assert b["entry"] and b["zone"]=="S3 Reclaim" and b["T1"]==piv["S2"], b
 print("R3 rejection SELL and S3 reclaim BUY are recorded entries: OK")
+
+# 8. 15:45 day close: a dashboard-only live trade is recorded at its 15:00 price, the dashboard is cleared
+from datetime import datetime as _D
+f2=app.FeedEngine()
+f2.forward_tracker.filepath=os.path.join(_T,"ft2.csv"); f2.forward_tracker.state_file=os.path.join(_T,"ft2_open.json")
+f2.forward_tracker._init_file()
+st=app.StrategyStrikeState("CE",22900,expiry="03NOV2026",mode="SELL")
+st.entry_price, st.entry_time, st.sl, st.entry_sl = 310.95, "13:35:00", 466.05, 466.05
+st.targets=[284.67,251.22,197.07,142.92,109.47]; st.trade_status="Active"
+f2.strategy_states[("CE",22900,"03NOV2026","SELL")]=st
+f2.token_to_meta={"53836":{"opt_type":"CE","strike":22900,"expiry":"03NOV2026","symbol":"NIFTY"}}
+app.dhan_minute_bars=lambda *a: [(_D(2026,11,2,14,58),1,1,1,410.0),(_D(2026,11,2,14,59),1,1,1,412.45),(_D(2026,11,2,15,0),1,1,1,420.0)]
+f2.eod_close_day("NIFTY")
+import csv as _c
+rows=[r for r in _c.DictReader(open(f2.forward_tracker.filepath)) if r["Strike"]=="22900"]
+assert len(rows)==1 and rows[0]["Exit_Price"]=="412.45" and rows[0]["PnL_Pts"]=="-101.5" and rows[0]["Status"]=="CLOSED", rows
+assert not f2.strategy_states and f2._dash_reset_date==_D.now().strftime("%Y-%m-%d")
+f2.strategy_states[("CE",22900,"03NOV2026","SELL")]=st     # running it again never writes a duplicate
+f2.eod_close_day("NIFTY")
+assert len([r for r in _c.DictReader(open(f2.forward_tracker.filepath)) if r["Strike"]=="22900"])==1
+print("15:45 day close: missed dashboard trade recorded at 15:00 price, dashboard cleared: OK")

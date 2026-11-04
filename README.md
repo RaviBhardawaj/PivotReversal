@@ -11,6 +11,7 @@ placement through Angel One, Dhan or Jainam XTS.
 | `Options-angel_live-ok.py` | Main app: Angel One feed, pivot levels, setups, forward test, Tk dashboard, order bar |
 | `brokers/` | Order engine and broker adapters (`angel.py`, `dhan.py`, `xts.py`) |
 | `eod_planner.py` | End-of-day planner that builds the next day's pivot plan |
+| `fno_planner.py` | Daily current-expiry orders for the other F&O symbols ("F&O Orders" sheet tab) |
 | `web_server.py`, `web/` | Local web dashboard (bound to localhost; it never places orders) |
 | `run_option_chain.command`, `run.sh`, `run_web.sh` | Launchers (macOS / shell) |
 | `LiveOptionChain.app` | macOS launcher app |
@@ -41,6 +42,20 @@ and can send one 1-lot NIFTY BUY LIMIT 20% below LTP that it modifies and cancel
 
 Secrets (`.env`, `credentials.json`, `token.pickle`, `config.json`, Dhan files) are listed in
 `.gitignore` and must never be committed.
+
+## Daily F&O orders (symbols other than NIFTY)
+
+At 3:45 PM the app also builds the next session's 15M/1H reversal orders for the F&O indices
+(BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, BANKEX), **current expiry only**. Each contract's entry,
+targets and SL come from its own official daily candle, the same maths as the Other Symbols tab.
+
+- They are kept apart from NIFTY: `fno_orders.json` and the **F&O Orders** tab of the Google Sheet
+  (one batched append per run, retried if the connection drops).
+- Dashboard → Other Symbols tab → **Daily F&O Orders**: filter by symbol, side, timeframe, CE/PE,
+  expiry and date; add or remove symbols of the daily list; **⚡ GENERATE ALL F&O** with NEXT
+  EXPIRY picked when you want next-expiry orders.
+- The list is saved as `fno_plan_symbols` in `data_settings.json` (`"ALL"` = every F&O symbol).
+- Test: `python3 tests/test_fno_orders.py`
 
 ## Option strike levels (match TradingView)
 

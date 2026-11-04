@@ -9,6 +9,7 @@ Source: `Options-angel_live-ok.py`. `StrategyStrikeState` runs the state machine
   - P zone: the strike below and above P, traded on both CE and PE.
 - A strike that isn't in a 15M or 1H set gets an empty `trade_tf`. It is never entered, recorded or alerted.
 - Entries happen only in the live market (09:15–15:30).
+- **Expiries watched:** an expiry that has passed (e.g. yesterday's, still in the morning instrument list) is never watched; it is replaced by the nearest open expiry, so the current expiry always gets ticks. If the app keeps running past an expiry day, the new-day refresh re-subscribes on the new current expiry (AJ, 4 Nov: 23750 PE 09NOV S2 missed).
 - Setups, entries and exits only use **real trades from today** (exchange trade time 09:15 or later) with today's traded high/low. Before the first trade of the day the feed still shows yesterday's close and high/low; those are ignored.
 
 ## 2. Option levels for each strike

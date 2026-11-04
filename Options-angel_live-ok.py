@@ -486,14 +486,16 @@ SELL_SETUP_STATES = ("SWEEP_R2", "RECLAIM_R2", "RETEST_R2", "TRADING_IN_FAVOR_SE
 # (BUY: S2 swept and not held) or from R2 to R3 (SELL: R2 broken and price pushing on to R3).
 S3_FALL_FRACTION = 0.5
 # Entry rule (AJ, 4 Nov 2026), BUY at S2 (SELL at R2 is the mirror):
-#   1. price trades BELOW S2 (a real break, not a near-touch);
+#   1. price trades below S2, or comes within 1% of it (near-touch counts, AJ 4 Nov);
 #   2. the first closed 5M candle back ABOVE S2 is the confirmation candle, whatever its colour;
 #   3. after that candle has closed, price pulls back and retests S2 (within RETEST_BAND_PCT) and holds;
 #   4. entry on a break above the confirmation candle's high.
 #   If price runs through the confirmation high before the retest, that is a continuation move:
 #   the setup is dropped and only a fresh break below S2 starts a new one. A trade below S2 at any
 #   step starts the setup again from that sweep.
-REQUIRE_LEVEL_BREAK = True     # False = old rule: coming within 1% of S2/R2 also counts as a sweep
+REQUIRE_LEVEL_BREAK = False    # True = only a real trade through S2/R2 is a sweep (no 1% near-touch)
+ALLOW_UNWATCHED_DIP = False    # True = old rule: a day low under the level seen from WAITING (a dip the
+                               # app never watched, e.g. before a restart) also starts a setup
 CONF_ANY_COLOUR     = True     # False = old rule: the confirmation candle must close green (BUY) / red (SELL)
 RETEST_BAND_PCT     = 0.015
 
@@ -878,7 +880,7 @@ class StrategyStrikeState:
             # Step 2: Support Reclaimed — Await Candle Close Confirmation
             # (old rule only: a day low under the level seen from WAITING also counted as the sweep,
             #  so a setup could start from a dip the app never watched, e.g. before a restart)
-            elif (self.state == f"SWEEP_{active_lvl}" or (not REQUIRE_LEVEL_BREAK and self.state == "WAITING"
+            elif (self.state == f"SWEEP_{active_lvl}" or (ALLOW_UNWATCHED_DIP and self.state == "WAITING"
                                                           and valid_low < sup_thresh and ltp < r1)) and ltp >= fs_sup:
                 self.state         = f"RECLAIM_{active_lvl}"
                 self.trigger_level = active_lvl
@@ -1054,7 +1056,7 @@ class StrategyStrikeState:
                 self.signal = f"▼ {self.opt_type} SWEEP {act}{re_tag} — Awaiting Rejection & Candle Close"
 
             # Step 2: R2 Rejected — Await Candle Close Confirmation
-            elif (self.state == f"SWEEP_{act}" or (not REQUIRE_LEVEL_BREAK and self.state == "WAITING"
+            elif (self.state == f"SWEEP_{act}" or (ALLOW_UNWATCHED_DIP and self.state == "WAITING"
                                                    and valid_high > r_lvl and ltp > s1)) and ltp <= fr2:
                 self.state         = f"RECLAIM_{act}"
                 self.trigger_level = act

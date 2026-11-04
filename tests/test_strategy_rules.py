@@ -101,14 +101,14 @@ print("8 green candle before the sweep: ignored: OK")
 
 # 9. confirmation candle closed well above S2 and price runs through its high BEFORE any retest:
 #    a continuation move -> setup dropped (AJ, 4 Nov). A later pull-back to S2 and break of the old
-#    high does NOT enter; only a fresh break below S2 starts a new setup.
+#    high does NOT enter on the old setup; only a fresh sweep of S2 starts a new one.
 nr=[(at(9,25),S2*1.05),(at(9,29,58),S2*0.97),(at(9,30,10),S2*1.03),(at(9,33),S2*1.06),(at(9,34),S2*1.07),
     (at(9,35),S2*1.075)]           # sweep in the 09:25 candle; the 09:30 candle closes above S2 (high 1.07); 09:35 runs above it
 st=run(PIV,nr,"BUY")
 assert st.state=="WAITING" and st.trade_status=="Waiting" and "continuation" in st.signal, (st.state, st.signal)
 nr2=nr+[(at(9,36),S2*1.01),(at(9,37),S2*1.05),(at(9,38),S2*1.08)]
 st=run(PIV,nr2,"BUY")
-assert st.trade_status=="Waiting" and st.state=="WAITING", (st.state, st.signal)
+assert st.trade_status=="Waiting", (st.state, st.signal)   # the 09:36 near-touch starts a NEW setup; no entry yet
 print("9 continuation through the confirmation high before a retest: ignored, no entry later: OK")
 # 10. SL = the LL of the whole sweep. Price dipping under the level again while the
 #     confirmation candle forms does NOT tighten the SL to that shallower dip (AJ, 12 Oct:
@@ -134,16 +134,12 @@ def run_near():
     for ts,px in near:
         FakeDT.v=ts; st.update_tick(px,PIV,ts,opt_high=px,opt_low=px)
     return st
-# AJ, 4 Nov: a near-touch that never trades above R2 is not a sweep, so this is no trade now
-st=run_near()
-assert st.trade_status=="Waiting" and st.state=="WAITING", (st.state, st.signal)
-print("11a near-touch of R2 without trading above it: no setup: OK")
-# with the old rule switched back on (near-touch sweep, red candle only), the SL is still the sweep HH, never R3
-app.REQUIRE_LEVEL_BREAK=False; app.CONF_ANY_COLOUR=False
+# near-touch counts as a sweep (AJ, 4 Nov); with the old red-candle-only rule the SL is still the sweep HH, never R3
+app.CONF_ANY_COLOUR=False
 try:
     st=run_near()
 finally:
-    app.REQUIRE_LEVEL_BREAK=True; app.CONF_ANY_COLOUR=True
+    app.CONF_ANY_COLOUR=True
 assert st.trade_status=="Active" and st.sl==round(R2*0.9995,2) and st.sl!=R3, (st.state, st.sl, st.signal)
 se=app.check_option_sell_entry(R2*0.9955,PIV,"PE",hh=st.hh,state=st.state,level=st.trigger_level,opt_high=R2*0.9955)
 assert se["SL"]==st.sl, (se["SL"], st.sl)

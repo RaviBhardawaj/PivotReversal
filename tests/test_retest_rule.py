@@ -66,12 +66,17 @@ st=run(PIV,down,"BUY")
 assert st.trade_status=="Waiting" and st.conf_high==0, (st.state, st.signal)
 print("3 continuation below S2 with no close back above: no entry: OK")
 
-# 4. near-touch of S2 that never trades below it: not a sweep
+# 4. near-touch of S2 within 1% (never below) is a sweep (AJ, 4 Nov) -> same close / retest / break rule
 near=[(at(9,29),B(1.03)),(at(9,30,10),B(1.006)),(at(9,31),B(1.002)),(at(9,34),B(1.01)),(at(9,35,10),B(1.004)),
-      (at(9,36),B(1.02)),(at(9,37),B(1.01)),(at(9,38),B(1.025))]
+      (at(9,36),B(1.008)),(at(9,37),B(1.012))]
 st=run(PIV,near,"BUY")
+assert st.trade_status=="Active" and st.entry_price==B(1.01) and st.sl==B(1.006), (st.state, st.sl, st.signal)
+# with REQUIRE_LEVEL_BREAK on, the same path is no setup
+app.REQUIRE_LEVEL_BREAK=True
+try: st=run(PIV,near,"BUY")
+finally: app.REQUIRE_LEVEL_BREAK=False
 assert st.state=="WAITING" and st.trade_status=="Waiting", (st.state, st.signal)
-print("4 near-touch of S2 (never below): no setup: OK")
+print("4 near-touch of S2 within 1%%: BUY @ %.2f after close/retest/break (off with REQUIRE_LEVEL_BREAK): OK"%B(1.01))
 
 # 5. the first candle that closes above S2 counts even if it is red
 red=[(at(9,29),B(1.04)),(at(9,30,5),B(1.03)),(at(9,31),B(0.96)),(at(9,33),B(1.035)),(at(9,34,50),B(1.01)),
@@ -101,9 +106,15 @@ st=run(PIV,sdown[:7],"SELL")
 assert st.trade_status=="Waiting" and st.state=="WAITING" and "continuation" in st.signal, (st.state, st.signal)
 print("8 SELL continuation below the close-below candle low without a retest: ignored: OK")
 
-# 9. SELL near-touch of R2 that never trades above it: no setup
+# 9. SELL near-touch of R2 within 1% is a sweep too
 snear=[(t,round(R2*(2-p/S2),2)) for t,p in near]
 st=run(PIV,snear,"SELL")
-assert st.state=="WAITING" and st.trade_status=="Waiting", (st.state, st.signal)
-print("9 near-touch of R2 (never above): no setup: OK")
+assert st.trade_status=="Active" and st.entry_price==min(p for _,p in snear[2:5]), (st.state, st.entry_price, st.signal)
+print("9 SELL near-touch of R2 within 1%%: SELL @ %.2f: OK"%st.entry_price)
+# 10. a day low under S2 the app never watched (e.g. before a restart) does not start a setup
+st=app.StrategyStrikeState("CE",22600,expiry="13OCT2026",mode="BUY")
+for ts,p in [(at(11,0),B(1.05)),(at(11,4),B(1.04)),(at(11,5,10),B(1.045)),(at(11,10,10),B(1.042))]:
+    FakeDT.v=ts; st.update_tick(p,PIV,ts,opt_high=B(1.10),opt_low=B(0.90))
+assert st.state=="WAITING", (st.state, st.signal)
+print("10 unwatched dip below S2 (day low only): no setup: OK")
 print("RETEST RULE TESTS PASSED")

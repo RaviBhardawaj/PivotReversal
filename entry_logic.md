@@ -23,7 +23,7 @@ Source: `Options-angel_live-ok.py`. `StrategyStrikeState` runs the state machine
 
 ## 3. BUY entry (CE or PE), support side
 The buy level is S2, or S1 when S2 ≤ 0.05. Rule from AJ, 4 Nov: **close back above S2, retest, then entry above the high of that first close-above candle. A one-way move is ignored.**
-1. **Sweep.** Price trades **below** the level. Coming near it without trading below it is not a sweep.
+1. **Sweep.** LTP trades below the level, or comes within 1% of it (AJ, 4 Nov: the near-touch stays).
    - State becomes `SWEEP_S2`, and the lowest price is recorded as **LL**.
    - The levels are frozen at that moment.
 2. **Reclaim.** LTP gets back above the level, and the state becomes `RECLAIM_S2`.
@@ -34,11 +34,11 @@ The buy level is S2, or S1 when S2 ≤ 0.05. Rule from AJ, 4 Nov: **close back a
 5. **Entry: break above the confirmation high.** After the retest, LTP trades above the confirmation candle's high, and the state becomes `CONFIRMED_BUY`.
 
 **One-way moves are ignored:**
-- **Up:** if price breaks above the confirmation high *before* the retest, the setup is dropped (signal "continuation … ignored"). A later pull-back does not revive it; only a fresh trade below the level starts a new setup.
+- **Up:** if price breaks above the confirmation high *before* the retest, the setup is dropped (signal "continuation … ignored"). A later pull-back does not revive it; only a fresh sweep of the level starts a new one.
 - **Down:** if price keeps falling and no candle closes back above the level, there is no entry. Any trade below the level during the retest or before the entry restarts the setup from that sweep: a new close-above candle is needed. The LL stays the lowest price of the whole sweep, so a shallower dip never moves the SL closer.
 - After an app restart, a dip below the level that the app did not watch live does not start a setup.
 
-The old behaviour can be switched back in `Options-angel_live-ok.py`: `REQUIRE_LEVEL_BREAK = False` (a near-touch within 1% counts as a sweep) and `CONF_ANY_COLOUR = False` (the candle must close green).
+Switches in `Options-angel_live-ok.py`: `REQUIRE_LEVEL_BREAK = True` makes only a real trade through the level a sweep (no near-touch); `CONF_ANY_COLOUR = False` brings back the green-candle (BUY) / red-candle (SELL) requirement; `ALLOW_UNWATCHED_DIP = True` brings back starting a setup from a day low the app never watched.
 
 When the entry is confirmed:
 - **Entry price** is the confirmation candle's high. The forward test records the live LTP at that moment.
@@ -50,7 +50,7 @@ When the entry is confirmed:
   - From S1: P, R1, R2, R3, R3 + 5%.
 
 ## 4. SELL entry, resistance side (mirror image)
-1. **Sweep.** Price trades **above** R2 (a near-touch is not a sweep). The highest price is recorded as **HH**.
+1. **Sweep.** LTP goes above R2, or comes within 1% of it. The highest price is recorded as **HH**.
 2. **Rejection.** LTP drops back below R2.
 3. **Close-below candle.** The first fully closed 5-minute candle below R2, red or green, from the sweep candle or later. Its low is the **confirmation low**.
 4. **Retest.** After that candle has closed, price pushes back above its close and into the R2 zone (within 1.5% below R2), without trading above R2.
@@ -77,4 +77,5 @@ When the entry is confirmed:
 - Every alert is also written to `alerts_history.csv`.
 
 ## Known gaps vs the PDF spec (not changed)
+- A sweep is counted when price comes within 1% of S2/R2, not only on a real break through it.
 - Targets are a 5-step ladder; the spec says the next pivot only.

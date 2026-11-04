@@ -250,6 +250,23 @@ def traded_today_tick(message: dict, ltp: float, prev_ltp: float = 0.0, now: dat
     return prev_ltp > 0 and abs(ltp - prev_ltp) > 1e-9
 
 
+def is_live_market_open(dt: datetime = None) -> bool:
+    """
+    Checks if Indian Equity/Derivatives market (NSE/NFO) is currently in regular live trading hours:
+    Monday through Friday, 09:15:00 to 15:30:00 IST.
+    Supports FORCE_MARKET_OPEN=1 environment variable for testing/override.
+    """
+    if os.getenv("FORCE_MARKET_OPEN") == "1":
+        return True
+    if dt is None:
+        dt = datetime.now()
+    if dt.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    from datetime import time as dt_time
+    cur_t = dt.time()
+    return dt_time(9, 15, 0) <= cur_t <= dt_time(15, 30, 0)
+
+
 def _expiry_date(expiry):
     """'09NOV2026' -> date, or None when it isn't an expiry string."""
     try:
@@ -284,22 +301,6 @@ def roll_expiries(expiries, open_expiries, today: date = None) -> list:
             dropped -= 1
     return sorted(kept, key=lambda e: _expiry_date(e) or date.max)
 
-
-def is_live_market_open(dt: datetime = None) -> bool:
-    """
-    Checks if Indian Equity/Derivatives market (NSE/NFO) is currently in regular live trading hours:
-    Monday through Friday, 09:15:00 to 15:30:00 IST.
-    Supports FORCE_MARKET_OPEN=1 environment variable for testing/override.
-    """
-    if os.getenv("FORCE_MARKET_OPEN") == "1":
-        return True
-    if dt is None:
-        dt = datetime.now()
-    if dt.weekday() >= 5:  # Saturday=5, Sunday=6
-        return False
-    from datetime import time as dt_time
-    cur_t = dt.time()
-    return dt_time(9, 15, 0) <= cur_t <= dt_time(15, 30, 0)
 
 # ═══════════════════════════════════════════════════════════
 # FIBONACCI PIVOTS & REVERSAL STRATEGY LOGIC

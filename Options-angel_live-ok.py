@@ -2003,6 +2003,15 @@ def trade_expiry(trade_id):
     return m.group(1) if m else ""
 
 
+def allowed_entry_expiries(curr_exp, next_exp, use_next):
+    """Expiries the strategy may open trades/orders on.
+    Next expiry ticked => None (no restriction); unticked => the current expiry only."""
+    if use_next:
+        return None
+    curr = str(curr_exp or "").strip()
+    return [curr] if curr else None
+
+
 class ForwardTestTracker:
     """
     Logs every forward test trade entry & exit to forward_test_trades.csv.
@@ -2019,6 +2028,9 @@ class ForwardTestTracker:
         self._closed_keys_today = set()  # {(opt_type, strike, action, date_str)} — action-aware
         self._sl_hit_count      = {}     # {(opt_type, strike, action, date_str) -> int}
         self.paper_only         = False  # True => never route orders to LiveOrderManager
+        # Expiries new trades/orders may be opened on (upper-case). None = any expiry.
+        # Set from the "Next Expiry ▸ Enable" tick box: unticked => current expiry only.
+        self.allowed_expiries   = None
         # Open trades and today's re-entry guards are saved here, so an app restart
         # (internet drop, crash, Mac sleep) picks up the same trades and keeps watching them.
         self.state_file         = os.path.splitext(filepath)[0] + "_open.json"
@@ -2026,6 +2038,16 @@ class ForwardTestTracker:
         self._seed_closed_cache = None
         self._restored_ids      = self._restore_snapshot()
         self._init_file()
+
+    def set_allowed_expiries(self, expiries):
+        """Restrict new entries to these expiries (None or empty = no restriction)."""
+        allowed = {str(e).strip().upper() for e in (expiries or []) if str(e or "").strip()}
+        self.allowed_expiries = allowed or None
+
+    def expiry_allowed(self, expiry) -> bool:
+        if not self.allowed_expiries:
+            return True
+        return str(expiry or "").strip().upper() in self.allowed_expiries
 
     @staticmethod
     def _trade_keys(t):
@@ -2162,6 +2184,8 @@ class ForwardTestTracker:
         # Allows same strike to go BUY→target→SELL→target (bidirectional loop)
         closed_key = (symbol, opt_type, strike, expiry, action, date_str) if (symbol and expiry) else ((opt_type, strike, expiry, action, date_str) if expiry else (opt_type, strike, action, date_str))
 
+        if not self.expiry_allowed(expiry):
+            return None   # Next expiry not enabled — only current-expiry trades/orders
         if not is_live_market_open():
             return None   # Entries strictly allowed during live market hours
         if datetime.now().time() >= EOD_SQUARE_OFF_TIME:
@@ -7077,7 +7101,7 @@ class ControlPanel:
             nf, text="Enable", variable=self.use_next_exp,
             bg="#161b22", fg="#58a6ff", selectcolor="#21262d",
             activebackground="#161b22", activeforeground="#58a6ff",
-            font=("Consolas", 9), command=self._refresh_display
+            font=("Consolas", 9), command=self._on_use_next_exp_toggled
         ).pack(side="left", padx=6)
 
         lbl(frame, "Strikes (ATM +/-)", 4)
@@ -7927,18 +7951,31 @@ class ControlPanel:
             self.expiry_var.set(expiries[0])
             # Auto-select next expiry if available
             if len(expiries) > 1:
-                self.next_exp_var.set(expiries[1])
-                self.use_next_exp.set(True)
+                self.next_exp_var.set(expiries[1])   # keep the user's Enable tick as it is
             else:
                 self.next_exp_var.set("")
+        self._apply_expiry_gate()
         self._set_status(f"● {len(expiries)} expiries for {sym}")
         self._refresh_display()
 
+    def _apply_expiry_gate(self):
+        """Next Expiry unticked => only current-expiry trades/orders are generated."""
+        allowed = allowed_entry_expiries(self.expiry_var.get(), self.next_exp_var.get(),
+                                         self.use_next_exp.get())
+        feed.forward_tracker.set_allowed_expiries(allowed)
+        print(f"[EXPIRY] New entries allowed on: {', '.join(allowed) if allowed else 'all loaded expiries'}")
+
+    def _on_use_next_exp_toggled(self):
+        self._apply_expiry_gate()
+        self._refresh_display()
+
     def _on_expiry_selected(self):
+        self._apply_expiry_gate()
         self._refresh_display()
 
     def _on_next_expiry_selected(self):
         self.use_next_exp.set(True)
+        self._apply_expiry_gate()
         if hasattr(self, "exp_next_var"):
             self.exp_cur_var.set(False)
             self.exp_next_var.set(True)
@@ -9056,7 +9093,8 @@ class ControlPanel:
             messagebox.showerror("Error", "Please select an expiry"); return
         try:   # remembered so an auto-restart resumes the same symbol
             with open(os.path.join(BASE_DIR, "last_session.json"), "w") as _lf:
-                json.dump({"exchange": exch, "symbol": symbol}, _lf)
+                json.dump({"exchange": exch, "symbol": symbol,
+                           "use_next_exp": bool(self.use_next_exp.get())}, _lf)
         except Exception:
             pass
 
@@ -9065,6 +9103,7 @@ class ControlPanel:
         next_exp = (self.next_exp_var.get() or "").strip()
         if next_exp and next_exp != expiry and (self.use_next_exp.get() or self.expiry_filter_var.get() == "NEXT"):
             expiries_to_load.append(next_exp)
+        self._apply_expiry_gate()
 
         # Always include monthly expiry for Advance Strategy (1H Structure)
         m_exp = feed.get_monthly_expiry(symbol)
@@ -9160,6 +9199,7 @@ if __name__=="__main__":
                 _last = json.load(_lf)
             app.exchange_var.set(_last.get("exchange", "NFO"))
             app.symbol_var.set(_last.get("symbol", "NIFTY"))
+            app.use_next_exp.set(bool(_last.get("use_next_exp", True)))
             app.expiry_var.set("")
             app._load_expiries()
         except Exception:

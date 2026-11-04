@@ -24,7 +24,9 @@
   </div>
 </header>
 
-<div class="glass statusbar" id="statusbar"><span class="dot"></span><span id="status-text">Connecting to the launcher…</span></div>
+<div class="glass banner" id="launcher-banner" hidden>⚠️ The Python launcher is running. Close it before you start the scanner here, so the feed, sheet and orders aren't doubled.</div>
+
+<div class="glass statusbar" id="statusbar"><span class="dot"></span><span id="status-text">Connecting…</span></div>
 
 <div class="grid top">
   <section class="glass card">
@@ -103,7 +105,7 @@
   <span class="fg" id="t-ft"></span>
 </section>
 
-<p class="foot small">Browser view of the running launcher. Every button here acts on the launcher itself.</p>
+<p class="foot small">Glass dashboard · runs on its own with <code>run_glass_dashboard.command</code> · bound to this Mac only (127.0.0.1)</p>
 </div>
 
 <!-- modals -->

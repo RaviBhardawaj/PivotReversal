@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Glass Dashboard: a browser view of the running Tk launcher (Options-angel_live-ok.py).
+Glass Dashboard bridge: serves the glass web page (glass_web/) and connects it to the
+launcher's control logic (ControlPanel in Options-angel_live-ok.py).
 
-It runs inside the launcher's own process, so it shows exactly what the Tk window shows
-(same feed, same strategy state, same reversal rows, same order engine) and its buttons call
-the launcher's own handlers. Nothing here re-implements the strategy, and it never starts a
-second Angel session or a second order engine.
+glass_server.py runs that ControlPanel without a window (headless_tk.py) and calls start()
+here. The page shows the same feed, strategy state, reversal rows and order engine the launcher
+would, and its buttons call the same handlers, so nothing here re-implements the strategy.
 
-    http://127.0.0.1:8780/      (GLASS_DASHBOARD_PORT=<port> to change, 0 to turn it off)
-
-The server binds to 127.0.0.1 only. It uses the standard library only (no new packages).
-The existing web_server.py dashboard is separate and is not touched.
+The server binds to 127.0.0.1 only and uses the standard library only (no new packages).
+The existing web_server.py dashboard and the Tk launcher are separate and are not touched.
 """
 
 import json
 import os
+import subprocess
 import threading
 import time
 import traceback
@@ -52,6 +51,28 @@ def _f(v, default=0.0):
 def _fmt(v):
     v = _f(v)
     return f"{v:.2f}" if v else "-"
+
+
+_LAUNCHER = {"at": 0.0, "pids": []}
+
+
+def launcher_pids():
+    """PIDs of a running Tk launcher (Options-angel_live-ok.py), checked at most every 5 seconds."""
+    if time.time() - _LAUNCHER["at"] < 5:
+        return _LAUNCHER["pids"]
+    pids = []
+    try:
+        out = subprocess.run(["pgrep", "-f", "Options-angel_live-ok.py"], capture_output=True, text=True, timeout=3).stdout
+        me = os.getpid()
+        pids = [int(x) for x in out.split() if x.strip().isdigit() and int(x) != me]
+    except Exception:
+        pass
+    _LAUNCHER.update(at=time.time(), pids=pids)
+    return pids
+
+
+LAUNCHER_MSG = ("The Python launcher (Options-angel_live-ok.py) is running. Close it first: running both "
+                "would stream the same feed twice and write the same sheet and orders twice.")
 
 
 class GlassDashboard:
@@ -200,6 +221,7 @@ class GlassDashboard:
             "now": datetime.now().strftime("%H:%M:%S"),
             "market_open": bool(m.is_live_market_open()),
             "feed_running": bool(getattr(feed, "running", False)),
+            "launcher_running": bool(launcher_pids()),
             "spot": {"symbol": sym, "price": spot, "zone": zone, "direction": mkt_dir.get("direction", ""),
                      "dir_color": mkt_dir.get("color", ""), "dir_desc": mkt_dir.get("desc", ""),
                      "h1_bias": h1b.get("bias", ""), "h1_zone": h1b.get("zone", ""), "h1_action": h1b.get("action", "")},
@@ -245,6 +267,8 @@ class GlassDashboard:
         a = self.app
 
         def run():
+            if launcher_pids():
+                return {"ok": False, "error": LAUNCHER_MSG}
             if not a.expiry_var.get():
                 return {"ok": False, "error": "Please select an expiry"}
             if getattr(a.top_start_btn, "_state", "normal") != "normal":
@@ -286,6 +310,8 @@ class GlassDashboard:
         if not body.get("on"):
             ok, msg = eng.set_auto(False)
             return {"ok": ok, "message": msg}
+        if launcher_pids():
+            return {"ok": False, "error": LAUNCHER_MSG}
         if not eng.connected:
             return {"ok": False, "error": f"{eng.status_msg}\n\nOpen ⚙ Settings → Broker to connect."}
         if not body.get("confirmed"):
@@ -664,7 +690,7 @@ def _make_handler(dash):
 
 
 def start(app, module, port=None):
-    """Start the glass dashboard for a running ControlPanel. Returns the server, or None when off."""
+    """Serve the glass dashboard for a ControlPanel. Returns the server, or None when off or the port is busy."""
     if port is None:
         try:
             port = int(os.getenv("GLASS_DASHBOARD_PORT", DEFAULT_PORT))
@@ -677,7 +703,8 @@ def start(app, module, port=None):
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(dash))
     except OSError as e:
-        print(f"[GLASS] ⚠️ Glass dashboard not started: port {port} is busy ({e})")
+        print(f"[GLASS] ⚠️ Port {port} is busy ({e}). Is the glass dashboard already running? "
+              f"Set GLASS_DASHBOARD_PORT to use another port.")
         return None
     srv.daemon_threads = True
     srv.dash = dash

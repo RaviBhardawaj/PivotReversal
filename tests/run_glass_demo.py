@@ -1,12 +1,14 @@
-"""Run the real Tk launcher window with made-up NIFTY data (no Angel login, no orders) and the
-glass dashboard on http://127.0.0.1:8780, so the dashboard can be tried without the market.
-Needs a display (on Linux: xvfb-run). Run: python3 tests/run_glass_demo.py"""
+"""Run the glass dashboard (glass_server.py's set-up: launcher logic with no window) on
+http://127.0.0.1:8780 with made-up NIFTY data: no Angel login, no sheet, no orders.
+Lets you try every button without the market. Run: python3 tests/run_glass_demo.py"""
 import os, sys, time, threading, importlib.util
 import pandas as pd
 
 BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, BASE)
 os.environ.setdefault("GLASS_DASHBOARD_PORT", "8780")
+import headless_tk
+tk = headless_tk.install()
 spec = importlib.util.spec_from_file_location("launcher", os.path.join(BASE, "Options-angel_live-ok.py"))
 m = importlib.util.module_from_spec(spec); sys.modules["launcher"] = m; spec.loader.exec_module(m)
 
@@ -71,12 +73,12 @@ feed.fetch_and_map_all_strikes = lambda *a, **k: {f"{ot}{k}{e}": v for (ot, k, e
 feed.sync_forward_test_to_sheet = lambda *a, **k: None
 m.live_order_manager.engine.connect = lambda *a, **k: (False, "Demo: no broker")
 
-import tkinter as tk
 root = tk.Tk()
 app = m.ControlPanel(root)
 app.expiry_var.set(EXP); app.next_exp_var.set(NXT)
 import glass_dashboard
 srv = glass_dashboard.start(app, m)
+headless_tk.SINK.append(lambda kind, title, msg: srv.dash.note(f"{title}: {msg}", "error" if kind == "error" else "info"))
 if os.getenv("GLASS_DEMO_SECONDS"):
-    root.after(int(os.environ["GLASS_DEMO_SECONDS"]) * 1000, root.destroy)
+    root.after(int(os.environ["GLASS_DEMO_SECONDS"]) * 1000, root.quit)
 root.mainloop()

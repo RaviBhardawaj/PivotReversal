@@ -18,6 +18,9 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px;pa
 .dot{width:8px;height:8px;border-radius:50%;background:var(--mut);flex:none}
 .on .dot,.dot.on{background:var(--g);box-shadow:0 0 10px var(--g)}
 .off .dot,.dot.off{background:var(--r);box-shadow:0 0 10px var(--r)}
+.banner{padding:10px 16px;margin-bottom:10px;font-size:13px;border-color:rgba(251,191,36,.5);color:#fde68a;border-radius:14px}
+.banner[hidden]{display:none}
+code{font-family:'JetBrains Mono',monospace;font-size:11px}
 .statusbar{display:flex;gap:8px;align-items:center;padding:8px 16px;margin-bottom:14px;font-size:12.5px;border-radius:14px}
 .statusbar .dot{background:currentColor;box-shadow:0 0 8px currentColor}
 .grid{display:grid;gap:14px}.top{grid-template-columns:1.25fr 1fr 1fr}

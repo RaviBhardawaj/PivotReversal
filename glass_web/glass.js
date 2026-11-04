@@ -1,4 +1,4 @@
-// Glass dashboard: browser view of the running launcher. All state comes from /api/state.
+// Glass dashboard page. All state comes from /api/state (glass_server.py).
 "use strict";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -84,6 +84,7 @@ function renderHeader(s) {
   const st = s.status || {};
   $("status-text").textContent = st.text || "Ready";
   $("statusbar").style.color = st.color || "";
+  $("launcher-banner").hidden = !s.launcher_running;
   $("b-start").disabled = !s.start_enabled;
   $("b-stop").disabled = !s.stop_enabled;
   $("b-stop").classList.toggle("live", !!s.stop_enabled);
@@ -220,13 +221,13 @@ let failures = 0;
 async function poll() {
   try {
     const s = await api("/api/state");
-    if (s.ready === false && !s.controls) { $("status-text").textContent = "Waiting for the launcher window…"; return; }
+    if (s.ready === false && !s.controls) { $("status-text").textContent = "Starting up…"; return; }
     failures = 0; render(s);
   } catch (e) {
     if (++failures >= 2) {
-      $("status-text").textContent = "Cannot reach the launcher. Is Options-angel_live-ok.py running?";
+      $("status-text").textContent = "Cannot reach the glass dashboard server. Start it with run_glass_dashboard.command.";
       $("statusbar").style.color = "#f87171";
-      $("pill-feed").className = "pill off"; $("pill-feed").lastElementChild.textContent = "Launcher offline";
+      $("pill-feed").className = "pill off"; $("pill-feed").lastElementChild.textContent = "Server offline";
     }
   }
 }

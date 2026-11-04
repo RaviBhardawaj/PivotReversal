@@ -1,4 +1,4 @@
-# Pivot Reversal: entry and exit logic (as coded, 8 Oct 2026)
+# Pivot Reversal: entry and exit logic (as coded, 4 Nov 2026)
 
 Source: `Options-angel_live-ok.py`. `StrategyStrikeState` runs the state machine, the main feed loop handles entry and alerts, and `ForwardTestTracker` handles exits.
 
@@ -22,18 +22,23 @@ Source: `Options-angel_live-ok.py`. `StrategyStrikeState` runs the state machine
   - The new levels apply to the next setup.
 
 ## 3. BUY entry (CE or PE), support side
-The buy level is S2, or S1 when S2 ≤ 0.05.
-1. **Sweep.** LTP trades below the level, or comes within 1% of it.
+The buy level is S2, or S1 when S2 ≤ 0.05. Rule from AJ, 4 Nov: **close back above S2, retest, then entry above the high of that first close-above candle. A one-way move is ignored.**
+1. **Sweep.** Price trades **below** the level. Coming near it without trading below it is not a sweep.
    - State becomes `SWEEP_S2`, and the lowest price is recorded as **LL**.
    - The levels are frozen at that moment.
 2. **Reclaim.** LTP gets back above the level, and the state becomes `RECLAIM_S2`.
-3. **Confirmation candle.** A 5-minute candle that has fully **closed**, green, at or above the level.
-   - It must be the sweep candle or a later one. A green candle from before the sweep never counts, and a candle that is still forming never counts.
+3. **Close-above candle.** The **first** 5-minute candle that fully **closes** at or above the level, red or green.
+   - It must be the sweep candle or a later one. A candle from before the sweep never counts, and a candle that is still forming never counts.
    - Its high is the **confirmation high**.
-   - If its wick touched the level (within 1.5%), the retest counts as done.
-4. **Retest.** Otherwise, price has to dip back within 1.5% of the level while holding above LL. A break above the confirmation high before the retest does not enter.
+4. **Retest.** After that candle has closed, price has to pull back below its close and into the level zone (within 1.5% above the level), without trading below the level. The candle's own wick is part of the sweep and never counts as the retest.
 5. **Entry: break above the confirmation high.** After the retest, LTP trades above the confirmation candle's high, and the state becomes `CONFIRMED_BUY`.
-   - If price falls back below the level first, a new confirmation candle is needed. The LL stays the lowest price of the whole sweep: a shallower dip never moves the SL closer.
+
+**One-way moves are ignored:**
+- **Up:** if price breaks above the confirmation high *before* the retest, the setup is dropped (signal "continuation … ignored"). A later pull-back does not revive it; only a fresh trade below the level starts a new setup.
+- **Down:** if price keeps falling and no candle closes back above the level, there is no entry. Any trade below the level during the retest or before the entry restarts the setup from that sweep: a new close-above candle is needed. The LL stays the lowest price of the whole sweep, so a shallower dip never moves the SL closer.
+- After an app restart, a dip below the level that the app did not watch live does not start a setup.
+
+The old behaviour can be switched back in `Options-angel_live-ok.py`: `REQUIRE_LEVEL_BREAK = False` (a near-touch within 1% counts as a sweep) and `CONF_ANY_COLOUR = False` (the candle must close green).
 
 When the entry is confirmed:
 - **Entry price** is the confirmation candle's high. The forward test records the live LTP at that moment.
@@ -45,11 +50,12 @@ When the entry is confirmed:
   - From S1: P, R1, R2, R3, R3 + 5%.
 
 ## 4. SELL entry, resistance side (mirror image)
-1. **Sweep.** LTP goes above R2, or comes within 1% of it. The highest price is recorded as **HH**.
+1. **Sweep.** Price trades **above** R2 (a near-touch is not a sweep). The highest price is recorded as **HH**.
 2. **Rejection.** LTP drops back below R2.
-3. **Confirmation candle.** A fully closed 5-minute candle, red, below R2, from the sweep candle or later. Its low is the **confirmation low**.
-4. **Retest** of R2 (within 1.5%), holding below HH. A wick into R2 on the confirmation candle counts.
+3. **Close-below candle.** The first fully closed 5-minute candle below R2, red or green, from the sweep candle or later. Its low is the **confirmation low**.
+4. **Retest.** After that candle has closed, price pushes back above its close and into the R2 zone (within 1.5% below R2), without trading above R2.
 5. **Entry: break below the confirmation low.** After the retest, LTP trades below the confirmation candle's low, and the **SELL is confirmed** at that low. No chasing: at most 1% below it. Skipped if the low is already at or below T1 (R1).
+- **One-way moves are ignored:** a break below the confirmation low before the retest drops the setup; a trade above R2 restarts it from that sweep.
 - Live SELL orders are on by default, same as BUY (setting "Take SELL setups"). Every setup is recorded in the sheets; one that gets no order shows the reason (Orders sheet row NO ORDER, and the trade's Order_ID).
 
 When the entry is confirmed:
@@ -71,5 +77,4 @@ When the entry is confirmed:
 - Every alert is also written to `alerts_history.csv`.
 
 ## Known gaps vs the PDF spec (not changed)
-- A sweep is counted when price comes within 1% of S2/R2, not only on a real break through it.
 - Targets are a 5-step ladder; the spec says the next pivot only.

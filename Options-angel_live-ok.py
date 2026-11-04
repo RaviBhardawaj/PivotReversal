@@ -4350,6 +4350,8 @@ class FeedEngine:
             while nd.weekday() >= 5:
                 nd += timedelta(days=1)
             exps = self.upcoming_expiries(symbol, 2, from_day=nd) or [None]
+            if self.forward_tracker.allowed_expiries:   # Next Expiry unticked: current expiry only
+                exps = exps[:1]
             for exp in exps:
                 _mapped = self.fetch_and_map_all_strikes(symbol, exp, force_fetch=True, mode="next")
                 try:

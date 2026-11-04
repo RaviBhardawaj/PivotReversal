@@ -1,3 +1,4 @@
+#!/Library/Frameworks/Python.framework/Versions/3.12/bin/python3
 """
 Angel One - Live Option Chain with Greeks
 Control Panel + Google Sheets Feed
@@ -248,6 +249,39 @@ def traded_today_tick(message: dict, ltp: float, prev_ltp: float = 0.0, now: dat
         return datetime.fromtimestamp(ltt) >= start
     # no trade time in this feed mode: only a price that moved during market hours counts
     return prev_ltp > 0 and abs(ltp - prev_ltp) > 1e-9
+
+
+def dhan_quote_to_tick(token: str, q: dict) -> dict:
+    """One row of Dhan's /marketfeed/quote in the shape of an Angel WebSocket tick (prices in
+    paise), so the Dhan backup prices go through exactly the same tick handling."""
+    def paise(v):
+        try:
+            return round(float(v or 0) * 100)
+        except (TypeError, ValueError):
+            return 0
+    ohlc  = q.get("ohlc") or {}
+    depth = q.get("depth") or {}
+    try:
+        ltt = datetime.strptime(str(q.get("last_trade_time", "")), "%d/%m/%Y %H:%M:%S").timestamp()
+    except ValueError:
+        ltt = 0
+    tick = {
+        "token": str(token),
+        "last_traded_price":        paise(q.get("last_price")),
+        "open_interest":            int(q.get("oi") or 0),
+        "volume_trade_for_the_day": int(q.get("volume") or 0),
+        "closed_price":             paise(ohlc.get("close")),
+        "high_price_of_the_day":    paise(ohlc.get("high")),
+        "low_price_of_the_day":     paise(ohlc.get("low")),
+        "open_price_of_the_day":    paise(ohlc.get("open")),
+        "last_traded_timestamp":    ltt,
+        "source":                   "DHAN",
+    }
+    for side, key in (("buy", "best_5_buy_data"), ("sell", "best_5_sell_data")):
+        lvls = [d for d in (depth.get(side) or []) if isinstance(d, dict) and d.get("price")]
+        if lvls:
+            tick[key] = [{"price": paise(d["price"]), "quantity": d.get("quantity", 0)} for d in lvls]
+    return tick
 
 
 def is_live_market_open(dt: datetime = None) -> bool:
@@ -2389,6 +2423,42 @@ class ForwardTestTracker:
             return trade
         return None
 
+    def record_unlogged(self, st, symbol, expiry, exit_px, exit_time="15:00:00",
+                        reason="EOD 3PM Square-off @ CMP (shown on dashboard, entry not recorded live)"):
+        """A trade the strategy confirmed (shown live on the dashboard) that never reached the
+        trade log: written as a CLOSED row at exit_px so the sheet always matches the dashboard.
+        Bookkeeping only, never sends an order. Returns the row, or None if already recorded."""
+        side = "BUY" if st.mode == "BUY" else "SELL"
+        ep = _safe_float(st.entry_price)
+        exit_px = _safe_float(exit_px)
+        if ep <= 0 or exit_px <= 0 or not st.entry_time:
+            return None
+        same = lambda t: (t.get('Action') == side and t.get('Type') == st.opt_type
+                          and int(_safe_float(t.get('Strike', 0))) == int(st.strike)
+                          and (t.get('Expiry', '') or '') == (expiry or ''))
+        if any(same(t) for t in list(self.get_active_trades()) + list(self._today_closed())):
+            return None
+        now = datetime.now()
+        tg = (list(st.targets) + [0.0] * 5)[:5]
+        sl = _safe_float(getattr(st, 'entry_sl', 0)) or _safe_float(st.sl)
+        pnl = round((ep - exit_px) if side == "SELL" else (exit_px - ep), 2)
+        hhmmss = str(st.entry_time).replace(':', '')
+        trade = {
+            'Trade_ID': f"{symbol}_{st.opt_type}_{st.strike}{'_' + expiry if expiry else ''}_{now:%Y%m%d}_{hhmmss}",
+            'Date': now.strftime('%Y-%m-%d'), 'Entry_Time': st.entry_time, 'Timeframe': '15M Intraday',
+            'Symbol': symbol, 'Type': st.opt_type, 'Strike': st.strike, 'Expiry': expiry, 'Action': side,
+            'Entry_Price': round(ep, 2), 'SL': round(sl, 2), 'Initial_SL': round(sl, 2),
+            'Target_1': tg[0], 'Target_2': tg[1], 'Target_3': tg[2], 'Target_4': tg[3], 'Target_5': tg[4],
+            'Trade_High': round(max(ep, exit_px), 2), 'Trade_Low': round(min(ep, exit_px), 2),
+            'Max_Pts': max(pnl, 0.0), 'Exit_Price': round(exit_px, 2), 'Exit_Time': exit_time,
+            'Exit_Reason': reason, 'PnL_Pts': pnl, 'Status': 'CLOSED',
+        }
+        self._append_row(trade)
+        self._closed_today.append(trade)
+        print(f"📝 [FWD TEST] Recorded dashboard-only {side} {st.opt_type} {st.strike} {expiry} "
+              f"@ {ep:.2f} → {exit_px:.2f} | PnL {pnl:+.2f} pts")
+        return trade
+
     def _today_closed(self):
         """Today's closed trades: the trade log plus this session's closes (by Trade_ID)."""
         today = datetime.now().strftime('%Y-%m-%d')
@@ -3159,7 +3229,18 @@ def check_option_entry(ltp: float, pivots: dict, opt_type: str = "CE",
     # BUY target ladder always goes UP through pivot levels:
     # Entry near S2 → T1:S1 → T2:P → T3:R1 → T4:R2 → T5:R3
     # Entry near S1 → T1:P  → T2:R1 → T3:R2 → T4:R3 → T5:R3*ext
-    if level == "S1":
+    if level == "S3":
+        # S3 reclaim (S2 was swept): the trade starts down near S3 and climbs the whole ladder
+        if ltp < s3:
+            return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
+        zone = "S3 Reclaim"
+        levels_up = [l for l in [s2, s1, p, r1, r2] if l > ltp]
+        t1 = levels_up[0] if len(levels_up) > 0 else s2
+        t2 = levels_up[1] if len(levels_up) > 1 else s1
+        t3 = levels_up[2] if len(levels_up) > 2 else p
+        t4 = levels_up[3] if len(levels_up) > 3 else r1
+        t5 = levels_up[4] if len(levels_up) > 4 else r2
+    elif level == "S1":
         if ltp < s1:
             return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
         zone = "S1 Reclaim"
@@ -3232,7 +3313,18 @@ def check_option_sell_entry(ltp: float, pivots: dict, opt_type: str = "PE",
     # SELL target ladder always goes DOWN through pivot levels:
     # Entry near R2 → T1:R1 → T2:P → T3:S1 → T4:S2 → T5:S3
     # Entry near R1 → T1:P  → T2:S1 → T3:S2 → T4:S3 → T5:S3*ext
-    if level == "R1":
+    if level == "R3":
+        # R3 rejection (R2 was swept): the trade starts up near R3 and falls the whole ladder
+        if ltp > r3:
+            return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
+        zone = "R3 Rejection"
+        levels_dn = [l for l in [r2, r1, p, s1, s2] if l < ltp]
+        t1 = levels_dn[0] if len(levels_dn) > 0 else r2
+        t2 = levels_dn[1] if len(levels_dn) > 1 else r1
+        t3 = levels_dn[2] if len(levels_dn) > 2 else p
+        t4 = levels_dn[3] if len(levels_dn) > 3 else s1
+        t5 = levels_dn[4] if len(levels_dn) > 4 else s2
+    elif level == "R1":
         if ltp > r1:
             return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
         zone = "R1 Rejection"
@@ -3341,75 +3433,118 @@ def get_gspread_client():
     return gc
 
 
-SHEETS_TIMEOUT = 20      # seconds per Google Sheets request
-SHEETS_RETRIES = 3       # extra tries after an SSL / connection failure
+SHEETS_TIMEOUT   = 20     # seconds per Google Sheets request
+SHEETS_RETRIES   = 3      # extra tries after an SSL / connection failure
+SHEETS_IDLE_SECS = 45     # a connection idle longer than this is replaced before use
+SHEETS_HEALTH = {"err": "", "at": 0.0}   # last Sheets write that failed even after retries (dashboard alert)
+_SHEETS_LOCK = threading.Lock()          # one Sheets request on the wire at a time, app-wide
+
 
 def _make_sheets_session_resilient(gc, creds):
-    """Give every thread its own HTTPS connection to Google Sheets and retry dropped connections.
-    gspread keeps one requests session for the whole client, and the feed loop, forward-test sync,
-    order log and formatting threads all write through it at once. A requests session is not
-    thread-safe: two threads on one TLS connection garble each other's records, which Google
-    answers with 'SSLV3_ALERT_BAD_RECORD_MAC'. Each thread now gets its own session; when a
-    connection still breaks (SSL error, reset, network blip), that thread's session is thrown
-    away and the call is retried on a fresh connection a few times before giving up."""
+    """Make every Google Sheets request safe from 'SSLV3_ALERT_BAD_RECORD_MAC' and dropped connections.
+    The feed loop, forward-test sync, Orders Log and formatting threads all write through gspread's
+    one requests session at the same time, and a requests session is not thread-safe. Google
+    answers garbled TLS records with 'bad record mac'. Three things stop that:
+      1. one lock: only one Sheets request is on the wire at a time, so no two threads ever share
+         a TLS connection (Sheets allows 60 writes/min anyway, so nothing is lost by queuing);
+      2. a connection that sat idle (Mac sleep, Wi-Fi change, Google closing it) is replaced
+         before it is used, instead of failing on the first write after a pause;
+      3. if a connection still breaks, it is thrown away and the call retried on a brand-new one.
+    Appends are not retried: Google may already have added the rows, and a retry would write
+    them twice (the Orders Log re-queues them itself)."""
     owner = getattr(gc, "http_client", gc)            # gspread 6 keeps it on http_client, 5 on the client
     shared = getattr(owner, "session", None)
-    if shared is None or not hasattr(shared, "request"):
+    if shared is None or not hasattr(shared, "request") or getattr(shared, "_loc_retry", False):
         return
     auth = getattr(owner, "auth", None) or creds
     try:
         from google.auth.transport.requests import AuthorizedSession
     except Exception:
         return
-    local = threading.local()
+    flaky = (requests.exceptions.SSLError, requests.exceptions.ConnectionError,
+             requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError)
+    box = {"s": None, "used": 0.0}
 
-    def _session():
-        s = getattr(local, "session", None)
-        if s is None:
-            s = AuthorizedSession(auth)
-            local.session = s
-        return s
-
-    def _drop_session():
-        s = getattr(local, "session", None)
-        local.session = None
-        if s is not None:
+    def _fresh():
+        old, box["s"] = box["s"], AuthorizedSession(auth)
+        if old is not None:
             try:
-                s.close()
+                old.close()
             except Exception:
                 pass
 
     def request(method, url, *args, **kwargs):
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = SHEETS_TIMEOUT
-        for attempt in range(SHEETS_RETRIES + 1):
+        tries = 1 if ":append" in str(url) else SHEETS_RETRIES + 1
+        for attempt in range(tries):
             try:
-                return _session().request(method, url, *args, **kwargs)
-            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
-                _drop_session()
-                if attempt >= SHEETS_RETRIES:
+                with _SHEETS_LOCK:
+                    if box["s"] is None or time.time() - box["used"] > SHEETS_IDLE_SECS:
+                        _fresh()
+                    try:
+                        r = box["s"].request(method, url, *args, **kwargs)
+                    finally:
+                        box["used"] = time.time()
+                SHEETS_HEALTH["err"] = ""
+                return r
+            except flaky as e:
+                with _SHEETS_LOCK:
+                    dead, box["s"] = box["s"], None
+                if dead is not None:
+                    try:
+                        dead.close()
+                    except Exception:
+                        pass
+                if attempt >= tries - 1:
+                    SHEETS_HEALTH["err"], SHEETS_HEALTH["at"] = f"{type(e).__name__}: {str(e)[:100]}", time.time()
                     raise
                 wait = 0.5 * (2 ** attempt)
                 print(f"[SHEET] connection to Google dropped ({type(e).__name__}); "
-                      f"retrying on a fresh connection in {wait:.1f}s ({attempt + 1}/{SHEETS_RETRIES})")
+                      f"retrying on a fresh connection in {wait:.1f}s ({attempt + 1}/{tries - 1})")
                 time.sleep(wait)
 
     shared.request = request
+    shared._loc_retry = True
 
 # ═══════════════════════════════════════════════════════════
 # SESSION
 # ═══════════════════════════════════════════════════════════
 class Session:
     obj=auth_token=feed_token=scrip_df=None
+    last_error = ""      # why the last Angel login failed ("" after a good login); shown on the dashboard
 
     @classmethod
     def login(cls):
-        totp=pyotp.TOTP(TOTP_SECRET).now()
-        cls.obj=SmartConnect(api_key=API_KEY)
-        s=cls.obj.generateSession(CLIENT_ID,MPIN,totp)
-        if not s["status"]: raise Exception(s["message"])
-        cls.auth_token=s["data"]["jwtToken"]
-        cls.feed_token=cls.obj.getfeedToken()
+        try:
+            totp=pyotp.TOTP(TOTP_SECRET).now()
+            cls.obj=SmartConnect(api_key=API_KEY)
+            s=cls.obj.generateSession(CLIENT_ID,MPIN,totp)
+            if not s["status"]: raise Exception(s["message"])
+            cls.auth_token=s["data"]["jwtToken"]
+            cls.feed_token=cls.obj.getfeedToken()
+        except Exception as e:
+            msg = str(e)
+            if "NameResolution" in msg or "Failed to resolve" in msg:
+                msg = "Angel One server unreachable (internet/DNS problem)"
+            elif "Max retries" in msg or "timed out" in msg.lower():
+                msg = "Angel One server not responding"
+            cls.last_error = msg[:160]
+            raise
+        cls.last_error = ""
+
+    @classmethod
+    def login_in_background(cls, every=60):
+        """Keep trying the Angel login until it works (the app runs on Dhan prices meanwhile)."""
+        def _loop():
+            while not cls.auth_token:
+                time.sleep(every)
+                try:
+                    cls.login()
+                    print("[ANGEL] ✅ Login succeeded")
+                except Exception as e:
+                    print(f"[ANGEL] Login still failing: {cls.last_error or e}")
+        threading.Thread(target=_loop, daemon=True).start()
 
     @classmethod
     def load_scrip(cls):
@@ -3876,6 +4011,10 @@ class FeedEngine:
         self._ws_watchdog_thread = None            # background health monitor thread
         self._last_reconnect_time = 0.0            # rate-limit reconnects
         self._ws_reconnect_lock = threading.Lock() # lock for clean reconnects
+        self._last_angel_tick   = time.time()      # last tick from Angel's WebSocket itself (not the Dhan backup)
+        self.data_source        = "ANGEL"          # where live prices come from now: ANGEL, DHAN (backup) or NONE
+        self.feed_alert         = ""               # loud dashboard message while prices are not from Angel
+        self._dhan_backup_thread = None
 
     def prepare(self, exchange, symbol, expiries, n_strikes):
         """
@@ -4361,6 +4500,47 @@ class FeedEngine:
         print(f"[NEW DAY] {today_date}: cleared {prev} strike states ({len(kept)} open-trade state(s) kept)")
         return True
 
+    _OPEN_TRADE_STATUSES = ("Active", "Target 1 Hit", "Target 2 Hit", "Target 3 Hit", "Target 4 Hit")
+
+    def _eod_exit_price(self, symbol, st, token):
+        """The 15:00 square-off price of a strike: the 14:59 one-minute close from Dhan, or the
+        last live price when Dhan has no candles."""
+        try:
+            bars = dhan_minute_bars(symbol, st.expiry, st.strike, st.opt_type, datetime.now().strftime("%Y-%m-%d"))
+            b = [x for x in bars if x[0].time() < EOD_SQUARE_OFF_TIME]
+            if b:
+                return b[-1][4]
+        except Exception as e:
+            print(f"[EOD] 1-min candles for {st.opt_type} {st.strike} unavailable ({e}); using last price")
+        return _safe_float(self.live_data.get(token, {}).get("ltp", 0))
+
+    def eod_close_day(self, symbol: str):
+        """15:45 day close: every trade the dashboard still shows as live but the trade log never
+        got is recorded at its 15:00 price, then today's trades leave the dashboard so it shows
+        only the next session's plan. The trade log and the sheet keep everything."""
+        meta_by_key = {(m["opt_type"], m["strike"], m.get("expiry", "")): t for t, m in self.token_to_meta.items()}
+        with self.lock:
+            states = list({id(s): s for s in self.strategy_states.values()}.values())
+        added = 0
+        for st in states:
+            if st.trade_status not in self._OPEN_TRADE_STATUSES or not st.entry_time:
+                continue
+            tok = meta_by_key.get((st.opt_type, st.strike, st.expiry or ""), "")
+            if self.forward_tracker.record_unlogged(st, symbol, st.expiry or "", self._eod_exit_price(symbol, st, tok)):
+                added += 1
+        if added:
+            print(f"[EOD] Recorded {added} dashboard trade(s) that were never written live")
+        with self.lock:
+            self.strategy_states.clear()
+            self.forward_tracker._closed_today = []
+            self._dash_reset_date = datetime.now().strftime("%Y-%m-%d")
+        self._last_ft_sync_ts = 0.0
+        self.sync_forward_test_to_sheet()
+        print("[EOD] ✅ Today's trades cleared from the dashboard (kept in the trade log and the sheet)")
+        if self.status_cb:
+            try: self.status_cb(f"🌙 Day closed — {added} missed trade(s) recorded, dashboard cleared for tomorrow", "#58a6ff")
+            except Exception: pass
+
     def build_next_day_levels(self, symbol: str):
         """After the close (15:45): the next session's strike levels, built from today's candle,
         for the current AND the next expiry, then eod_planner.py, which takes its strike levels
@@ -4370,6 +4550,10 @@ class FeedEngine:
             if getattr(self, "_next_levels_date", None) == today:
                 return
             self._next_levels_date = today
+        try:
+            self.eod_close_day(symbol)
+        except Exception as e:
+            print(f"[EOD] day close error: {e}")
         try:
             print(f"\n[EOD] ⏰ 15:45 → Calculating NEXT-DAY levels for {symbol}...")
             _mtf = get_tv_multi_timeframe_pivots(symbol, force_refresh=True)
@@ -4418,7 +4602,11 @@ class FeedEngine:
         symbol = symbol or "NIFTY"
         try:
             if not Session.auth_token or not Session.feed_token:
-                Session.login()
+                try:
+                    Session.login()
+                except Exception as le:
+                    # Levels come from Dhan first; an Angel outage must not stop the mapping
+                    print(f"[STRIKE MAPPER] Angel login failed ({Session.last_error or le}); using Dhan")
             if Session.scrip_df is None:
                 Session.load_scrip()
             df = Session.scrip_df
@@ -4839,6 +5027,7 @@ class FeedEngine:
 
         def _data(wsapp, message):
             if gen == self._ws_gen:
+                self._last_angel_tick = time.time()
                 self.on_data(wsapp, message)
 
         def _err(wsapp, error=None, *a):
@@ -4907,15 +5096,16 @@ class FeedEngine:
                     pass
 
                 # Every 3rd failed attempt, refresh the login: an expired JWT/feed token
-                # makes every reconnect fail until the session is renewed.
-                if self._ws_fail_count % 3 == 0:
+                # makes every reconnect fail until the session is renewed. With no session at
+                # all (login failed at startup) every attempt tries to log in.
+                if self._ws_fail_count % 3 == 0 or not Session.auth_token:
                     try:
                         print("[WS] 🔑 Refreshing Angel One session before reconnect...")
                         Session.login()
                     except Exception as le:
                         print(f"[WS] Session refresh failed: {le}")
 
-                self._last_tick_time = time.time()
+                self._last_tick_time = self._last_angel_tick = time.time()
                 try:
                     self.sws = self._new_ws()
                     print("[WS] 🚀 Reconnect thread spawned.")
@@ -4932,7 +5122,7 @@ class FeedEngine:
             if not self.token_list:
                 continue
             now = time.time()
-            no_tick = now - self._last_tick_time
+            no_tick = now - self._last_angel_tick   # Dhan backup ticks must not hide a dead Angel socket
             last_pong = getattr(self.sws, "last_pong_timestamp", None) if self.sws else None
             pong_age = (now - last_pong) if last_pong else None
             if self._ws_session_open():
@@ -4947,13 +5137,117 @@ class FeedEngine:
                     self._schedule_reconnect(reason="watchdog heartbeat lost")
 
     def start_ws(self):
-        self._last_tick_time = time.time()
+        self._last_tick_time = self._last_angel_tick = time.time()
         self._ws_fail_count = 0
         self._reconnect_pending = False
-        self.sws = self._new_ws()
+        try:
+            self.sws = self._new_ws()
+        except Exception as e:
+            # No Angel session (login failed): the watchdog keeps retrying, Dhan feeds prices meanwhile
+            print(f"[WS] Angel WebSocket could not start ({Session.last_error or e}); retrying in the background")
+            self.sws = None
         if not self._ws_watchdog_thread or not self._ws_watchdog_thread.is_alive():
             self._ws_watchdog_thread = threading.Thread(target=self._ws_watchdog_loop, daemon=True)
             self._ws_watchdog_thread.start()
+        if not self._dhan_backup_thread or not self._dhan_backup_thread.is_alive():
+            self._dhan_backup_thread = threading.Thread(target=self._dhan_backup_loop, daemon=True)
+            self._dhan_backup_thread.start()
+
+    # ── Dhan backup prices ─────────────────────────────────
+    # Angel index token -> Dhan index security ID (segment IDX_I)
+    _DHAN_INDEX_IDS = {"99926000": 13, "99926009": 25, "99926037": 27, "99926074": 442,
+                       "99919000": 51, "1": 51}
+    _DHAN_SEGMENTS  = {1: "NSE_EQ", 2: "NSE_FNO", 3: "BSE_EQ", 5: "MCX_COMM", 7: "BSE_FNO"}
+    DHAN_TAKEOVER_S = 20     # seconds without an Angel tick in market hours before Dhan takes over
+
+    def _dhan_backup_request(self):
+        """({segment: [security ids]}, {(segment, id): angel token}) for every subscribed token.
+        F&O and stock tokens are exchange tokens, the same numbers Dhan uses."""
+        index_tokens = {t for c in EXCHANGE_CONFIG.values() for t in c.get("spot_tokens", {}).values()}
+        req, back = {}, {}
+        for item in self.token_list:
+            seg = self._DHAN_SEGMENTS.get(item.get("exchangeType"))
+            for tok in item.get("tokens", []):
+                tok = str(tok)
+                if tok in self._DHAN_INDEX_IDS:
+                    s, sid = "IDX_I", self._DHAN_INDEX_IDS[tok]
+                elif seg and tok.isdigit() and tok not in index_tokens:
+                    s, sid = seg, int(tok)
+                else:
+                    continue       # an index Dhan has no known ID for: never guess
+                req.setdefault(s, []).append(sid)
+                back[(s, str(sid))] = tok
+        return req, back
+
+    def _dhan_backup_poll(self):
+        """One round of Dhan quotes for every subscribed contract, fed in as ticks. Returns how many."""
+        req, back = self._dhan_backup_request()
+        items = [(s, i) for s, ids in req.items() for i in ids]
+        if not items:
+            return 0
+        ad = _dhan_data_login()
+        n = 0
+        for k in range(0, len(items), 1000):          # Dhan: up to 1000 contracts a call, 1 call a second
+            if k:
+                time.sleep(1.1)
+            part = {}
+            for s, i in items[k:k + 1000]:
+                part.setdefault(s, []).append(i)
+            data = (ad._req("POST", "/marketfeed/quote", part) or {}).get("data") or {}
+            for s, rows in data.items():
+                if not isinstance(rows, dict):
+                    continue
+                for sid, q in rows.items():
+                    tok = back.get((s, str(sid)))
+                    if tok and isinstance(q, dict) and q.get("last_price"):
+                        self.on_data(None, dhan_quote_to_tick(tok, q))
+                        n += 1
+        return n
+
+    def _set_data_source(self, src, alert=""):
+        changed = src != self.data_source
+        self.data_source, self.feed_alert = src, alert
+        if not changed:
+            return
+        print(f"[FEED] Live prices from {src}" + (f": {alert}" if alert else ""))
+        if alert:
+            trigger_immediate_alert("⚠️ LiveOptionChain data problem", alert)
+            threading.Thread(target=lambda: subprocess.run(
+                ["afplay", "-v", "0.8", "/System/Library/Sounds/Sosumi.aiff"], capture_output=True),
+                daemon=True).start()
+        else:
+            trigger_immediate_alert("LiveOptionChain", "Angel One live prices are back", sound=False)
+        if self.status_cb:
+            try: self.status_cb(alert or "● Angel One live prices are back", "#f85149" if alert else "#3fb950")
+            except Exception: pass
+
+    def _dhan_backup_loop(self):
+        """When Angel sends no prices in market hours (login refused, Angel unreachable, socket
+        dead) poll the same contracts from Dhan so levels, entries and exits keep running. Angel
+        takes over again as soon as its ticks come back."""
+        while self.running:
+            time.sleep(1.5)
+            if not self.running:
+                break
+            if not self.token_list or not self._ws_session_open():
+                if self.data_source != "ANGEL":
+                    self._set_data_source("ANGEL")
+                continue
+            silent = time.time() - self._last_angel_tick
+            if silent < self.DHAN_TAKEOVER_S:
+                if self.data_source != "ANGEL":
+                    self._set_data_source("ANGEL")
+                continue
+            why = Session.last_error or f"no Angel prices for {int(silent)}s"
+            try:
+                n = self._dhan_backup_poll()
+                if not n:
+                    raise RuntimeError("Dhan returned no prices")
+                self._set_data_source("DHAN", f"ANGEL ONE DOWN ({why}). Live prices now come from Dhan.")
+            except Exception as e:
+                self._set_data_source("NONE", f"NO LIVE PRICES: Angel One down ({why}) and Dhan backup "
+                                              f"failed ({str(e)[:100]}). No trades are being taken.")
+                time.sleep(5)
 
     def stop_ws(self):
         self.running = False
@@ -5967,18 +6261,21 @@ class FeedEngine:
 
                     # ── Dual State Machine tracking (BUY on S2/S1, SELL on R2/R1) ──
                     exp = meta.get("expiry", "")
+                    now_day = datetime.now().strftime("%Y-%m-%d")
                     with self.lock:
                         buy_key  = (opt_type, strike, exp, "BUY") if exp else (opt_type, strike, "BUY")
                         sell_key = (opt_type, strike, exp, "SELL") if exp else (opt_type, strike, "SELL")
                         st_buy   = self.strategy_states.get(buy_key)
                         if not st_buy:
                             st_buy = StrategyStrikeState(opt_type, strike, expiry=exp, mode="BUY")
-                            self.forward_tracker.seed_state(st_buy, symbol)
+                            if getattr(self, '_dash_reset_date', None) != now_day:   # day closed: don't bring today's trades back
+                                self.forward_tracker.seed_state(st_buy, symbol)
                             self.strategy_states[buy_key] = st_buy
                         st_sell  = self.strategy_states.get(sell_key)
                         if not st_sell:
                             st_sell = StrategyStrikeState(opt_type, strike, expiry=exp, mode="SELL")
-                            self.forward_tracker.seed_state(st_sell, symbol)
+                            if getattr(self, '_dash_reset_date', None) != now_day:   # day closed: don't bring today's trades back
+                                self.forward_tracker.seed_state(st_sell, symbol)
                             self.strategy_states[sell_key] = st_sell
 
                         legacy_key = (opt_type, strike, exp) if exp else (opt_type, strike)
@@ -6056,7 +6353,10 @@ class FeedEngine:
                     fp_sell = getattr(st_sell, "frozen_pivots", None) or opt_piv
                     if (sell_entry["entry"] and mkt_open and is_focus_strike and live_tick
                             and at_entry_price(ltp, st_sell.entry_price, "SELL")):
-                        in_sell_zone = (fp_sell["S2"] * 0.95 <= ltp <= fp_sell["R2"] * 1.05)
+                        # An R3 rejection (R2 swept) sells from up near R3: the zone reaches R3 then,
+                        # so every SELL the dashboard shows as live is also recorded.
+                        _top = fp_sell.get("R3", 0) if st_sell.trigger_level == "R3" else 0
+                        in_sell_zone = (fp_sell["S2"] * 0.95 <= ltp <= (_top or fp_sell["R2"]) * 1.05)
                         if in_sell_zone:
                             lvl = st_sell.trigger_level
                             exp_tag = f" {exp}" if exp else ""
@@ -6136,7 +6436,8 @@ class FeedEngine:
                     fp_buy = getattr(st_buy, "frozen_pivots", None) or opt_piv
                     if (buy_entry["entry"] and mkt_open and is_focus_strike and live_tick
                             and at_entry_price(ltp, st_buy.entry_price, "BUY")):
-                        in_buy_zone = (fp_buy["S2"] * 0.95 <= ltp <= fp_buy["R2"] * 1.05)
+                        _bot = fp_buy.get("S3", 0) if st_buy.trigger_level == "S3" else 0   # S3 reclaim (S2 swept)
+                        in_buy_zone = ((_bot or fp_buy["S2"]) * 0.95 <= ltp <= fp_buy["R2"] * 1.05)
                         if in_buy_zone:
                             lvl = st_buy.trigger_level
                             re_lbl = f" [RE-ENTRY #{st_buy.entry_count} New LL SL]" if st_buy.sl_hit_count > 0 else ""
@@ -7376,6 +7677,14 @@ class ControlPanel:
                                   bg="#161b22", fg="#3fb950",
                                   font=(GUI_FONT, 9), anchor="w")
         self.status_lbl.pack(fill="x", padx=8, pady=3)
+
+        # 1b. Red alert banner: shown only while live prices or the Google Sheet are failing
+        self._alert_holder = tk.Frame(r, bg="#0d1117")
+        self._alert_holder.pack(side="bottom", fill="x", padx=16)
+        self.alert_banner = tk.Label(self._alert_holder, text="", bg="#b62324", fg="#ffffff",
+                                     font=(GUI_FONT, 12, "bold"), anchor="w", justify="left",
+                                     wraplength=1100, padx=10, pady=6)
+        r.after(3000, self._refresh_alert_banner)
 
         # 2. Main Live Scanner Start / Stop Action Buttons (PROMINENT, PINNED AT BOTTOM)
         bf = tk.Frame(r, bg="#0d1117")
@@ -8769,6 +9078,30 @@ class ControlPanel:
         self.status_var.set(msg)
         self.status_lbl.config(fg=color)
 
+    def _alert_text(self):
+        """What the red banner says now ("" = all healthy)."""
+        msgs = []
+        if feed.running and feed.feed_alert:
+            msgs.append(f"⚠️ {feed.feed_alert}")
+        elif not Session.auth_token and Session.last_error:
+            msgs.append(f"⚠️ ANGEL ONE LOGIN FAILED: {Session.last_error} (retrying every minute)")
+        if SHEETS_HEALTH["err"] and time.time() - SHEETS_HEALTH["at"] < 180:
+            msgs.append(f"⚠️ GOOGLE SHEET WRITE FAILED: {SHEETS_HEALTH['err']} (retrying on the next sync)")
+        return "\n".join(msgs)
+
+    def _refresh_alert_banner(self):
+        try:
+            msg = self._alert_text()
+            if msg:
+                self.alert_banner.config(text=msg)
+                if not self.alert_banner.winfo_manager():
+                    self.alert_banner.pack(fill="x", pady=(2, 2))
+            elif self.alert_banner.winfo_manager():
+                self.alert_banner.pack_forget()
+        except Exception as e:
+            print(f"[UI] alert banner error: {e}")
+        self.root.after(2000, self._refresh_alert_banner)
+
     # ═══════════════════════════════════════════════════════
     # LIVE ORDERS — slim bar + Settings window
     # ═══════════════════════════════════════════════════════
@@ -9223,7 +9556,13 @@ class ControlPanel:
 # ═══════════════════════════════════════════════════════════
 if __name__=="__main__":
     print("Logging in to Angel One...")
-    Session.login()
+    try:
+        Session.login()
+    except Exception as e:
+        # Never stop the app over an Angel outage: prices come from Dhan until the login works
+        print(f"⚠️  Angel One login failed: {Session.last_error or e}")
+        print("   Starting anyway — live prices from Dhan; the Angel login is retried every minute")
+        Session.login_in_background()
     print("Loading instrument list (cached once per day)...")
     Session.load_scrip()
 

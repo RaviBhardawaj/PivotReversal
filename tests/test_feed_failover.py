@@ -1,0 +1,127 @@
+"""Angel One outage: the app keeps trading on Dhan prices, and flaky Sheets writes are retried.
+Run: python3 tests/test_feed_failover.py"""
+import sys, os, types, importlib.util, time
+import requests
+tk=types.ModuleType("tkinter")
+class _W:
+    def __init__(s,*a,**k): pass
+    def __getattr__(s,n): return lambda *a,**k: None
+for n in ["Tk","Label","Frame","Button","StringVar","BooleanVar","IntVar","Radiobutton","Checkbutton","Toplevel","Entry","Canvas","Scrollbar","Text","Menu","OptionMenu","Spinbox","PhotoImage","Listbox"]:
+    setattr(tk,n,_W)
+ttk=types.ModuleType("tkinter.ttk"); ttk.Combobox=_W; ttk.Treeview=_W; ttk.Style=_W; ttk.Scrollbar=_W; ttk.Notebook=_W; ttk.Progressbar=_W
+mb=types.ModuleType("tkinter.messagebox"); tk.ttk=ttk; tk.messagebox=mb
+sys.modules.update({"tkinter":tk,"tkinter.ttk":ttk,"tkinter.messagebox":mb})
+_src=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","Options-angel_live-ok.py")
+_spec=importlib.util.spec_from_file_location("app",_src); app=importlib.util.module_from_spec(_spec); _spec.loader.exec_module(app)
+import tempfile
+_T=tempfile.mkdtemp()
+# Fed ticks reach the strategy engines: keep their CSV/JSON logs out of the real app folder
+_adv=app.advanced_engine.tracker
+for _k,_v in list(vars(_adv).items()):
+    if _k.endswith("_file") and isinstance(_v,str):
+        setattr(_adv,_k,os.path.join(_T,os.path.basename(_v)))
+app.trigger_immediate_alert=lambda *a,**k: None
+app.subprocess.run=lambda *a,**k: None
+
+# 1. A Dhan quote becomes an Angel-shaped tick (paise, trade time, depth)
+q={"last_price":256,"oi":1200,"volume":5000,"last_trade_time":"02/11/2026 10:30:05",
+   "ohlc":{"open":240,"close":230.5,"high":260,"low":235},
+   "depth":{"buy":[{"price":255.9,"quantity":65}],"sell":[{"price":256.2,"quantity":130},{"price":0,"quantity":0}]}}
+t=app.dhan_quote_to_tick("53926",q)
+assert t["token"]=="53926" and t["last_traded_price"]==25600 and t["closed_price"]==23050
+assert t["best_5_buy_data"][0]["price"]==25590 and len(t["best_5_sell_data"])==1
+from datetime import datetime
+assert datetime.fromtimestamp(t["last_traded_timestamp"])==datetime(2026,11,2,10,30,5)
+print("Dhan quote -> Angel tick: OK")
+
+# 2. Request maps option tokens straight across and the index to Dhan's ID; unknown indices are skipped
+f=app.FeedEngine()
+f.forward_tracker.filepath=os.path.join(_T,"ft.csv"); f.forward_tracker.state_file=os.path.join(_T,"ft_open.json")
+f.token_list=[{"exchangeType":2,"tokens":["53926","53927"]},{"exchangeType":1,"tokens":["99926000"]},
+              {"exchangeType":3,"tokens":["500112"]}]
+req,back=f._dhan_backup_request()
+assert req=={"NSE_FNO":[53926,53927],"IDX_I":[13]}, req
+assert back[("IDX_I","13")]=="99926000"
+print("Dhan backup request mapping: OK")
+
+# 3. Angel silent in market hours -> Dhan prices flow into live_data; Angel back -> source switches back
+class AD:
+    calls=0
+    def _req(self, m, path, body):
+        AD.calls+=1
+        return {"data":{"NSE_FNO":{"53926":q,"53927":dict(q,last_price=101)},"IDX_I":{"13":dict(q,last_price=23440.8)}}}
+app._dhan_data_login=lambda: AD()
+os.environ["FORCE_MARKET_OPEN"]="1"
+app.Session.last_error="Angel One server unreachable (internet/DNS problem)"
+f.spot_token={"NIFTY":"99926000"}
+f.DHAN_TAKEOVER_S=0.1
+f.running=True
+f._last_angel_tick=time.time()-60
+import threading
+th=threading.Thread(target=f._dhan_backup_loop,daemon=True); th.start()
+time.sleep(2.0)
+assert f.data_source=="DHAN" and "ANGEL ONE DOWN" in f.feed_alert, (f.data_source, f.feed_alert)
+assert f.live_data["53926"]["ltp"]==256 and f.live_data["53927"]["ltp"]==101
+assert f.spot_price["NIFTY"]==23440.8
+print("Angel down -> Dhan prices drive the feed:", f.feed_alert)
+f.DHAN_TAKEOVER_S=20; f._last_angel_tick=time.time()
+time.sleep(2.0)
+assert f.data_source=="ANGEL" and f.feed_alert==""
+print("Angel back -> Angel takes over again: OK")
+
+# 4. Both down -> loud NONE alert
+f.DHAN_TAKEOVER_S=0.1; f._last_angel_tick=time.time()-60
+def _boom(): raise RuntimeError("Dhan login failed: DH-901")
+app._dhan_data_login=_boom
+time.sleep(2.0)
+assert f.data_source=="NONE" and "NO LIVE PRICES" in f.feed_alert
+f.running=False
+print("Angel and Dhan both down -> NO LIVE PRICES alert: OK")
+
+# 5. Sheets SSL retries: covered in tests/test_sheets_resilience.py
+
+# 6. Startup login failure is recorded, not fatal
+class SC:
+    def __init__(s, api_key): pass
+    def generateSession(s,*a):
+        raise Exception("HTTPSConnectionPool(host='apiconnect.angelone.in'): Max retries exceeded (Caused by NameResolutionError(\"Failed to resolve\"))")
+app.SmartConnect=SC
+try:
+    app.Session.login(); assert False
+except Exception:
+    pass
+assert app.Session.last_error=="Angel One server unreachable (internet/DNS problem)"
+print("Angel login failure recorded for the dashboard: OK")
+
+# 7. R3 rejection SELL / S3 reclaim BUY are real entries (2 Nov: CE 22900 R3 sell @ 310.95 was shown
+#    on the dashboard but never recorded)
+piv=app.calc_fib_pivots(270.0,128.25,192.95)          # CE 22900 03NOV2026, 30 Oct candle
+e=app.check_option_sell_entry(310.95,piv,"CE",hh=466.05,state="CONFIRMED_SELL",level="R3")
+assert e["entry"] and e["zone"]=="R3 Rejection" and e["SL"]==466.05, e
+assert [e["T1"],e["T2"],e["T3"]]==[piv["R2"],piv["R1"],piv["P"]], e
+assert 310.95 <= piv["R3"]*1.05 and 310.95 > piv["R2"]*1.05   # inside the R3 zone, outside the old R2 one
+assert not app.check_option_sell_entry(310.95,piv,"CE",hh=466.05,state="CONFIRMED_SELL",level="R2")["entry"]
+b=app.check_option_entry(piv["S3"]+1,piv,"CE",ll=piv["S3"]-5,state="CONFIRMED_BUY",level="S3")
+assert b["entry"] and b["zone"]=="S3 Reclaim" and b["T1"]==piv["S2"], b
+print("R3 rejection SELL and S3 reclaim BUY are recorded entries: OK")
+
+# 8. 15:45 day close: a dashboard-only live trade is recorded at its 15:00 price, the dashboard is cleared
+from datetime import datetime as _D
+f2=app.FeedEngine()
+f2.forward_tracker.filepath=os.path.join(_T,"ft2.csv"); f2.forward_tracker.state_file=os.path.join(_T,"ft2_open.json")
+f2.forward_tracker._init_file()
+st=app.StrategyStrikeState("CE",22900,expiry="03NOV2026",mode="SELL")
+st.entry_price, st.entry_time, st.sl, st.entry_sl = 310.95, "13:35:00", 466.05, 466.05
+st.targets=[284.67,251.22,197.07,142.92,109.47]; st.trade_status="Active"
+f2.strategy_states[("CE",22900,"03NOV2026","SELL")]=st
+f2.token_to_meta={"53836":{"opt_type":"CE","strike":22900,"expiry":"03NOV2026","symbol":"NIFTY"}}
+app.dhan_minute_bars=lambda *a: [(_D(2026,11,2,14,58),1,1,1,410.0),(_D(2026,11,2,14,59),1,1,1,412.45),(_D(2026,11,2,15,0),1,1,1,420.0)]
+f2.eod_close_day("NIFTY")
+import csv as _c
+rows=[r for r in _c.DictReader(open(f2.forward_tracker.filepath)) if r["Strike"]=="22900"]
+assert len(rows)==1 and rows[0]["Exit_Price"]=="412.45" and rows[0]["PnL_Pts"]=="-101.5" and rows[0]["Status"]=="CLOSED", rows
+assert not f2.strategy_states and f2._dash_reset_date==_D.now().strftime("%Y-%m-%d")
+f2.strategy_states[("CE",22900,"03NOV2026","SELL")]=st     # running it again never writes a duplicate
+f2.eod_close_day("NIFTY")
+assert len([r for r in _c.DictReader(open(f2.forward_tracker.filepath)) if r["Strike"]=="22900"])==1
+print("15:45 day close: missed dashboard trade recorded at 15:00 price, dashboard cleared: OK")

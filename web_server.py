@@ -206,23 +206,21 @@ def store_next_day_plan(plan_data: dict):
     save_all_plans(plans)
     return plan_data
 
-def next_expiry_disabled() -> bool:
-    """True when the Next Expiry 'Enable' box is unticked (only current-expiry orders)."""
-    return bool(getattr(feed.forward_tracker, "allowed_expiries", None))
-
-
-def plan_expiries(sym: str, target_date: str) -> list:
-    """Expiries the plan for target_date trades: the current one (nearest still open that day)
-    and the next one, the next only while the Next Expiry box is ticked. [] when unknown."""
+def plan_expiries(sym: str, target_date: str, include_next: bool = False) -> list:
+    """Expiries the plan for target_date trades: the current one (nearest still open that day),
+    plus the next one only when asked for (include_next). Never a far expiry. [] when unknown."""
     try:
         day = datetime.strptime(target_date, "%Y-%m-%d").date()
         exps = list(feed.upcoming_expiries(sym, 2, from_day=day) or [])
     except Exception:
         exps = []
-    return exps[:1] if (exps and next_expiry_disabled()) else exps
+    return exps if include_next else exps[:1]
 
 
-def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = False) -> dict:
+def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = False,
+                                     include_next: bool = False) -> dict:
+    """Next-day plan for sym. Current-expiry orders only; include_next=True (asked for from the
+    planner with the NEXT expiry selected) adds the next expiry. Never a far expiry."""
     sym = (sym or "NIFTY").strip().upper()
     target_date = get_next_trading_date()
 
@@ -268,11 +266,11 @@ def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = F
 
     # The expiries still open on the plan's session: on an expiry day today's contracts are
     # gone tomorrow, so "current" is the nearest expiry open on target_date, not today's.
-    p_exps = plan_expiries(sym, target_date)
+    p_exps = plan_expiries(sym, target_date, include_next)
     if p_exps:
         c_exp = p_exps[0]
         n_exp = p_exps[1] if len(p_exps) > 1 else c_exp
-    requests_ = p_exps or (["CURRENT"] if next_expiry_disabled() else ["CURRENT", "NEXT"])
+    requests_ = p_exps or (["CURRENT", "NEXT"] if include_next else ["CURRENT"])
     for req in requests_:
         try:
             pl = get_dashboard_payload(requested_sym=sym, requested_exp=req, bypass_stored_plan=True)
@@ -291,7 +289,7 @@ def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = F
     if p_exps:
         _ok = {e.upper() for e in p_exps}
         dash_watch = [w for w in dash_watch if str(w.get("expiry") or c_exp).upper() in _ok]
-    elif next_expiry_disabled():
+    elif not include_next:
         dash_watch = [w for w in dash_watch if str(w.get("expiry") or c_exp).upper() == str(c_exp).upper()]
 
     setups = []
@@ -1125,7 +1123,7 @@ def background_eod_scheduler():
                     if mtf:
                         with feed.lock:
                             feed.mtf_pivots = mtf
-                        # next-session levels for the current AND the next expiry
+                        # daily: next-session levels for the CURRENT expiry only
                         for _exp in (plan_expiries(sym, get_next_trading_date()) or [None]):
                             feed.fetch_and_map_all_strikes(sym, _exp, force_fetch=True, mode="next")
                     feed.sync_multi_symbol_sheet()
@@ -1273,6 +1271,9 @@ async def start_feed(req: StartFeedRequest):
     feed.symbol = sym
     feed.expiry = curr_exp
     feed.target_expiry = target_exp
+    # Orders: current expiry only; the next expiry too only when the feed is started for NEXT.
+    feed.forward_tracker.set_allowed_expiries(
+        engine.allowed_entry_expiries(curr_exp, next_exp, req_exp == "NEXT"))
     if next_exp:
         feed.next_expiry = next_exp
 
@@ -1418,10 +1419,12 @@ async def get_planner_deck(symbol: str = "NIFTY", force_refresh: bool = False):
 async def trigger_eod_planner(req: dict = None):
     """Force re-computes and stores next-day plan for the target trading session."""
     try:
-        sym = "NIFTY"
+        sym, include_next = "NIFTY", False
         if req and isinstance(req, dict):
             sym = req.get("symbol", "NIFTY")
-        plan = generate_and_store_next_day_plan(sym, force_refresh=True)
+            # next-expiry orders only when asked for (planner set to the NEXT expiry)
+            include_next = bool(req.get("include_next")) or str(req.get("expiry", "")).upper() == "NEXT"
+        plan = generate_and_store_next_day_plan(sym, force_refresh=True, include_next=include_next)
 
         snap = dict(feed.live_data)
         for s in plan.get("setups", []):

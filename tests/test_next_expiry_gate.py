@@ -1,4 +1,5 @@
-"""Next Expiry 'Enable' unticked => only current-expiry trades/orders are generated.
+"""Orders: the current expiry only by default; the next expiry too only with 'Next Expiry ▸
+Enable' ticked; a far (monthly) expiry never.
 Run: python3 tests/test_next_expiry_gate.py"""
 import sys, os, types, importlib.util, tempfile
 from datetime import datetime
@@ -20,11 +21,12 @@ class FakeDT(datetime):
 app.datetime=FakeDT
 os.environ.pop("FORCE_MARKET_OPEN",None)
 
-CUR, NXT = "13OCT2026", "20OCT2026"
+CUR, NXT, FAR = "13OCT2026", "20OCT2026", "27OCT2026"
 
 # A. which expiries are allowed
-assert app.allowed_entry_expiries(CUR, NXT, True) is None              # ticked: no restriction
+assert app.allowed_entry_expiries(CUR, NXT, True) == [CUR, NXT]        # ticked: current + next
 assert app.allowed_entry_expiries(CUR, NXT, False) == [CUR]            # unticked: current only
+assert app.allowed_entry_expiries(CUR, CUR, True) == [CUR]
 assert app.allowed_entry_expiries("", NXT, False) is None              # no current expiry yet: don't block
 print("A allowed expiries: OK")
 
@@ -46,10 +48,10 @@ assert entry(t, CUR, 22400) is not None
 assert orders == [CUR], orders
 print("B unticked: next-expiry entry skipped, current-expiry order placed: OK")
 
-# C. ticked again: next expiry trades/orders come back
+# C. ticked: next expiry trades/orders come back, a far expiry still never
 t.set_allowed_expiries(app.allowed_entry_expiries(CUR, NXT, True))
-assert t.allowed_expiries is None
 assert entry(t, NXT, 22500) is not None
+assert entry(t, FAR, 22550) is None
 assert orders == [CUR, NXT], orders
-print("C ticked: next-expiry order placed: OK")
+print("C ticked: next-expiry order placed, far expiry still skipped: OK")
 print("NEXT EXPIRY GATE TESTS PASSED")

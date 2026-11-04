@@ -2004,12 +2004,14 @@ def trade_expiry(trade_id):
 
 
 def allowed_entry_expiries(curr_exp, next_exp, use_next):
-    """Expiries the strategy may open trades/orders on.
-    Next expiry ticked => None (no restriction); unticked => the current expiry only."""
-    if use_next:
-        return None
+    """Expiries the strategy may open trades/orders on: the current expiry only, plus the next
+    expiry while 'Next Expiry ▸ Enable' is ticked. A far (e.g. monthly) expiry never.
+    None (no restriction) only while the current expiry is not known yet."""
     curr = str(curr_exp or "").strip()
-    return [curr] if curr else None
+    nxt = str(next_exp or "").strip()
+    if not curr:
+        return None
+    return [curr, nxt] if (use_next and nxt and nxt != curr) else [curr]
 
 
 class ForwardTestTracker:
@@ -2028,8 +2030,8 @@ class ForwardTestTracker:
         self._closed_keys_today = set()  # {(opt_type, strike, action, date_str)} — action-aware
         self._sl_hit_count      = {}     # {(opt_type, strike, action, date_str) -> int}
         self.paper_only         = False  # True => never route orders to LiveOrderManager
-        # Expiries new trades/orders may be opened on (upper-case). None = any expiry.
-        # Set from the "Next Expiry ▸ Enable" tick box: unticked => current expiry only.
+        # Expiries new trades/orders may be opened on (upper-case). None = any expiry, only
+        # until the feed knows its current expiry. Current only, plus next when ticked.
         self.allowed_expiries   = None
         # Open trades and today's re-entry guards are saved here, so an app restart
         # (internet drop, crash, Mac sleep) picks up the same trades and keeps watching them.
@@ -4381,15 +4383,16 @@ class FeedEngine:
             nd = datetime.now().date() + timedelta(days=1)
             while nd.weekday() >= 5:
                 nd += timedelta(days=1)
-            exps = self.upcoming_expiries(symbol, 2, from_day=nd) or [None]
-            if self.forward_tracker.allowed_expiries:   # Next Expiry unticked: current expiry only
-                exps = exps[:1]
+            # Daily plan: the CURRENT expiry only (next / far expiry orders only on request)
+            exps = (self.upcoming_expiries(symbol, 1, from_day=nd) or [None])[:1]
             for exp in exps:
                 _mapped = self.fetch_and_map_all_strikes(symbol, exp, force_fetch=True, mode="next")
-                try:
-                    self.advanced_engine.build_next_day_plan(symbol, exp, strikes_dict=_mapped, mtf_pivots=self.mtf_pivots, daily_focus=self.daily_focus, mode="next")
-                except Exception as _adv_nd_err:
-                    print(f"[EOD] advance next-day plan calc note: {_adv_nd_err}")
+                # The advance plan trades the monthly expiry: only when that IS the current one
+                if exp and self.get_monthly_expiry(symbol, nd) == exp:
+                    try:
+                        self.advanced_engine.build_next_day_plan(symbol, exp, strikes_dict=_mapped, mtf_pivots=self.mtf_pivots, daily_focus=self.daily_focus, mode="next")
+                    except Exception as _adv_nd_err:
+                        print(f"[EOD] advance next-day plan calc note: {_adv_nd_err}")
                 print(f"[EOD] ✅ Next-day strike levels {symbol} {exp or 'nearest'}: {len(_mapped or {})} strikes "
                       f"→ strike_pivot_cache_next.json")
         except Exception as _nd_err:
@@ -7039,7 +7042,7 @@ class ControlPanel:
         self.symbol_var    = tk.StringVar(value="NIFTY")
         self.expiry_var    = tk.StringVar()
         self.next_exp_var  = tk.StringVar()          # next expiry
-        self.use_next_exp  = tk.BooleanVar(value=True)  # enable by default
+        self.use_next_exp  = tk.BooleanVar(value=False)  # current expiry orders only by default
         self.strikes_var   = tk.IntVar(value=10)
         self.status_var    = tk.StringVar(value="Ready")
         self.max_oi_info   = tk.StringVar(value="")
@@ -8013,7 +8016,7 @@ class ControlPanel:
         self._refresh_display()
 
     def _on_next_expiry_selected(self):
-        self.use_next_exp.set(True)
+        # Picking a next expiry only shows it; its orders need the Enable tick.
         self._apply_expiry_gate()
         if hasattr(self, "exp_next_var"):
             self.exp_cur_var.set(False)
@@ -8318,7 +8321,8 @@ class ControlPanel:
         elif exp_filt == "CURRENT" and curr_exp:
             target_expiries = [curr_exp]
         else:
-            target_expiries = [e for e in [curr_exp, next_exp] if e]
+            # By default only current-expiry orders; the next expiry's with Enable ticked
+            target_expiries = [e for e in [curr_exp, next_exp if self.use_next_exp.get() else ""] if e]
             if not target_expiries:
                 target_expiries = [curr_exp or "-"]
 
@@ -9132,8 +9136,7 @@ class ControlPanel:
             messagebox.showerror("Error", "Please select an expiry"); return
         try:   # remembered so an auto-restart resumes the same symbol
             with open(os.path.join(BASE_DIR, "last_session.json"), "w") as _lf:
-                json.dump({"exchange": exch, "symbol": symbol,
-                           "use_next_exp": bool(self.use_next_exp.get())}, _lf)
+                json.dump({"exchange": exch, "symbol": symbol}, _lf)
         except Exception:
             pass
 
@@ -9238,7 +9241,6 @@ if __name__=="__main__":
                 _last = json.load(_lf)
             app.exchange_var.set(_last.get("exchange", "NFO"))
             app.symbol_var.set(_last.get("symbol", "NIFTY"))
-            app.use_next_exp.set(bool(_last.get("use_next_exp", True)))
             app.expiry_var.set("")
             app._load_expiries()
         except Exception:

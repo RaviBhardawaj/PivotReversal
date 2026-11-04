@@ -1,6 +1,6 @@
-"""The 15:45 next-day plan ("auto generate orders") holds CURRENT-expiry setups, and next-expiry
-ones only while the Next Expiry box is ticked. On an expiry day "current" is the expiry still
-open on the plan's session, never today's expiring one.
+"""The 15:45 next-day plan ("auto generate orders") holds CURRENT-expiry setups only. Next-expiry
+ones only when asked for (planner generate with NEXT selected), a far expiry never. On an expiry
+day "current" is the expiry still open on the plan's session, never today's expiring one.
 Run: python3 tests/test_eod_plan_expiries.py"""
 import sys, os, types, tempfile, importlib.util
 tk=types.ModuleType("tkinter")
@@ -23,7 +23,8 @@ web.get_tv_multi_timeframe_pivots=lambda sym,force_refresh=False: {}
 web.get_next_trading_date=lambda *a,**k: "2026-10-14"
 
 TODAY, CUR, NXT = "13OCT2026", "20OCT2026", "27OCT2026"   # 13 Oct is an expiry day
-web.feed.upcoming_expiries=lambda sym,n=2,from_day=None: [CUR,NXT][:n]   # open on 14 Oct
+FAR="03NOV2026"
+web.feed.upcoming_expiries=lambda sym,n=2,from_day=None: [CUR,NXT,FAR][:n]   # open on 14 Oct
 
 asked=[]
 def payload(requested_sym=None, requested_exp=None, bypass_stored_plan=False):
@@ -33,22 +34,22 @@ def payload(requested_sym=None, requested_exp=None, bypass_stored_plan=False):
             "watch_items":[{"expiry":exp,"strike":22700,"type":"PE","side":"BUY","is_15m":True,
                             "planned_ep":100.0,"sl":90.0,"t1":120.0,"t2":140.0,"ltp":101.0}]}
 web.get_dashboard_payload=payload
-def plan_exps():
-    return sorted({s["expiry"] for s in web.generate_and_store_next_day_plan("NIFTY",force_refresh=True)["setups"]})
+def plan_exps(include_next=False):
+    return sorted({s["expiry"] for s in web.generate_and_store_next_day_plan("NIFTY",force_refresh=True,include_next=include_next)["setups"]})
 
-# A. Next Expiry ticked: current + next expiry setups, each asked for by its own expiry
-web.feed.forward_tracker.set_allowed_expiries(None)
-assert web.plan_expiries("NIFTY","2026-10-14")==[CUR,NXT]
-asked.clear(); got=plan_exps()
+# A. daily (default): current expiry only, whatever the Next Expiry box says
+for gate in (None, [CUR], [CUR, NXT]):
+    web.feed.forward_tracker.set_allowed_expiries(gate)
+    assert web.plan_expiries("NIFTY","2026-10-14")==[CUR]
+    asked.clear(); got=plan_exps()
+    assert got==[CUR] and asked==[CUR], (gate,got,asked)
+print("A daily plan: only current expiry (%s) orders: OK"%CUR)
+
+# B. asked for the next expiry: current + next, never the far one
+assert web.plan_expiries("NIFTY","2026-10-14",include_next=True)==[CUR,NXT]
+asked.clear(); got=plan_exps(include_next=True)
 assert got==sorted([CUR,NXT]) and asked==[CUR,NXT], (got,asked)
-print("A ticked: plan has current (%s) and next (%s) expiry orders: OK"%(CUR,NXT))
-
-# B. Next Expiry unticked: current expiry only
-web.feed.forward_tracker.set_allowed_expiries([CUR])
-assert web.plan_expiries("NIFTY","2026-10-14")==[CUR]
-asked.clear(); got=plan_exps()
-assert got==[CUR] and asked==[CUR], (got,asked)
-print("B unticked: plan has only current expiry orders: OK")
+print("B next expiry on request: current + next, no far expiry: OK")
 
 # C. expiries unknown (no instrument list): falls back to CURRENT/NEXT, still current only when unticked
 web.feed.upcoming_expiries=lambda sym,n=2,from_day=None: []
@@ -59,18 +60,19 @@ def payload2(requested_sym=None, requested_exp=None, bypass_stored_plan=False):
             "watch_items":[{"expiry":MAP[requested_exp],"strike":22700,"type":"PE","side":"BUY","is_15m":True,
                             "planned_ep":100.0,"sl":90.0,"t1":120.0,"t2":140.0}]}
 web.get_dashboard_payload=payload2
-web.feed.forward_tracker.set_allowed_expiries([CUR])
 asked.clear(); got=plan_exps()
 assert asked==["CURRENT"] and got==[CUR], (got,asked)
-web.feed.forward_tracker.set_allowed_expiries(None)
-asked.clear(); got=plan_exps()
+asked.clear(); got=plan_exps(include_next=True)
 assert asked==["CURRENT","NEXT"] and got==sorted([CUR,NXT]), (got,asked)
 print("C fallback without the instrument list: OK")
 
 # D. an expiry that has passed is never planned (today's expiring contracts on an expiry day)
 web.get_dashboard_payload=payload          # CURRENT -> 13OCT, which expires before 14 Oct
 asked.clear(); got=plan_exps()
-assert TODAY not in got and got==[CUR], (got,asked)
+assert got==[], (got,asked)                # fallback "CURRENT" is today's expiring contract
+web.feed.upcoming_expiries=lambda sym,n=2,from_day=None: [CUR,NXT,FAR][:n]
+asked.clear(); got=plan_exps()
+assert got==[CUR], (got,asked)
 print("D expired expiry (%s) left out of the plan: OK"%TODAY)
 
 # E. stored plans: orders of an expiry that has passed are purged from next_day_plans.json

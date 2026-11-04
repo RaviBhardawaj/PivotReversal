@@ -38,6 +38,7 @@ BUY_SETUP = "★ BUY (S2/S1 Reclaim)"
 SELL_SETUP = "▼ SELL (R2/R1 Reject)"
 
 _run_lock = threading.Lock()
+_file_lock = threading.RLock()      # fno_orders.json read-modify-write
 status = {"running": False, "done": 0, "total": 0, "symbol": "", "message": "Idle", "started_at": ""}
 
 
@@ -320,6 +321,11 @@ def load_orders() -> dict:
 def save_run(day: str, generated_at: str, expiry_mode: str, results: list):
     """Merge one run into fno_orders.json under its plan date (a symbol's newer run replaces its
     older one) and keep the last KEEP_DAYS dates."""
+    with _file_lock:
+        _save_run(day, generated_at, expiry_mode, results)
+
+
+def _save_run(day, generated_at, expiry_mode, results):
     data = load_orders()
     entry = data.get(day) or {"symbols": {}}
     entry["generated_at"] = generated_at
@@ -329,10 +335,138 @@ def save_run(day: str, generated_at: str, expiry_mode: str, results: list):
     data[day] = entry
     for old in sorted(data)[:-KEEP_DAYS]:
         data.pop(old, None)
-    tmp = FNO_ORDERS_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=1)
-    os.replace(tmp, FNO_ORDERS_FILE)
+    _write_orders(data)
+
+
+def _write_orders(data: dict):
+    with _file_lock:
+        tmp = FNO_ORDERS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=1)
+        os.replace(tmp, FNO_ORDERS_FILE)
+
+
+def order_key(day: str, s: dict) -> tuple:
+    """What identifies one order in the file and in the sheet tab."""
+    return (str(day), str(s.get("symbol", "")).upper(), str(s.get("expiry", "")).upper(),
+            str(s.get("timeframe", "")).upper(), str(int(float(s.get("strike") or 0))),
+            str(s.get("type", "")).upper(), str(s.get("side", "")).upper())
+
+
+def delete_orders(day: str = None, setup_ids: list = None, symbol: str = None, expiry: str = None) -> dict:
+    """Remove generated orders from fno_orders.json. Only these planned orders are touched:
+    trades and broker orders are never changed here.
+      setup_ids: those orders (of the plan date `day`, the latest date by default)
+      otherwise every order of `day`, narrowed to `symbol` and/or `expiry` when given.
+    Returns {"success", "plan_date", "deleted": n, "keys": [order_key...]} (keys feed the sheet)."""
+    with _file_lock:
+        data = load_orders()
+        if not data:
+            return {"success": False, "error": "no stored orders", "deleted": 0, "keys": []}
+        day = day if day in data else sorted(data)[-1]
+        ids = {str(i) for i in (setup_ids or []) if i}
+        sym = (symbol or "").strip().upper()
+        sym = "" if sym == "ALL" else sym
+        exp = (expiry or "").strip().upper()
+        exp = "" if exp == "ALL" else exp
+        if not ids and setup_ids is not None:
+            return {"success": False, "error": "no order selected", "deleted": 0, "keys": []}
+        keys = []
+        for s_name, r in data[day].get("symbols", {}).items():
+            kept = []
+            for o in r.get("setups", []):
+                if ids:
+                    hit = str(o.get("setup_id", "")) in ids
+                else:
+                    hit = (not sym or s_name == sym) and (not exp or str(o.get("expiry", "")).upper() == exp)
+                if hit:
+                    keys.append(order_key(day, o))
+                else:
+                    kept.append(o)
+            r["setups"] = kept
+        if keys:
+            _write_orders(data)
+        return {"success": True, "plan_date": day, "deleted": len(keys), "keys": keys}
+
+
+# ── Sheet rows: find, delete, replace ─────────────────────────────────────
+def _iso_dates(v) -> set:
+    """Possible ISO dates of a 'Plan Date' cell (the sheet may show it in its own format)."""
+    v = str(v or "").strip()
+    out = set()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%d-%b-%Y", "%d %b %Y", "%Y/%m/%d"):
+        try:
+            out.add(datetime.strptime(v, fmt).date().isoformat())
+        except ValueError:
+            pass
+    return out
+
+
+def _sheet_row_matches(row: list, keys: set, day_syms: set) -> bool:
+    r = [str(x).strip() for x in (list(row) + [""] * 8)[:8]]
+    dates = _iso_dates(r[0])
+    if not dates:
+        return False
+    sym = r[2].upper()
+    if any((d, sym) in day_syms for d in dates):
+        return True
+    if not keys:
+        return False
+    try:
+        stk = str(int(float(r[5].replace(",", ""))))
+    except ValueError:
+        return False
+    rest = (sym, r[3].upper(), r[4].upper(), stk, r[6].upper(), r[7].upper())
+    return any((d,) + rest in keys for d in dates)
+
+
+def _delete_sheet_rows(ws, keys: set, day_syms: set) -> int:
+    """Delete the tab's rows that match, in one batch request (bottom block first). Returns n."""
+    values = ws.get_all_values()
+    hit = [i for i, row in enumerate(values) if i > 0 and _sheet_row_matches(row, keys, day_syms)]
+    if not hit:
+        return 0
+    blocks = []                                   # contiguous [start, end) in 0-based row index
+    for i in hit:
+        if blocks and blocks[-1][1] == i:
+            blocks[-1][1] = i + 1
+        else:
+            blocks.append([i, i + 1])
+    reqs = [{"deleteDimension": {"range": {"sheetId": ws.id, "dimension": "ROWS",
+                                           "startIndex": a, "endIndex": b}}}
+            for a, b in reversed(blocks)]
+    ws.spreadsheet.batch_update({"requests": reqs})
+    return len(hit)
+
+
+def _orders_tab(eng, create_rows: int = 0):
+    gc = eng.get_gspread_client()
+    sh = gc.open_by_key(eng.SPREADSHEET_ID)
+    ws = next((w for w in sh.worksheets() if w.title == SHEET_TAB), None)
+    if ws is None and create_rows:
+        ws = sh.add_worksheet(title=SHEET_TAB, rows=max(1000, create_rows + 10), cols=len(SHEET_HEADERS))
+        ws.update(values=[SHEET_HEADERS], range_name="A1")
+    return ws
+
+
+def remove_from_sheet(eng, keys: list, retries: int = 3) -> str:
+    """Delete these orders' rows from the "F&O Orders" tab (one read + one batch delete)."""
+    keys = {tuple(k) for k in (keys or [])}
+    if not keys:
+        return "nothing to remove"
+    last = ""
+    for attempt in range(retries):
+        try:
+            ws = _orders_tab(eng)
+            if ws is None:
+                return "no sheet tab"
+            n = _delete_sheet_rows(ws, keys, set())
+            return f"{n} rows removed from '{SHEET_TAB}'"
+        except Exception as e:
+            last = str(e)[:160]
+            print(f"[F&O ORDERS] Sheet delete failed (try {attempt + 1}/{retries}): {last}")
+            time.sleep(min(60, 5 * (2 ** attempt)) if "429" not in last else 60)
+    return f"sheet not updated: {last}"
 
 
 def sheet_rows(day: str, generated_at: str, results: list) -> list:
@@ -346,25 +480,27 @@ def sheet_rows(day: str, generated_at: str, results: list) -> list:
     return rows
 
 
-def push_to_sheet(eng, rows: list, retries: int = 3) -> str:
+def push_to_sheet(eng, rows: list, retries: int = 3, replace: set = None) -> str:
     """Append the run's rows to the "F&O Orders" tab: one append call (chunks of 500 rows),
-    retried with a backoff when the connection drops. Returns a short result note."""
-    if not rows:
+    retried with a backoff when the connection drops. Returns a short result note.
+    replace: {(plan_date, symbol)} whose old rows are deleted first, so regenerating a symbol
+    replaces its orders in the sheet instead of adding a second copy."""
+    replace = {tuple(k) for k in (replace or [])}
+    if not rows and not replace:
         return "no rows"
     last = ""
+    removed = None
     for attempt in range(retries):
         try:
-            gc = eng.get_gspread_client()
-            sh = gc.open_by_key(eng.SPREADSHEET_ID)
-            ws = next((w for w in sh.worksheets() if w.title == SHEET_TAB), None)
-            if ws is None:
-                ws = sh.add_worksheet(title=SHEET_TAB, rows=max(1000, len(rows) + 10), cols=len(SHEET_HEADERS))
+            ws = _orders_tab(eng, create_rows=len(rows) or 1)
+            if (ws.row_values(1) or [])[:1] != SHEET_HEADERS[:1]:
                 ws.update(values=[SHEET_HEADERS], range_name="A1")
-            elif (ws.row_values(1) or [])[:1] != SHEET_HEADERS[:1]:
-                ws.update(values=[SHEET_HEADERS], range_name="A1")
+            if replace and removed is None:
+                removed = _delete_sheet_rows(ws, set(), replace)
             for i in range(0, len(rows), 500):
                 ws.append_rows(rows[i:i + 500], value_input_option="USER_ENTERED")
-            return f"{len(rows)} rows added to '{SHEET_TAB}'"
+            note = f"{len(rows)} rows added to '{SHEET_TAB}'"
+            return note + (f" ({removed} old rows replaced)" if removed else "")
         except Exception as e:
             last = str(e)[:160]
             print(f"[F&O ORDERS] Sheet write failed (try {attempt + 1}/{retries}): {last}")
@@ -402,7 +538,7 @@ def generate(eng, symbols: list = None, expiry_mode: str = "CURRENT", sheet: boo
                   + (f" ({r['error']})" if r.get("error") else ""))
         save_run(day, gen_at, expiry_mode, results)
         rows = sheet_rows(day, gen_at, results)
-        note = push_to_sheet(eng, rows) if sheet else "sheet skipped"
+        note = push_to_sheet(eng, rows, replace={(day, r["symbol"]) for r in results}) if sheet else "sheet skipped"
         msg = f"{len(rows)} orders for {len(syms)} symbols ({day}); {note}"
         status.update(running=False, done=len(syms), symbol="", message=msg)
         print(f"[F&O ORDERS] ✅ {msg}")

@@ -799,6 +799,52 @@
   };
 
   // ── Next-Day 15M + 1H Intraday Strategy Deck ──
+  // ── Delete / regenerate generated next-day orders ──
+  async function deletePlanOrders(sym, planId, ids, label) {
+    if (!ids || !ids.length) return;
+    if (!window.confirm(`Delete ${label}?\n\nOnly the generated plan order is removed. Open trades and orders already sent to the broker are not touched. Use REGENERATE to build orders again.`)) return;
+    try {
+      const res = await fetch('/api/planner/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: sym, plan_id: planId || '', setup_ids: ids })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`🗑 Deleted ${data.deleted} order(s) — ${data.remaining} left in the ${sym} plan`, 'green');
+        loadPlannerDeck(sym);
+      } else {
+        showToast(`Delete failed: ${data.error || 'error'}`, 'red');
+      }
+    } catch (e) {
+      showToast(`Delete error: ${e}`, 'red');
+    }
+  }
+
+  async function regeneratePlan(sym, btn) {
+    if (!window.confirm(`Regenerate the ${sym} next-day orders?\n\nThe stored plan is rebuilt with the current entry rules; deleted orders come back if they still qualify.`)) return;
+    try {
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ REGENERATING...'; }
+      showToast(`⏳ Regenerating ${sym} next-day orders...`, 'blue');
+      const res = await fetch('/api/planner/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: sym })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`✅ ${sym} plan regenerated: ${(data.setups || []).length} orders`, 'green');
+        renderPlannerDeck(data);
+      } else {
+        showToast(`Regenerate failed: ${data.error || 'error'}`, 'red');
+        if (btn) { btn.disabled = false; btn.textContent = '↻ REGENERATE'; }
+      }
+    } catch (e) {
+      showToast(`Regenerate error: ${e}`, 'red');
+      if (btn) { btn.disabled = false; btn.textContent = '↻ REGENERATE'; }
+    }
+  }
+
   async function loadPlannerDeck(sym = null) {
     const targetSym = (sym || state.symbol || 'NIFTY').trim().toUpperCase();
     if (!els.plannerDeckContainer) return;
@@ -882,11 +928,15 @@
                 <button class="btn-order-fast font-bold" data-sym="${sym}" data-strike="${s.strike}" data-type="${s.type}" data-expiry="${s.expiry || ''}" data-side="${s.side || 'BUY'}" data-cmp="${cmpVal}" data-entry="${ep}" data-sl="0" data-t1="${t1}">
                   ⚡ EXEC
                 </button>
+                <button class="btn-order-del" data-plan-del="${escHtml(s.setup_id || '')}" title="Delete this generated order">🗑</button>
               </td>
             </tr>
           `;
         }).join('')
-      : '<tr><td colspan="16" class="empty-state">No specific setup rows generated for current filter. Refer to strategy rules above.</td></tr>';
+      : (data.user_cleared && !setups.length
+          ? '<tr><td colspan="16" class="empty-state">All orders of this plan were deleted. Click <strong>↻ REGENERATE</strong> to build them again with the current entry rules.</td></tr>'
+          : '<tr><td colspan="16" class="empty-state">No specific setup rows generated for current filter. Refer to strategy rules above.</td></tr>');
+    const shownIds = displaySetups.map(s => s.setup_id).filter(Boolean);
 
     els.plannerDeckContainer.innerHTML = `
       <!-- Method & Target Trading Session Ribbon -->
@@ -900,6 +950,12 @@
         <div style="display:flex;align-items:center;gap:8px">
           <button class="btn btn-success font-bold" onclick="window.applyPlanToLiveScanner()" style="padding:4px 12px;font-size:11px">
             📥 LOAD PLAN INTO LIVE SCANNER
+          </button>
+          <button class="btn btn-primary font-bold" id="btn-plan-regenerate" style="padding:4px 12px;font-size:11px" title="Rebuild every order of this plan with the current entry rules">
+            ↻ REGENERATE
+          </button>
+          <button class="btn btn-danger font-bold" id="btn-plan-delete-shown" style="padding:4px 12px;font-size:11px" ${shownIds.length ? '' : 'disabled'} title="Delete the orders shown below (current expiry filter)">
+            🗑 DELETE SHOWN (${shownIds.length})
           </button>
           <span style="font-size:10.5px;color:var(--text-dim)">Computed: ${genAt}</span>
         </div>
@@ -961,6 +1017,21 @@
         </div>
       </div>
     `;
+
+    els.plannerDeckContainer.querySelectorAll('[data-plan-del]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute('data-plan-del');
+        const s = setups.find(x => x.setup_id === id) || {};
+        deletePlanOrders(sym, data.plan_id, [id], `${s.side || ''} ${s.strike || ''} ${s.type || ''} ${s.expiry || ''} (${s.timeframe || ''})`);
+      });
+    });
+    const btnDelShown = document.getElementById('btn-plan-delete-shown');
+    if (btnDelShown) btnDelShown.addEventListener('click', () => {
+      deletePlanOrders(sym, data.plan_id, shownIds, `${shownIds.length} orders shown for ${targetDate}`);
+    });
+    const btnRegen = document.getElementById('btn-plan-regenerate');
+    if (btnRegen) btnRegen.addEventListener('click', () => regeneratePlan(sym, btnRegen));
 
     els.plannerDeckContainer.querySelectorAll('.btn-order-fast').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -1314,6 +1385,8 @@
     genExpiry: document.getElementById('fno-gen-expiry'),
     btnGen: document.getElementById('btn-fno-generate'),
     btnRefresh: document.getElementById('btn-fno-refresh'),
+    btnRegen: document.getElementById('btn-fno-regenerate'),
+    btnDelShown: document.getElementById('btn-fno-delete-shown'),
     selExpiry: document.getElementById('fno-filter-expiry'),
     selDate: document.getElementById('fno-filter-date'),
     listChips: document.getElementById('fno-list-chips'),
@@ -1351,6 +1424,8 @@
         fnoEls.btnGen.disabled = !!st.running;
         fnoEls.btnGen.textContent = st.running ? '⏳ GENERATING...' : '⚡ GENERATE ALL F&O';
       }
+      if (fnoEls.btnRegen) fnoEls.btnRegen.disabled = !!st.running;
+      if (fnoEls.btnDelShown) fnoEls.btnDelShown.disabled = !!st.running;
       clearTimeout(fnoPollTimer);
       if (st.running) fnoPollTimer = setTimeout(loadFnoOrders, 4000);
     } catch (e) {
@@ -1427,18 +1502,25 @@
     }
   }
 
-  function renderFnoOrders() {
-    if (!fnoEls.tbody) return;
+  function fnoShownOrders() {
     const f = state.fno;
-    const list = ((f.data || {}).setups || []).filter(s =>
+    return ((f.data || {}).setups || []).filter(s =>
       (f.symbol === 'ALL' || s.symbol === f.symbol) &&
       (f.side === 'ALL' || s.side === f.side) &&
       (f.tf === 'ALL' || s.timeframe === f.tf) &&
       (f.type === 'ALL' || s.type === f.type) &&
       (f.expiry === 'ALL' || s.expiry === f.expiry));
+  }
+
+  function renderFnoOrders() {
+    if (!fnoEls.tbody) return;
+    const f = state.fno;
+    const list = fnoShownOrders();
+    if (fnoEls.btnDelShown) fnoEls.btnDelShown.textContent = `🗑 DELETE SHOWN (${list.length})`;
+    if (fnoEls.btnRegen) fnoEls.btnRegen.textContent = f.symbol === 'ALL' ? '↻ REGENERATE ALL' : `↻ REGENERATE ${f.symbol}`;
     if (!list.length) {
       const none = (f.data && (f.data.setups || []).length) ? 'No orders match the selected filters.' : 'No daily F&amp;O orders yet. They are generated at 3:45 PM, or click <strong>⚡ GENERATE ALL F&amp;O</strong>.';
-      fnoEls.tbody.innerHTML = `<tr><td colspan="16" class="empty-state">${none}</td></tr>`;
+      fnoEls.tbody.innerHTML = `<tr><td colspan="17" class="empty-state">${none}</td></tr>`;
       return;
     }
     const n = v => (v ? `₹${Number(v).toFixed(2)}` : '-');
@@ -1462,9 +1544,65 @@
         <td class="font-mono text-red">${n(s.sl)}</td>
         <td><span class="badge badge-both">${escHtml(s.rr || '-')}</span></td>
         <td class="text-muted" title="${escHtml(s.source || '')}">${escHtml(s.candle_date || '-')}</td>
+        <td><button class="btn-order-del" data-fno-order-del="${escHtml(s.setup_id || '')}" title="Delete this generated order">🗑</button></td>
       </tr>`;
     }).join('');
+    fnoEls.tbody.querySelectorAll('[data-fno-order-del]').forEach(b => b.addEventListener('click', () => {
+      const id = b.getAttribute('data-fno-order-del');
+      const s = list.find(x => x.setup_id === id) || {};
+      deleteFnoOrders([id], `${s.symbol || ''} ${s.side || ''} ${s.strike || ''} ${s.type || ''} ${s.expiry || ''} (${s.timeframe || ''})`);
+    }));
   }
+
+  async function deleteFnoOrders(ids, label) {
+    if (!ids || !ids.length) return;
+    if (!window.confirm(`Delete ${label}?\n\nIt is removed from the dashboard and from the "F&O Orders" sheet tab. Open trades and orders already sent to the broker are not touched. Use REGENERATE to build orders again.`)) return;
+    try {
+      const res = await fetch('/api/fno-orders/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: ((state.fno.data || {}).plan_date) || '', setup_ids: ids })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`🗑 Deleted ${data.deleted} F&O order(s)${data.sheet ? ' — sheet updating' : ''}`, 'green');
+        loadFnoOrders();
+      } else {
+        showToast(`Delete failed: ${data.error || 'error'}`, 'red');
+      }
+    } catch (e) {
+      showToast(`Delete error: ${e}`, 'red');
+    }
+  }
+
+  if (fnoEls.btnDelShown) fnoEls.btnDelShown.addEventListener('click', () => {
+    const ids = fnoShownOrders().map(s => s.setup_id).filter(Boolean);
+    const f = state.fno;
+    const what = f.symbol === 'ALL' ? 'all symbols' : f.symbol;
+    deleteFnoOrders(ids, `${ids.length} F&O orders shown (${what}, plan ${((f.data || {}).plan_date) || '-'})`);
+  });
+
+  if (fnoEls.btnRegen) fnoEls.btnRegen.addEventListener('click', async () => {
+    const sym = state.fno.symbol;
+    const exp = (fnoEls.genExpiry && fnoEls.genExpiry.value) || 'CURRENT';
+    const what = sym === 'ALL' ? 'every symbol in the daily list' : sym;
+    if (!window.confirm(`Regenerate ${exp.toLowerCase()} expiry orders for ${what}?\n\nTheir stored orders and their rows in the "F&O Orders" sheet tab are replaced with orders built from the current entry rules.`)) return;
+    try {
+      fnoEls.btnRegen.disabled = true;
+      const res = await fetch('/api/fno-orders/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expiry: exp, symbols: sym === 'ALL' ? [] : [sym] })
+      });
+      const data = await res.json();
+      showToast(data.success ? `↻ Regenerating ${what} (${exp})...` : `Regenerate: ${data.error || 'failed'}`, data.success ? 'blue' : 'red');
+      state.fno.date = '';
+      setTimeout(loadFnoOrders, 1000);
+    } catch (e) {
+      showToast(`Regenerate error: ${e}`, 'red');
+      fnoEls.btnRegen.disabled = false;
+    }
+  });
 
   [['.fno-side-pill', 'data-fno-side', 'side'], ['.fno-tf-pill', 'data-fno-tf', 'tf'], ['.fno-type-pill', 'data-fno-type', 'type']].forEach(([sel, attr, key]) => {
     document.querySelectorAll(sel).forEach(btn => btn.addEventListener('click', () => {

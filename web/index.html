@@ -394,6 +394,8 @@
             <option value="ALL">CURRENT + NEXT</option>
           </select>
           <button id="btn-fno-generate" class="btn btn-primary font-bold" title="Generate orders for every configured F&amp;O symbol">⚡ GENERATE ALL F&amp;O</button>
+          <button id="btn-fno-regenerate" class="btn btn-primary font-bold" title="Rebuild the selected symbol's orders (all symbols when ALL is selected) with the current entry rules">↻ REGENERATE</button>
+          <button id="btn-fno-delete-shown" class="btn btn-danger font-bold" title="Delete the orders shown in the table (after the filters)">🗑 DELETE SHOWN</button>
           <button id="btn-fno-refresh" class="btn btn-secondary" title="Reload stored orders">↻ REFRESH</button>
         </div>
       </div>
@@ -461,10 +463,11 @@
               <th>SL (₹)</th>
               <th>R:R</th>
               <th>CANDLE</th>
+              <th>ACTION</th>
             </tr>
           </thead>
           <tbody id="tbody-fno-orders">
-            <tr><td colspan="16" class="empty-state">No daily F&amp;O orders yet. They are generated at 3:45 PM, or click <strong>⚡ GENERATE ALL F&amp;O</strong>.</td></tr>
+            <tr><td colspan="17" class="empty-state">No daily F&amp;O orders yet. They are generated at 3:45 PM, or click <strong>⚡ GENERATE ALL F&amp;O</strong>.</td></tr>
           </tbody>
         </table>
       </div>

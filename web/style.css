@@ -2197,3 +2197,33 @@ input:checked + .slider:before {
   padding: 0 3px;
 }
 .fno-del:hover { color: var(--red, #ef4444); }
+
+/* ── Delete / regenerate generated orders ── */
+.btn-order-del {
+  background: transparent;
+  border: 1px solid rgba(239, 68, 68, 0.55);
+  color: #f87171;
+  padding: 2px 6px;
+  margin-left: 4px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.2;
+}
+.btn-order-del:hover {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: #ef4444;
+}
+.btn.btn-danger {
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.6);
+  color: #fca5a5;
+}
+.btn.btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.28);
+  color: #ffffff;
+}
+.btn.btn-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

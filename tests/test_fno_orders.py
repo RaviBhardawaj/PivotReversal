@@ -88,10 +88,12 @@ def focus(m, step):
             "P_STRIKE": s(p["P"]), "p_strikes": [s(p["P"])]}
 
 class Sheet:
-    def __init__(self): self.appends = []; self.header = []; self.title = fp.SHEET_TAB
+    def __init__(self): self.appends = []; self.header = []; self.title = fp.SHEET_TAB; self.id = 1; self.spreadsheet = self
     def row_values(self, i): return self.header
     def update(self, values, range_name): self.header = values[0]
     def append_rows(self, rows, value_input_option=None): self.appends.append(rows)
+    def get_all_values(self): return [self.header] + [r for a in self.appends for r in a]
+    def batch_update(self, body): raise AssertionError("nothing to replace on a first run")
 ws = Sheet()
 class Book:
     def worksheets(self): return []

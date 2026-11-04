@@ -13,7 +13,7 @@ import csv
 import asyncio
 import threading
 from datetime import datetime, timedelta, time as dt_time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -211,6 +211,43 @@ def store_next_day_plan(plan_data: dict):
     save_all_plans(plans)
     return plan_data
 
+def delete_plan_setups(symbol: str, setup_ids: list = None, expiry: str = "", plan_id: str = "") -> dict:
+    """Remove generated setups (orders) from a stored next-day plan in next_day_plans.json.
+    setup_ids: those setups; otherwise every setup of the plan (narrowed to `expiry` if given).
+    Only the plan is changed: open trades and broker orders are not touched. When the plan ends
+    up empty it is marked user_cleared so it isn't silently regenerated; REGENERATE rebuilds it."""
+    sym = (symbol or "NIFTY").strip().upper()
+    plans = load_all_plans()
+    key = plan_id if plan_id in plans else None
+    if key is None:
+        cands = [k for k, p in plans.items() if p.get("symbol") == sym]
+        if not cands:
+            return {"success": False, "error": f"No stored plan for {sym}", "deleted": 0}
+        key = max(cands, key=lambda k: plans[k].get("target_trading_date", ""))
+    plan = plans[key]
+    ids = {str(i) for i in (setup_ids or []) if i}
+    if setup_ids is not None and not ids:
+        return {"success": False, "error": "No order selected", "deleted": 0}
+    exp = (expiry or "").strip().upper()
+    exp = "" if exp in ("ALL", "") else exp
+
+    def _hit(s):
+        if ids:
+            return str(s.get("setup_id", "")) in ids
+        return not exp or str(s.get("expiry", "")).upper() == exp
+
+    before = plan.get("setups", []) or []
+    kept = [s for s in before if not _hit(s)]
+    n = len(before) - len(kept)
+    if n:
+        plan["setups"] = kept
+        plan["user_cleared"] = not kept
+        plan["edited_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        save_all_plans(plans)
+    return {"success": True, "symbol": sym, "plan_id": key, "deleted": n, "remaining": len(kept),
+            "target_trading_date": plan.get("target_trading_date", "")}
+
+
 def next_expiry_disabled() -> bool:
     """True when the Next Expiry 'Enable' box is unticked (only current-expiry orders)."""
     return bool(getattr(feed.forward_tracker, "allowed_expiries", None))
@@ -233,7 +270,8 @@ def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = F
 
     if not force_refresh:
         existing = get_stored_plan(sym, target_date)
-        if existing and existing.get("setups"):
+        # A plan the user emptied on purpose stays empty until they regenerate it.
+        if existing and (existing.get("setups") or existing.get("user_cleared")):
             return existing
 
     exch = get_symbol_exchange(sym)
@@ -1405,7 +1443,7 @@ async def get_planner_deck(symbol: str = "NIFTY", force_refresh: bool = False):
     sym = (symbol or "NIFTY").strip().upper()
     try:
         plan = get_stored_plan(sym)
-        if not plan or force_refresh or not plan.get("setups"):
+        if not plan or force_refresh or not (plan.get("setups") or plan.get("user_cleared")):
             plan = generate_and_store_next_day_plan(sym, force_refresh=force_refresh)
 
         # Enrich each setup with latest live LTP from snapshot
@@ -1458,6 +1496,9 @@ async def apply_planner_to_live_scanner(req: dict = None):
         if req and isinstance(req, dict):
             sym = req.get("symbol", "NIFTY").strip().upper()
         plan = get_stored_plan(sym)
+        if plan and plan.get("user_cleared") and not plan.get("setups"):
+            return {"success": False, "symbol": sym,
+                    "error": f"All {sym} orders were deleted. Click REGENERATE to build them again."}
         if not plan or not plan.get("setups"):
             plan = generate_and_store_next_day_plan(sym, force_refresh=True)
         return {
@@ -1467,6 +1508,22 @@ async def apply_planner_to_live_scanner(req: dict = None):
             "setups_count": len(plan.get("setups", [])),
             "message": f"Next-Day Plan for {sym} ({plan.get('target_trading_date')}) active in Live Scanner"
         }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+class DeleteOrdersRequest(BaseModel):
+    symbol: str = ""       # planner: NIFTY when empty; F&O: ALL when empty
+    setup_ids: Optional[List[str]] = None   # these orders; omitted = every order (of `expiry`)
+    expiry: str = ""
+    plan_id: str = ""      # NIFTY plan key, e.g. NIFTY_2026-11-05 (latest plan by default)
+    date: str = ""         # F&O plan date (latest by default)
+
+@app.post("/api/planner/delete")
+async def delete_planner_orders(req: DeleteOrdersRequest):
+    """Deletes generated next-day plan orders (one, several, or all of an expiry). Trades
+    already open and orders already sent to the broker are not touched."""
+    try:
+        return delete_plan_setups(req.symbol, req.setup_ids, req.expiry, req.plan_id)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1699,6 +1756,25 @@ async def generate_fno_orders(req: FnoOrdersRequest):
     threading.Thread(target=fno_planner.generate, args=(engine,),
                      kwargs={"symbols": syms, "expiry_mode": exp}, daemon=True, name="fno-orders").start()
     return {"success": True, "message": f"Generating {exp.lower()} expiry orders", "expiry": exp}
+
+@app.post("/api/fno-orders/delete")
+async def delete_fno_orders(req: DeleteOrdersRequest):
+    """Deletes generated F&O orders: the given setup_ids, or every order of the plan date
+    narrowed to symbol / expiry. Removes them from fno_orders.json now and from the
+    "F&O Orders" sheet tab in the background. Trades and broker orders are not touched."""
+    if fno_planner.status.get("running"):
+        return {"success": False, "error": "A generate run is in progress; delete after it finishes"}
+    try:
+        out = fno_planner.delete_orders(req.date or None, req.setup_ids,
+                                        None if req.setup_ids else req.symbol, req.expiry)
+        keys = out.pop("keys", [])
+        if keys:
+            threading.Thread(target=lambda: print(f"[F&O ORDERS] {fno_planner.remove_from_sheet(engine, keys)}"),
+                             daemon=True, name="fno-sheet-delete").start()
+            out["sheet"] = "removing from the sheet in the background"
+        return out
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 @app.post("/api/other-symbols/load-plan")
 async def load_other_symbols_to_plan(req: OtherSymbolsRequest):

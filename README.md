@@ -12,6 +12,7 @@ placement through Angel One, Dhan or Jainam XTS.
 | `brokers/` | Order engine and broker adapters (`angel.py`, `dhan.py`, `xts.py`) |
 | `eod_planner.py` | End-of-day planner that builds the next day's pivot plan |
 | `web_server.py`, `web/` | Local web dashboard (bound to localhost; it never places orders) |
+| `glass_server.py`, `glass_dashboard.py`, `headless_tk.py`, `glass_web/`, `run_glass_dashboard.command` | Glass dashboard: the project's own web dashboard on http://127.0.0.1:8780, run on its own |
 | `run_option_chain.command`, `run.sh`, `run_web.sh` | Launchers (macOS / shell) |
 | `LiveOptionChain.app` | macOS launcher app |
 | `dhan_login.py` | Stand-alone Dhan PIN + TOTP login helper |
@@ -59,3 +60,22 @@ daily candle from Angel One's historical API, the same H/L/C TradingView uses fo
 - On TradingView, compare on a chart of the same contract and expiry, with the timeframe set to
   Daily (on a 1H chart "Auto" switches to weekly pivots). S levels below 0.05 show as 0.05.
 - Test: `python3 tests/test_strike_pivots.py`
+
+## Glass dashboard (its own app)
+
+A glass-style web dashboard for the whole project, run **on its own** with
+`run_glass_dashboard.command` (or `python3 glass_server.py`). It opens **http://127.0.0.1:8780/**
+and does not open or need the Tk launcher window.
+
+- It loads the same strategy engine (`Options-angel_live-ok.py`) and logs in to Angel One itself.
+  The launcher's control logic runs without a window (`headless_tk.py`), so the scanner, the
+  reversal rows and their colours, the filters, the next-day plan, Map Strike Levels, Gap Check,
+  AUTO-TRADE, ■ STOP and ⚙ Settings (Broker, Orders, Strikes, Today's orders) work exactly as in the
+  launcher. No strategy code is copied or changed.
+- Use it **instead of** the launcher, not at the same time: both would stream the same feed and
+  write the same sheet and orders. While the launcher is running, the page shows a warning and
+  START and AUTO-TRADE are refused.
+- Only reachable from this Mac (bound to 127.0.0.1). Standard library only, no new packages.
+  `web_server.py` (port 8055) and anything on port 8765 are not affected.
+- `GLASS_DASHBOARD_PORT=8790` picks another port; `GLASS_NO_BROWSER=1` stops it opening the browser.
+- Try it without the market: `python3 tests/run_glass_demo.py` (made-up NIFTY data, no login, no orders).

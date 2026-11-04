@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pivot Glass Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/glass.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="glass">
+  <div class="brand">
+    <div class="logo">◆</div>
+    <div><h1>Fibonacci Pivot Reversal</h1>
+      <p>1H Support/Resistance strikes · 5M liquidity sweep &amp; reclaim · Live alerts &amp; Google Sheets</p></div>
+  </div>
+  <div class="pills">
+    <div class="pill" id="pill-market"><span class="dot"></span><span>Market</span></div>
+    <div class="pill" id="pill-feed"><span class="dot"></span><span>Feed</span></div>
+    <div class="pill mono" id="pill-clock">--:--:--</div>
+  </div>
+</header>
+
+<div class="glass banner" id="launcher-banner" hidden>⚠️ The Python launcher is running. Close it before you start the scanner here, so the feed, sheet and orders aren't doubled.</div>
+
+<div class="glass statusbar" id="statusbar"><span class="dot"></span><span id="status-text">Connecting…</span></div>
+
+<div class="grid top">
+  <section class="glass card">
+    <h3>Live scanner control</h3>
+    <div class="form">
+      <div><label for="c-exchange">Exchange</label><select id="c-exchange"></select></div>
+      <div><label for="c-symbol">Symbol</label>
+        <input id="c-symbol" list="c-symbols" autocomplete="off" spellcheck="false"><datalist id="c-symbols"></datalist></div>
+      <div><label for="c-expiry">Expiry (current)</label><select id="c-expiry"></select></div>
+      <div><label for="c-next">Next expiry</label>
+        <div class="row"><select id="c-next"></select>
+          <label class="toggle"><input type="checkbox" id="c-usenext"> Enable</label></div></div>
+      <div class="span2"><label for="c-strikes">Strikes (ATM ±) <b class="mono accent" id="c-strikes-val">10</b></label>
+        <input type="range" id="c-strikes" min="3" max="50" value="10"></div>
+    </div>
+    <div class="row mt"><button class="btn go grow" id="b-start">▶ Start live scanner</button><button class="btn stop" id="b-stop">⏹ Stop</button></div>
+  </section>
+
+  <section class="glass card">
+    <h3 id="u-title">Underlying</h3>
+    <div class="spot"><span class="v mono" id="u-price">--</span><span class="mono" id="u-dir"></span></div>
+    <div class="kv">
+      <div><span>Daily zone</span><b id="u-zone">--</b></div>
+      <div><span>Direction</span><b id="u-direction">--</b></div>
+      <div><span>1H bias</span><b id="u-h1">--</b></div>
+    </div>
+    <div class="tf mono">
+      <div class="t15" id="u-f15">⭐ 15M · loading…</div>
+      <div class="t1h" id="u-f1h">⏳ 1H · loading…</div>
+    </div>
+    <div class="small mt" id="u-desc"></div>
+  </section>
+
+  <section class="glass card">
+    <h3 id="o-title">Auto-trade</h3>
+    <div class="stats">
+      <div class="stat"><span>Today's trades</span><b class="mono" id="o-trades">--</b></div>
+      <div class="stat"><span>P&amp;L</span><b class="mono" id="o-pnl">--</b></div>
+      <div class="stat"><span>Open positions</span><b class="mono" id="o-open">--</b></div>
+      <div class="stat"><span>Day loss limit</span><b class="mono" id="o-limit">--</b></div>
+    </div>
+    <div class="small mt" id="o-note"></div>
+    <div class="orderbar">
+      <div class="pill" id="o-conn"><span class="dot"></span><span>Broker</span></div>
+      <button class="btn" id="b-auto">AUTO-TRADE: OFF</button>
+      <button class="btn kill" id="b-kill">■ STOP</button>
+      <button class="btn" id="b-settings">⚙ Settings</button>
+    </div>
+  </section>
+</div>
+
+<section class="glass card mt14">
+  <h3>Multi-timeframe Fibonacci pivots</h3>
+  <div class="scroll-x"><table class="mtf mono">
+    <thead><tr><th class="l">TF</th><th class="l">Zone</th><th>S3</th><th>S2</th><th>S1</th><th>P</th><th>R1</th><th>R2</th><th>R3</th></tr></thead>
+    <tbody id="mtf-body"></tbody>
+  </table></div>
+</section>
+
+<section class="glass card mt14">
+  <div class="dash-h"><h3 class="m0">Live Fibonacci reversal dashboard · 15M intraday &amp; 1H structure sweeps</h3><span class="small" id="d-info"></span></div>
+  <div class="filters" id="d-filters"></div>
+  <div class="tablewrap"><table class="mono dash">
+    <thead id="d-head"></thead><tbody id="d-body"></tbody>
+  </table></div>
+  <div class="small mt" id="d-maxoi"></div>
+</section>
+
+<section class="glass tools">
+  <button class="btn" id="b-plan">📋 Next-day plan &amp; focus strikes</button>
+  <button class="btn" id="b-map">📐 Map strike levels (TV exact)</button>
+  <span class="small">Levels from</span><select id="t-source" class="auto"></select>
+  <button class="btn" id="b-gap">⚡ Gap check (09:16)</button>
+  <a class="btn" id="b-sheet" target="_blank" rel="noopener">📊 Open Google Sheet ↗</a>
+  <span class="small">🎯 FT filter</span>
+  <span class="fg" id="t-ft"></span>
+</section>
+
+<p class="foot small">Glass dashboard · runs on its own with <code>run_glass_dashboard.command</code> · bound to this Mac only (127.0.0.1)</p>
+</div>
+
+<!-- modals -->
+<div class="modal" id="m-confirm" hidden><div class="glass dialog narrow">
+  <h2 id="mc-title">Confirm</h2><pre id="mc-text"></pre>
+  <div class="row end"><button class="btn" data-close>Cancel</button><button class="btn danger" id="mc-ok">Continue</button></div>
+</div></div>
+
+<div class="modal" id="m-msg" hidden><div class="glass dialog narrow">
+  <h2 id="mm-title">Info</h2><pre id="mm-text"></pre>
+  <div class="row end"><button class="btn" data-close>OK</button></div>
+</div></div>
+
+<div class="modal" id="m-plan" hidden><div class="glass dialog wide">
+  <div class="dlg-h"><h2 id="mp-title">Next-day plan</h2><button class="btn icon" data-close aria-label="Close">✕</button></div>
+  <div class="small mono" id="mp-info"></div>
+  <div class="small mt muted">Trading logic: BUY on S2 reclaim (T1:S1 → T2:P → T3:R1 → T4:R2 | SL = LL of day) · SELL on R2 rejection (T1:R1 → T2:P → T3:S1 → T4:S2 | SL = HH of day)</div>
+  <div class="filters mt" id="mp-modes"></div>
+  <div class="row"><label class="toggle"><input type="checkbox" id="mp-s3" checked> Include S3 / R3 (max 6 strikes)</label>
+    <span class="grow"></span><button class="btn" id="mp-refresh">🔄 Refresh focus levels</button></div>
+  <div class="tablewrap mt"><table class="mono dash"><thead id="mp-head"></thead><tbody id="mp-body"></tbody></table></div>
+</div></div>
+
+<div class="modal" id="m-settings" hidden><div class="glass dialog wide">
+  <div class="dlg-h"><h2>Order settings</h2><button class="btn icon" data-close aria-label="Close">✕</button></div>
+  <div class="tabs" id="s-tabs">
+    <button class="tab a" data-tab="broker">Broker</button><button class="tab" data-tab="orders">Orders</button>
+    <button class="tab" data-tab="strikes">Strikes</button><button class="tab" data-tab="today">Today's orders</button>
+  </div>
+  <div class="tabpane" data-pane="broker">
+    <div class="row" id="s-brokers"></div>
+    <div class="keys" id="s-keys"></div>
+    <pre class="msg" id="s-bmsg"></pre>
+    <div class="row"><button class="btn" id="s-test">Test connection</button><button class="btn go" id="s-use">Use this broker</button></div>
+    <p class="small">Keys are saved only in the .env file next to the app.</p>
+  </div>
+  <div class="tabpane" data-pane="orders" hidden>
+    <div class="sgrid" id="s-orders"></div>
+    <div class="row mt"><button class="btn go" id="s-osave">Save</button><span class="small" id="s-omsg"></span></div>
+  </div>
+  <div class="tabpane" data-pane="strikes" hidden>
+    <div class="sgrid" id="s-strikes"></div>
+    <div class="small mt">Today's strategy strikes by timeframe (✅ gets real orders, ✖ forward test only):</div>
+    <div class="preview mono" id="s-preview"></div>
+    <div class="row mt"><button class="btn go" id="s-ssave">Save</button>
+      <span class="small">A strike on both timeframes gets its order if either timeframe's levels allow it.</span><span class="small" id="s-smsg"></span></div>
+  </div>
+  <div class="tabpane" data-pane="today" hidden>
+    <div class="tablewrap"><table class="mono dash"><thead><tr><th class="l">Time</th><th class="l">Contract</th><th class="l">Action</th><th>Qty</th><th>Price</th><th class="l">Status</th><th class="l">Remark</th></tr></thead>
+      <tbody id="s-today"></tbody></table></div>
+  </div>
+</div></div>
+
+<div class="toast" id="toast" hidden></div>
+<script src="/glass.js"></script>
+</body>
+</html>

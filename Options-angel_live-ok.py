@@ -3490,6 +3490,37 @@ def pivot_session_date(now: datetime = None) -> date:
     return d
 
 
+def expiry_is_past(expiry, on_day: date = None) -> bool:
+    """True when an option expiry ('03NOV2026') is before on_day (default today): its contracts
+    no longer trade, so its levels, setups and orders are stale. Unparsable/blank => False."""
+    try:
+        return datetime.strptime(str(expiry).strip().upper(), "%d%b%Y").date() < (on_day or datetime.now().date())
+    except (TypeError, ValueError):
+        return False
+
+
+def drop_expired(items, on_day: date = None):
+    """items without the ones whose 'expiry' is past (list of dicts or {key: dict})."""
+    if isinstance(items, dict):
+        return {k: v for k, v in items.items()
+                if not (isinstance(v, dict) and expiry_is_past(v.get("expiry"), on_day))}
+    return [v for v in (items or []) if not (isinstance(v, dict) and expiry_is_past(v.get("expiry"), on_day))]
+
+
+def prune_plan_expired(plan: dict, on_day: date = None) -> bool:
+    """Remove setups / strike levels of expired expiries from a next-day plan in place.
+    Returns True when something was removed."""
+    changed = False
+    for key in ("setups", "strike_levels"):
+        v = plan.get(key) if isinstance(plan, dict) else None
+        if isinstance(v, (list, dict)):
+            kept = drop_expired(v, on_day)
+            if len(kept) != len(v):
+                plan[key] = kept
+                changed = True
+    return changed
+
+
 def prev_weekday(d: date) -> date:
     d -= timedelta(days=1)
     while d.weekday() >= 5:
@@ -3762,10 +3793,12 @@ def load_next_day_plan(symbol: str) -> dict:
             # 1. Exact match on symbol attribute
             for k, plan in all_plans.items():
                 if plan.get("symbol") == symbol:
+                    prune_plan_expired(plan)   # never show orders of an expiry that has passed
                     return plan
             # 2. Key prefix match (e.g. NIFTY_2026-10-05)
             for k, plan in all_plans.items():
                 if k == symbol or k.startswith(f"{symbol}_"):
+                    prune_plan_expired(plan)
                     return plan
         # Fallback to single-symbol files next_day_plan_*.json
         import glob
@@ -3775,9 +3808,8 @@ def load_next_day_plan(symbol: str) -> dict:
                 continue
             with open(fpath, "r") as f:
                 data = json.load(f)
-            if data.get("symbol") == symbol:
-                return data
-            if "pivots" in data and not symbol:
+            if data.get("symbol") == symbol or ("pivots" in data and not symbol):
+                prune_plan_expired(data)
                 return data
     except Exception as e:
         print(f"[PLAN] Error loading next day plan for {symbol}: {e}")
@@ -4560,6 +4592,7 @@ class FeedEngine:
             cd = read_json_file(cache_file)
             existing = cd.get("strikes", {}) if (cd.get("basis_key") == basis_key and cd.get("symbol") == symbol) else {}
             existing.update(mapped)
+            existing = drop_expired(existing, level_date)   # contracts expired before this session
             write_json_file(cache_file, {
                 'date': level_date.isoformat(),
                 'basis_key': basis_key,
@@ -7539,7 +7572,7 @@ class ControlPanel:
         cdata = read_json_file(STRIKE_PIVOT_NEXT_CACHE)
         if not (cdata.get("symbol") == sym and cdata.get("date", "") > datetime.now().strftime("%Y-%m-%d")):
             cdata = read_json_file(STRIKE_PIVOT_CACHE)
-        strikes_dict = cdata.get("strikes", {})
+        strikes_dict = drop_expired(cdata.get("strikes", {}))   # never an expired contract
         if not strikes_dict:
             self._set_status("Generating strike level map...", "#58a6ff")
             strikes_dict = feed.fetch_and_map_all_strikes(sym, exp, force_fetch=False)
@@ -7946,6 +7979,10 @@ class ControlPanel:
             except: return datetime.max
 
         expiries = sorted(raw, key=parse_exp)
+        # A cached instrument list still has expiries that have passed (e.g. yesterday's):
+        # never offer them as the current expiry.
+        _open = [e for e in expiries if not expiry_is_past(e)]
+        expiries = _open or expiries
 
         self.exp_cb["values"] = expiries
         self.next_exp_cb["values"] = expiries

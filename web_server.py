@@ -161,12 +161,20 @@ def get_current_trading_date():
     return d.strftime("%Y-%m-%d")
 
 def load_all_plans() -> dict:
+    """All stored plans, with the setups of expiries that have passed removed. When anything
+    was removed the file is saved again, so expired orders are purged from the cache."""
     if os.path.exists(PLANS_FILE):
         try:
             with open(PLANS_FILE, "r") as f:
-                return json.load(f)
+                plans = json.load(f)
         except Exception:
             return {}
+        changed = False
+        for p in plans.values():
+            changed = engine.prune_plan_expired(p) or changed
+        if changed:
+            save_all_plans(plans)
+        return plans
     return {}
 
 def save_all_plans(plans_dict: dict):
@@ -276,6 +284,10 @@ def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = F
                 n_exp = pl.get("next_expiry") or n_exp
         except Exception as e_req:
             print(f"[NEXT-DAY PLAN] {req} expiry fetch notice: {e_req}")
+    try:   # contracts that expire before the plan's session are never planned
+        dash_watch = engine.drop_expired(dash_watch, datetime.strptime(target_date, "%Y-%m-%d").date())
+    except ValueError:
+        pass
     if p_exps:
         _ok = {e.upper() for e in p_exps}
         dash_watch = [w for w in dash_watch if str(w.get("expiry") or c_exp).upper() in _ok]
@@ -508,6 +520,7 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
                 _cj = json.load(cf)
                 # only levels built for the session TradingView shows now
                 c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+                c_json = engine.drop_expired(c_json)   # never an expired contract's levels
                 # After the close the next session's levels (strike_pivot_cache_next.json, built
                 # at 15:45 for the current AND the next expiry) are this session's levels too:
                 # use them for any contract the session cache does not have yet.
@@ -1538,6 +1551,7 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
                 _cj = json.load(cf)
                 # only levels built for the session TradingView shows now
                 c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+                c_json = engine.drop_expired(c_json)   # never an expired contract's levels
                 for t_id, s_info in c_json.items():
                     opt_piv_cache[(s_info.get("opt_type", "CE"), int(s_info.get("strike", 0)), s_info.get("expiry", ""))] = s_info
         except Exception:

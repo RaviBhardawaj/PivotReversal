@@ -52,10 +52,47 @@ print("B unticked: plan has only current expiry orders: OK")
 
 # C. expiries unknown (no instrument list): falls back to CURRENT/NEXT, still current only when unticked
 web.feed.upcoming_expiries=lambda sym,n=2,from_day=None: []
+MAP={"CURRENT":CUR,"NEXT":NXT}
+def payload2(requested_sym=None, requested_exp=None, bypass_stored_plan=False):
+    asked.append(requested_exp)
+    return {"spot":22750.0,"current_expiry":CUR,"next_expiry":NXT,
+            "watch_items":[{"expiry":MAP[requested_exp],"strike":22700,"type":"PE","side":"BUY","is_15m":True,
+                            "planned_ep":100.0,"sl":90.0,"t1":120.0,"t2":140.0}]}
+web.get_dashboard_payload=payload2
+web.feed.forward_tracker.set_allowed_expiries([CUR])
 asked.clear(); got=plan_exps()
-assert asked==["CURRENT"] and got==[TODAY], (got,asked)
+assert asked==["CURRENT"] and got==[CUR], (got,asked)
 web.feed.forward_tracker.set_allowed_expiries(None)
 asked.clear(); got=plan_exps()
-assert asked==["CURRENT","NEXT"] and got==sorted([TODAY,CUR]), (got,asked)
+assert asked==["CURRENT","NEXT"] and got==sorted([CUR,NXT]), (got,asked)
 print("C fallback without the instrument list: OK")
+
+# D. an expiry that has passed is never planned (today's expiring contracts on an expiry day)
+web.get_dashboard_payload=payload          # CURRENT -> 13OCT, which expires before 14 Oct
+asked.clear(); got=plan_exps()
+assert TODAY not in got and got==[CUR], (got,asked)
+print("D expired expiry (%s) left out of the plan: OK"%TODAY)
+
+# E. stored plans: orders of an expiry that has passed are purged from next_day_plans.json
+import json
+from datetime import datetime, date
+class FakeDT(datetime):
+    @classmethod
+    def now(cls,tz=None): return cls(2026,11,4,9,20)
+web.engine.datetime=FakeDT
+assert web.engine.expiry_is_past("03NOV2026") and not web.engine.expiry_is_past("04NOV2026")
+assert not web.engine.expiry_is_past("") and not web.engine.expiry_is_past(None)
+json.dump({"NIFTY_2026-11-04":{"symbol":"NIFTY","target_trading_date":"2026-11-04","setups":[
+    {"expiry":"03NOV2026","strike":24000,"type":"CE"},{"expiry":"10NOV2026","strike":24000,"type":"CE"}]}},
+    open(web.PLANS_FILE,"w"))
+p=web.get_stored_plan("NIFTY","2026-11-04")
+assert [x["expiry"] for x in p["setups"]]==["10NOV2026"], p["setups"]
+on_disk=json.load(open(web.PLANS_FILE))["NIFTY_2026-11-04"]["setups"]
+assert [x["expiry"] for x in on_disk]==["10NOV2026"], on_disk
+print("E 3 Nov orders purged from the stored plan (shown and on disk): OK")
+
+# F. strike level cache entries of a past expiry are dropped
+lv={"1":{"expiry":"03NOV2026"},"2":{"expiry":"10NOV2026"},"3":{"expiry":""}}
+assert set(web.engine.drop_expired(lv))=={"2","3"}
+print("F expired strike levels dropped: OK")
 print("EOD PLAN EXPIRY TESTS PASSED")

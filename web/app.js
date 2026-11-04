@@ -1023,7 +1023,8 @@
         const res = await fetch('/api/planner/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol: state.symbol })
+          // current-expiry orders by default; next-expiry ones only with the NEXT expiry selected
+          body: JSON.stringify({ symbol: state.symbol, include_next: state.plannerExpiry === 'NEXT' })
         });
         const data = await res.json();
         if (data.success) {

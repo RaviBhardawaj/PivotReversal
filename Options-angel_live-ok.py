@@ -2003,6 +2003,17 @@ def trade_expiry(trade_id):
     return m.group(1) if m else ""
 
 
+def allowed_entry_expiries(curr_exp, next_exp, use_next):
+    """Expiries the strategy may open trades/orders on: the current expiry only, plus the next
+    expiry while 'Next Expiry ▸ Enable' is ticked. A far (e.g. monthly) expiry never.
+    None (no restriction) only while the current expiry is not known yet."""
+    curr = str(curr_exp or "").strip()
+    nxt = str(next_exp or "").strip()
+    if not curr:
+        return None
+    return [curr, nxt] if (use_next and nxt and nxt != curr) else [curr]
+
+
 class ForwardTestTracker:
     """
     Logs every forward test trade entry & exit to forward_test_trades.csv.
@@ -2019,6 +2030,9 @@ class ForwardTestTracker:
         self._closed_keys_today = set()  # {(opt_type, strike, action, date_str)} — action-aware
         self._sl_hit_count      = {}     # {(opt_type, strike, action, date_str) -> int}
         self.paper_only         = False  # True => never route orders to LiveOrderManager
+        # Expiries new trades/orders may be opened on (upper-case). None = any expiry, only
+        # until the feed knows its current expiry. Current only, plus next when ticked.
+        self.allowed_expiries   = None
         # Open trades and today's re-entry guards are saved here, so an app restart
         # (internet drop, crash, Mac sleep) picks up the same trades and keeps watching them.
         self.state_file         = os.path.splitext(filepath)[0] + "_open.json"
@@ -2026,6 +2040,16 @@ class ForwardTestTracker:
         self._seed_closed_cache = None
         self._restored_ids      = self._restore_snapshot()
         self._init_file()
+
+    def set_allowed_expiries(self, expiries):
+        """Restrict new entries to these expiries (None or empty = no restriction)."""
+        allowed = {str(e).strip().upper() for e in (expiries or []) if str(e or "").strip()}
+        self.allowed_expiries = allowed or None
+
+    def expiry_allowed(self, expiry) -> bool:
+        if not self.allowed_expiries:
+            return True
+        return str(expiry or "").strip().upper() in self.allowed_expiries
 
     @staticmethod
     def _trade_keys(t):
@@ -2162,6 +2186,8 @@ class ForwardTestTracker:
         # Allows same strike to go BUY→target→SELL→target (bidirectional loop)
         closed_key = (symbol, opt_type, strike, expiry, action, date_str) if (symbol and expiry) else ((opt_type, strike, expiry, action, date_str) if expiry else (opt_type, strike, action, date_str))
 
+        if not self.expiry_allowed(expiry):
+            return None   # Next expiry not enabled — only current-expiry trades/orders
         if not is_live_market_open():
             return None   # Entries strictly allowed during live market hours
         if datetime.now().time() >= EOD_SQUARE_OFF_TIME:
@@ -3466,6 +3492,37 @@ def pivot_session_date(now: datetime = None) -> date:
     return d
 
 
+def expiry_is_past(expiry, on_day: date = None) -> bool:
+    """True when an option expiry ('03NOV2026') is before on_day (default today): its contracts
+    no longer trade, so its levels, setups and orders are stale. Unparsable/blank => False."""
+    try:
+        return datetime.strptime(str(expiry).strip().upper(), "%d%b%Y").date() < (on_day or datetime.now().date())
+    except (TypeError, ValueError):
+        return False
+
+
+def drop_expired(items, on_day: date = None):
+    """items without the ones whose 'expiry' is past (list of dicts or {key: dict})."""
+    if isinstance(items, dict):
+        return {k: v for k, v in items.items()
+                if not (isinstance(v, dict) and expiry_is_past(v.get("expiry"), on_day))}
+    return [v for v in (items or []) if not (isinstance(v, dict) and expiry_is_past(v.get("expiry"), on_day))]
+
+
+def prune_plan_expired(plan: dict, on_day: date = None) -> bool:
+    """Remove setups / strike levels of expired expiries from a next-day plan in place.
+    Returns True when something was removed."""
+    changed = False
+    for key in ("setups", "strike_levels"):
+        v = plan.get(key) if isinstance(plan, dict) else None
+        if isinstance(v, (list, dict)):
+            kept = drop_expired(v, on_day)
+            if len(kept) != len(v):
+                plan[key] = kept
+                changed = True
+    return changed
+
+
 def prev_weekday(d: date) -> date:
     d -= timedelta(days=1)
     while d.weekday() >= 5:
@@ -3738,10 +3795,12 @@ def load_next_day_plan(symbol: str) -> dict:
             # 1. Exact match on symbol attribute
             for k, plan in all_plans.items():
                 if plan.get("symbol") == symbol:
+                    prune_plan_expired(plan)   # never show orders of an expiry that has passed
                     return plan
             # 2. Key prefix match (e.g. NIFTY_2026-10-05)
             for k, plan in all_plans.items():
                 if k == symbol or k.startswith(f"{symbol}_"):
+                    prune_plan_expired(plan)
                     return plan
         # Fallback to single-symbol files next_day_plan_*.json
         import glob
@@ -3751,9 +3810,8 @@ def load_next_day_plan(symbol: str) -> dict:
                 continue
             with open(fpath, "r") as f:
                 data = json.load(f)
-            if data.get("symbol") == symbol:
-                return data
-            if "pivots" in data and not symbol:
+            if data.get("symbol") == symbol or ("pivots" in data and not symbol):
+                prune_plan_expired(data)
                 return data
     except Exception as e:
         print(f"[PLAN] Error loading next day plan for {symbol}: {e}")
@@ -4325,13 +4383,16 @@ class FeedEngine:
             nd = datetime.now().date() + timedelta(days=1)
             while nd.weekday() >= 5:
                 nd += timedelta(days=1)
-            exps = self.upcoming_expiries(symbol, 2, from_day=nd) or [None]
+            # Daily plan: the CURRENT expiry only (next / far expiry orders only on request)
+            exps = (self.upcoming_expiries(symbol, 1, from_day=nd) or [None])[:1]
             for exp in exps:
                 _mapped = self.fetch_and_map_all_strikes(symbol, exp, force_fetch=True, mode="next")
-                try:
-                    self.advanced_engine.build_next_day_plan(symbol, exp, strikes_dict=_mapped, mtf_pivots=self.mtf_pivots, daily_focus=self.daily_focus, mode="next")
-                except Exception as _adv_nd_err:
-                    print(f"[EOD] advance next-day plan calc note: {_adv_nd_err}")
+                # The advance plan trades the monthly expiry: only when that IS the current one
+                if exp and self.get_monthly_expiry(symbol, nd) == exp:
+                    try:
+                        self.advanced_engine.build_next_day_plan(symbol, exp, strikes_dict=_mapped, mtf_pivots=self.mtf_pivots, daily_focus=self.daily_focus, mode="next")
+                    except Exception as _adv_nd_err:
+                        print(f"[EOD] advance next-day plan calc note: {_adv_nd_err}")
                 print(f"[EOD] ✅ Next-day strike levels {symbol} {exp or 'nearest'}: {len(_mapped or {})} strikes "
                       f"→ strike_pivot_cache_next.json")
         except Exception as _nd_err:
@@ -4534,6 +4595,7 @@ class FeedEngine:
             cd = read_json_file(cache_file)
             existing = cd.get("strikes", {}) if (cd.get("basis_key") == basis_key and cd.get("symbol") == symbol) else {}
             existing.update(mapped)
+            existing = drop_expired(existing, level_date)   # contracts expired before this session
             write_json_file(cache_file, {
                 'date': level_date.isoformat(),
                 'basis_key': basis_key,
@@ -6980,7 +7042,7 @@ class ControlPanel:
         self.symbol_var    = tk.StringVar(value="NIFTY")
         self.expiry_var    = tk.StringVar()
         self.next_exp_var  = tk.StringVar()          # next expiry
-        self.use_next_exp  = tk.BooleanVar(value=True)  # enable by default
+        self.use_next_exp  = tk.BooleanVar(value=False)  # current expiry orders only by default
         self.strikes_var   = tk.IntVar(value=10)
         self.status_var    = tk.StringVar(value="Ready")
         self.max_oi_info   = tk.StringVar(value="")
@@ -7077,7 +7139,7 @@ class ControlPanel:
             nf, text="Enable", variable=self.use_next_exp,
             bg="#161b22", fg="#58a6ff", selectcolor="#21262d",
             activebackground="#161b22", activeforeground="#58a6ff",
-            font=("Consolas", 9), command=self._refresh_display
+            font=("Consolas", 9), command=self._on_use_next_exp_toggled
         ).pack(side="left", padx=6)
 
         lbl(frame, "Strikes (ATM +/-)", 4)
@@ -7513,7 +7575,7 @@ class ControlPanel:
         cdata = read_json_file(STRIKE_PIVOT_NEXT_CACHE)
         if not (cdata.get("symbol") == sym and cdata.get("date", "") > datetime.now().strftime("%Y-%m-%d")):
             cdata = read_json_file(STRIKE_PIVOT_CACHE)
-        strikes_dict = cdata.get("strikes", {})
+        strikes_dict = drop_expired(cdata.get("strikes", {}))   # never an expired contract
         if not strikes_dict:
             self._set_status("Generating strike level map...", "#58a6ff")
             strikes_dict = feed.fetch_and_map_all_strikes(sym, exp, force_fetch=False)
@@ -7920,6 +7982,10 @@ class ControlPanel:
             except: return datetime.max
 
         expiries = sorted(raw, key=parse_exp)
+        # A cached instrument list still has expiries that have passed (e.g. yesterday's):
+        # never offer them as the current expiry.
+        _open = [e for e in expiries if not expiry_is_past(e)]
+        expiries = _open or expiries
 
         self.exp_cb["values"] = expiries
         self.next_exp_cb["values"] = expiries
@@ -7927,18 +7993,31 @@ class ControlPanel:
             self.expiry_var.set(expiries[0])
             # Auto-select next expiry if available
             if len(expiries) > 1:
-                self.next_exp_var.set(expiries[1])
-                self.use_next_exp.set(True)
+                self.next_exp_var.set(expiries[1])   # keep the user's Enable tick as it is
             else:
                 self.next_exp_var.set("")
+        self._apply_expiry_gate()
         self._set_status(f"● {len(expiries)} expiries for {sym}")
         self._refresh_display()
 
+    def _apply_expiry_gate(self):
+        """Next Expiry unticked => only current-expiry trades/orders are generated."""
+        allowed = allowed_entry_expiries(self.expiry_var.get(), self.next_exp_var.get(),
+                                         self.use_next_exp.get())
+        feed.forward_tracker.set_allowed_expiries(allowed)
+        print(f"[EXPIRY] New entries allowed on: {', '.join(allowed) if allowed else 'all loaded expiries'}")
+
+    def _on_use_next_exp_toggled(self):
+        self._apply_expiry_gate()
+        self._refresh_display()
+
     def _on_expiry_selected(self):
+        self._apply_expiry_gate()
         self._refresh_display()
 
     def _on_next_expiry_selected(self):
-        self.use_next_exp.set(True)
+        # Picking a next expiry only shows it; its orders need the Enable tick.
+        self._apply_expiry_gate()
         if hasattr(self, "exp_next_var"):
             self.exp_cur_var.set(False)
             self.exp_next_var.set(True)
@@ -8242,7 +8321,8 @@ class ControlPanel:
         elif exp_filt == "CURRENT" and curr_exp:
             target_expiries = [curr_exp]
         else:
-            target_expiries = [e for e in [curr_exp, next_exp] if e]
+            # By default only current-expiry orders; the next expiry's with Enable ticked
+            target_expiries = [e for e in [curr_exp, next_exp if self.use_next_exp.get() else ""] if e]
             if not target_expiries:
                 target_expiries = [curr_exp or "-"]
 
@@ -9065,6 +9145,7 @@ class ControlPanel:
         next_exp = (self.next_exp_var.get() or "").strip()
         if next_exp and next_exp != expiry and (self.use_next_exp.get() or self.expiry_filter_var.get() == "NEXT"):
             expiries_to_load.append(next_exp)
+        self._apply_expiry_gate()
 
         # Always include monthly expiry for Advance Strategy (1H Structure)
         m_exp = feed.get_monthly_expiry(symbol)

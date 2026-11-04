@@ -161,12 +161,20 @@ def get_current_trading_date():
     return d.strftime("%Y-%m-%d")
 
 def load_all_plans() -> dict:
+    """All stored plans, with the setups of expiries that have passed removed. When anything
+    was removed the file is saved again, so expired orders are purged from the cache."""
     if os.path.exists(PLANS_FILE):
         try:
             with open(PLANS_FILE, "r") as f:
-                return json.load(f)
+                plans = json.load(f)
         except Exception:
             return {}
+        changed = False
+        for p in plans.values():
+            changed = engine.prune_plan_expired(p) or changed
+        if changed:
+            save_all_plans(plans)
+        return plans
     return {}
 
 def save_all_plans(plans_dict: dict):
@@ -198,7 +206,21 @@ def store_next_day_plan(plan_data: dict):
     save_all_plans(plans)
     return plan_data
 
-def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = False) -> dict:
+def plan_expiries(sym: str, target_date: str, include_next: bool = False) -> list:
+    """Expiries the plan for target_date trades: the current one (nearest still open that day),
+    plus the next one only when asked for (include_next). Never a far expiry. [] when unknown."""
+    try:
+        day = datetime.strptime(target_date, "%Y-%m-%d").date()
+        exps = list(feed.upcoming_expiries(sym, 2, from_day=day) or [])
+    except Exception:
+        exps = []
+    return exps if include_next else exps[:1]
+
+
+def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = False,
+                                     include_next: bool = False) -> dict:
+    """Next-day plan for sym. Current-expiry orders only; include_next=True (asked for from the
+    planner with the NEXT expiry selected) adds the next expiry. Never a far expiry."""
     sym = (sym or "NIFTY").strip().upper()
     target_date = get_next_trading_date()
 
@@ -242,22 +264,33 @@ def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = F
     c_exp = "06OCT2026"
     n_exp = "13OCT2026"
 
-    try:
-        payload_curr = get_dashboard_payload(requested_sym=sym, requested_exp="CURRENT", bypass_stored_plan=True)
-        dash_watch.extend(payload_curr.get("watch_items", []))
-        spot = payload_curr.get("spot", 0.0)
-        c_exp = payload_curr.get("active_expiry") or payload_curr.get("current_expiry") or c_exp
-        n_exp = payload_curr.get("next_expiry") or n_exp
-    except Exception as e_curr:
-        print(f"[NEXT-DAY PLAN] current expiry fetch notice: {e_curr}")
-
-    try:
-        payload_next = get_dashboard_payload(requested_sym=sym, requested_exp="NEXT", bypass_stored_plan=True)
-        dash_watch.extend(payload_next.get("watch_items", []))
-        if spot <= 0:
-            spot = payload_next.get("spot", 0.0)
-    except Exception as e_next:
-        print(f"[NEXT-DAY PLAN] next expiry fetch notice: {e_next}")
+    # The expiries still open on the plan's session: on an expiry day today's contracts are
+    # gone tomorrow, so "current" is the nearest expiry open on target_date, not today's.
+    p_exps = plan_expiries(sym, target_date, include_next)
+    if p_exps:
+        c_exp = p_exps[0]
+        n_exp = p_exps[1] if len(p_exps) > 1 else c_exp
+    requests_ = p_exps or (["CURRENT", "NEXT"] if include_next else ["CURRENT"])
+    for req in requests_:
+        try:
+            pl = get_dashboard_payload(requested_sym=sym, requested_exp=req, bypass_stored_plan=True)
+            dash_watch.extend(pl.get("watch_items", []))
+            if spot <= 0:
+                spot = pl.get("spot", 0.0)
+            if not p_exps and req == "CURRENT":
+                c_exp = pl.get("active_expiry") or pl.get("current_expiry") or c_exp
+                n_exp = pl.get("next_expiry") or n_exp
+        except Exception as e_req:
+            print(f"[NEXT-DAY PLAN] {req} expiry fetch notice: {e_req}")
+    try:   # contracts that expire before the plan's session are never planned
+        dash_watch = engine.drop_expired(dash_watch, datetime.strptime(target_date, "%Y-%m-%d").date())
+    except ValueError:
+        pass
+    if p_exps:
+        _ok = {e.upper() for e in p_exps}
+        dash_watch = [w for w in dash_watch if str(w.get("expiry") or c_exp).upper() in _ok]
+    elif not include_next:
+        dash_watch = [w for w in dash_watch if str(w.get("expiry") or c_exp).upper() == str(c_exp).upper()]
 
     setups = []
     seen_setups = set()
@@ -485,6 +518,18 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
                 _cj = json.load(cf)
                 # only levels built for the session TradingView shows now
                 c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+                c_json = engine.drop_expired(c_json)   # never an expired contract's levels
+                # After the close the next session's levels (strike_pivot_cache_next.json, built
+                # at 15:45 for the current AND the next expiry) are this session's levels too:
+                # use them for any contract the session cache does not have yet.
+                try:
+                    with open(os.path.join(BASE_DIR, "strike_pivot_cache_next.json"), "r") as nf:
+                        _nj = json.load(nf)
+                    if (_nj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:next"
+                            and _nj.get("symbol") == current_sym):
+                        c_json = {**(_nj.get("strikes") or {}), **c_json}
+                except Exception:
+                    pass
                 for t_id, s_info in c_json.items():
                     ot_k = s_info.get("opt_type", "CE")
                     stk_k = int(s_info.get("strike", 0))
@@ -1078,7 +1123,9 @@ def background_eod_scheduler():
                     if mtf:
                         with feed.lock:
                             feed.mtf_pivots = mtf
-                        feed.fetch_and_map_all_strikes(sym, None, force_fetch=True, mode="next")
+                        # daily: next-session levels for the CURRENT expiry only
+                        for _exp in (plan_expiries(sym, get_next_trading_date()) or [None]):
+                            feed.fetch_and_map_all_strikes(sym, _exp, force_fetch=True, mode="next")
                     feed.sync_multi_symbol_sheet()
                     print(f"[WEB EOD 3:45PM] ✅ Next-day levels cached & synced to Google Sheets.")
                     
@@ -1224,6 +1271,9 @@ async def start_feed(req: StartFeedRequest):
     feed.symbol = sym
     feed.expiry = curr_exp
     feed.target_expiry = target_exp
+    # Orders: current expiry only; the next expiry too only when the feed is started for NEXT.
+    feed.forward_tracker.set_allowed_expiries(
+        engine.allowed_entry_expiries(curr_exp, next_exp, req_exp == "NEXT"))
     if next_exp:
         feed.next_expiry = next_exp
 
@@ -1369,10 +1419,12 @@ async def get_planner_deck(symbol: str = "NIFTY", force_refresh: bool = False):
 async def trigger_eod_planner(req: dict = None):
     """Force re-computes and stores next-day plan for the target trading session."""
     try:
-        sym = "NIFTY"
+        sym, include_next = "NIFTY", False
         if req and isinstance(req, dict):
             sym = req.get("symbol", "NIFTY")
-        plan = generate_and_store_next_day_plan(sym, force_refresh=True)
+            # next-expiry orders only when asked for (planner set to the NEXT expiry)
+            include_next = bool(req.get("include_next")) or str(req.get("expiry", "")).upper() == "NEXT"
+        plan = generate_and_store_next_day_plan(sym, force_refresh=True, include_next=include_next)
 
         snap = dict(feed.live_data)
         for s in plan.get("setups", []):
@@ -1502,6 +1554,7 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
                 _cj = json.load(cf)
                 # only levels built for the session TradingView shows now
                 c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+                c_json = engine.drop_expired(c_json)   # never an expired contract's levels
                 for t_id, s_info in c_json.items():
                     opt_piv_cache[(s_info.get("opt_type", "CE"), int(s_info.get("strike", 0)), s_info.get("expiry", ""))] = s_info
         except Exception:

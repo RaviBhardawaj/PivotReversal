@@ -49,6 +49,7 @@ if BASE_DIR not in sys.path:
 from brokers import (OrderEngine, ADAPTERS, BROKER_LABELS, ALL_LEVELS, LEVEL_LABELS,   # live orders
                      TIMEFRAMES, tf_levels, strike_selection_reason)
 from advanced_strategy import advanced_engine
+import tsl_study   # data-only record of targets reached / target-then-SL for the TSL study
 
 # ── Exchange config ───────────────────────────────────────
 EXCHANGE_CONFIG = {
@@ -2007,6 +2008,7 @@ def replay_trade_bars(trade, bars, eod=EOD_SQUARE_OFF_TIME):
             trade['Trade_High'] = round(max(trade['Trade_High'], px), 2)
             trade['Trade_Low'] = round(min(trade['Trade_Low'], px) if trade['Trade_Low'] else px, 2)
             sl_before, t5 = trade['SL'], trade.get('Target_5', 0)
+            tsl_study.note_tick(trade, px, tn, source=tsl_study.REPLAY_DATA, fill_at_stop=i > 0)
             closed, reason, _ = fwd_exit_check(trade, px)
             if closed:
                 fill = px
@@ -2175,6 +2177,13 @@ class ForwardTestTracker:
                     ])
             except Exception as e:
                 print(f"Forward test init error: {e}")
+        # TSL study: closed trades from before it was added get a row from the trade log
+        try:
+            _n = tsl_study.TslJournal(tsl_study.journal_path(self.filepath)).backfill(self.filepath)
+            if _n:
+                print(f"🧪 [TSL STUDY] {_n} earlier closed trade(s) added from the trade log")
+        except Exception as e:
+            print(f"[TSL STUDY] backfill note: {e}")
 
     def log_entry(self, symbol: str, opt_type: str, strike: int, action: str,
                   entry_price: float, sl: float, t1: float, t2: float,
@@ -2346,6 +2355,8 @@ class ForwardTestTracker:
         trade['PnL_Pts']       = live_pnl
         trade['Current_Price'] = round(ltp, 2)
         closed = False
+
+        tsl_study.note_tick(trade, ltp, datetime.now())   # TSL study: targets reached, peak, shadow exits (data only)
 
         # ── Exit checks — cascade through targets T1 → T2 → T3 → T4 → T5 ──
         target_hit = trade.get('Target_Hit', 0)   # how many targets already hit
@@ -2741,6 +2752,8 @@ class ForwardTestTracker:
                 writer.writerows(rows)
         except Exception as e:
             print(f"Forward test update error: {e}")
+        if str(updated_trade.get('Status', '')).strip() == 'CLOSED':
+            tsl_study.TslJournal(tsl_study.journal_path(self.filepath)).record(updated_trade)
 
 
 
@@ -5406,6 +5419,10 @@ class FeedEngine:
                     if not dp_ws:
                         dp_ws = spreadsheet.add_worksheet(title="Daily PnL", rows=400, cols=len(DAILY_PNL_HEADERS))
                     self.daily_pnl_sheet = dp_ws
+                    _tsl_ws = next((x for x in spreadsheet.worksheets() if x.title == "TSL Study"), None)
+                    if not _tsl_ws:
+                        _tsl_ws = spreadsheet.add_worksheet(title="TSL Study", rows=600, cols=len(tsl_study.HEADERS))
+                    self.tsl_study_sheet = _tsl_ws
                     self.side_sheets = {}
                     for _side in ("BUY", "SELL"):
                         _title = f"{_side} Trades"
@@ -5646,6 +5663,37 @@ class FeedEngine:
             self._dp_last_sig, self._dp_last_ts = sig, time.time()
         except Exception as e:
             print(f"[DAILY PNL] sheet update note: {e}")
+
+    def _sync_tsl_study_sheet(self):
+        """'TSL Study' tab: one row per closed trade (targets reached and when, peak, outcome with
+        Target-then-SL flagged, shadow trailing-SL results). Data only. Rewritten in one write,
+        and only when the study file has changed (a trade closed), so it costs no calls per tick."""
+        ws = getattr(self, "tsl_study_sheet", None)
+        if not ws:
+            return
+        try:
+            j = tsl_study.TslJournal(tsl_study.journal_path(FORWARD_TEST_FILE))
+            try:
+                sig = os.path.getmtime(j.filepath)
+            except OSError:
+                sig = None
+            if sig is None or sig == getattr(self, "_tsl_last_sig", None):
+                return
+            rows = j.rows()
+            n = len(tsl_study.HEADERS)
+            grid = ([[tsl_study.banner(rows) + f"  |  Updated: {datetime.now():%Y-%m-%d %H:%M:%S}"] + [''] * (n - 1),
+                     tsl_study.HEADERS] + rows)
+            if ws.row_count < len(grid) + 10:
+                ws.add_rows(len(grid) + 10 - ws.row_count)
+            if ws.col_count < n:
+                ws.add_cols(n - ws.col_count)
+            ws.update(values=grid, range_name="A1", value_input_option="USER_ENTERED")
+            prev = getattr(self, "_tsl_last_len", None)
+            if prev is not None and prev > len(grid):
+                ws.batch_clear([f"A{len(grid) + 1}:{gspread.utils.rowcol_to_a1(prev, n)}"])
+            self._tsl_last_len, self._tsl_last_sig = len(grid), sig
+        except Exception as e:
+            print(f"[TSL STUDY] sheet update note: {e}")
 
     def _do_sync_ft_sheet(self):
         """Actual sheet sync logic (runs in background thread)."""
@@ -5941,6 +5989,7 @@ class FeedEngine:
                     print(f"[FT SHEET] clear-below note: {_clr_err}")
             self._ft_last_grid_len = len(grid)
             self._sync_daily_pnl_sheet(active_mem)
+            self._sync_tsl_study_sheet()
 
             # ── Step 6: Apply colour formatting (atomic batch call to preserve quota) ──
             try:

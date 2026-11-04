@@ -485,6 +485,19 @@ SELL_SETUP_STATES = ("SWEEP_R2", "RECLAIM_R2", "RETEST_R2", "TRADING_IN_FAVOR_SE
 # S3/R3 levels take over from S2/R2 once price has gone this fraction of the way from S2 to S3
 # (BUY: S2 swept and not held) or from R2 to R3 (SELL: R2 broken and price pushing on to R3).
 S3_FALL_FRACTION = 0.5
+# Entry rule (AJ, 4 Nov 2026), BUY at S2 (SELL at R2 is the mirror):
+#   1. price trades below S2, or comes within 1% of it (near-touch counts, AJ 4 Nov);
+#   2. the first closed 5M candle back ABOVE S2 is the confirmation candle, whatever its colour;
+#   3. after that candle has closed, price pulls back and retests S2 (within RETEST_BAND_PCT) and holds;
+#   4. entry on a break above the confirmation candle's high.
+#   If price runs through the confirmation high before the retest, that is a continuation move:
+#   the setup is dropped and only a fresh break below S2 starts a new one. A trade below S2 at any
+#   step starts the setup again from that sweep.
+REQUIRE_LEVEL_BREAK = False    # True = only a real trade through S2/R2 is a sweep (no 1% near-touch)
+ALLOW_UNWATCHED_DIP = False    # True = old rule: a day low under the level seen from WAITING (a dip the
+                               # app never watched, e.g. before a restart) also starts a setup
+CONF_ANY_COLOUR     = True     # False = old rule: the confirmation candle must close green (BUY) / red (SELL)
+RETEST_BAND_PCT     = 0.015
 
 
 class StrategyStrikeState:
@@ -537,6 +550,7 @@ class StrategyStrikeState:
         self.sweep_bucket  = -1
         self.conf_high     = 0.0
         self.conf_low      = 0.0
+        self.conf_close    = 0.0
         # Frozen pivot levels — locked at the moment the sweep begins
         # These do NOT drift as opt_piv recalculates each tick from changing opt_high/low
         self.frozen_s2     = 0.0   # S2 at time of SWEEP_S2 detection
@@ -606,6 +620,48 @@ class StrategyStrikeState:
         side = trade.get("Action", "")
         self.signal = (f"{'★' if side == 'BUY' else '▼'} {side} {self.opt_type} {self.trade_status} "
                        f"@ {_safe_float(trade.get('Exit_Price', 0)):.2f} | Entry:{self.entry_price:.2f} | SL:{self.entry_sl:.2f}")
+
+    def _drop_continuation(self, side: str, lvl: str, ltp: float):
+        """Price ran through the confirmation candle before any retest: a one-way move, not a
+        retest setup. Drop it; only a fresh break of the level starts a new one."""
+        self.state = "WAITING"
+        if side == "BUY":
+            self.ll = 0.0
+        else:
+            self.hh = 0.0
+        self.retest_done = False
+        self.retest_low = self.retest_high = 0.0
+        self.conf_high = self.conf_low = self.conf_close = 0.0
+        self.sweep_bucket = -1
+        self.frozen_s1 = self.frozen_s2 = self.frozen_s3 = 0.0
+        self.frozen_r1 = self.frozen_r2 = self.frozen_r3 = 0.0
+        self.frozen_pivots = {}
+        self.trigger_level = lvl
+        word = "above the confirmation high" if side == "BUY" else "below the confirmation low"
+        self.signal = (f"{'★' if side == 'BUY' else '▼'} {self.opt_type} {lvl} continuation: price went {word} "
+                       f"without a retest (LTP {ltp:.2f}) — ignored, waiting for a fresh break of {lvl}")
+
+    def _buy_retest_step(self, ltp: float, lvl_px: float, lvl: str):
+        """RETEST step of a BUY setup, after the confirmation candle closed above the level.
+        (A trade below the level never gets here: it restarts the setup as a new sweep.)"""
+        if ltp > self.conf_high:
+            self._drop_continuation("BUY", lvl, ltp)
+        elif ltp <= lvl_px * (1 + RETEST_BAND_PCT) and ltp < getattr(self, "conf_close", 0.0):
+            # back at the level after the close, still above it
+            self.retest_done = True
+            self.retest_low = round(ltp, 2)
+            self.state = "TRADING_IN_FAVOR_BUY"
+            self.signal = f"★ {self.opt_type} {lvl} Retested @ {self.retest_low:.2f} — Buy Above {self.conf_high:.2f}"
+
+    def _sell_retest_step(self, ltp: float, lvl_px: float, lvl: str):
+        """RETEST step of a SELL setup, mirror of _buy_retest_step."""
+        if 0 < ltp < self.conf_low:
+            self._drop_continuation("SELL", lvl, ltp)
+        elif ltp >= lvl_px * (1 - RETEST_BAND_PCT) and ltp > getattr(self, "conf_close", 0.0):
+            self.retest_done = True
+            self.retest_high = round(ltp, 2)
+            self.state = "TRADING_IN_FAVOR_SELL"
+            self.signal = f"▼ {self.opt_type} {lvl} Retested @ {self.retest_high:.2f} — Sell Below {self.conf_low:.2f}"
 
     def update_tick(self, ltp: float, pivots: dict, now: datetime, opt_high: float = 0.0, opt_low: float = 0.0):
         """
@@ -708,7 +764,7 @@ class StrategyStrikeState:
             if self.mode in ("BUY", "BOTH"):
                 use_s1 = (s2 <= 0.05 or s2 == 0)
                 sup_lvl = s1 if use_s1 else s2
-                if ltp <= sup_lvl * 1.005:  # fresh new sweep has started below support
+                if (ltp < sup_lvl) if REQUIRE_LEVEL_BREAK else (ltp <= sup_lvl * 1.005):  # fresh sweep below support
                     self.state         = f"SWEEP_{'S1' if use_s1 else 'S2'}"
                     self.trigger_level = "S1" if use_s1 else "S2"
                     self.ll            = round(ltp, 2)
@@ -717,14 +773,14 @@ class StrategyStrikeState:
                     self.retest_done   = False
                     self.retest_low    = self.retest_high = 0.0
                     self.conf_high = self.conf_low = 0.0
-                    self.sweep_bucket = -1
+                    self.sweep_bucket = c["bucket"]
                     self.frozen_s2 = self.frozen_s1 = 0.0
                     self.frozen_r2 = self.frozen_r1 = 0.0
                     self.frozen_pivots = {}
                     self.targets       = []
                     self.signal        = f"★ {self.opt_type} Fresh SWEEP after SL — Awaiting Reclaim & New LL SL"
             if self.mode in ("SELL", "BOTH"):
-                if ltp >= r2 * 0.995:  # fresh new sweep has started above resistance
+                if (ltp > r2) if REQUIRE_LEVEL_BREAK else (ltp >= r2 * 0.995):  # fresh sweep above resistance
                     self.state         = "SWEEP_R2"
                     self.trigger_level = "R2"
                     self.hh            = round(ltp, 2)
@@ -733,7 +789,7 @@ class StrategyStrikeState:
                     self.retest_done   = False
                     self.retest_low    = self.retest_high = 0.0
                     self.conf_high = self.conf_low = 0.0
-                    self.sweep_bucket = -1
+                    self.sweep_bucket = c["bucket"]
                     self.frozen_s2 = self.frozen_s1 = 0.0
                     self.frozen_r2 = self.frozen_r1 = 0.0
                     self.frozen_pivots = {}
@@ -798,7 +854,11 @@ class StrategyStrikeState:
 
             # Step 1: Sweep / Approach below Support (Records NEW LL)
             cur_sweep_low = c["low"] if (c.get("low", 0) > 0 and c["low"] < ltp) else ltp
-            if ltp < fs_sup or (self.state == "WAITING" and (cur_sweep_low <= sup_thresh or ltp <= sup_thresh * 1.01)):
+            if REQUIRE_LEVEL_BREAK:
+                swept = ltp < fs_sup or (self.state == "WAITING" and cur_sweep_low < sup_thresh)
+            else:
+                swept = ltp < fs_sup or (self.state == "WAITING" and (cur_sweep_low <= sup_thresh or ltp <= sup_thresh * 1.01))
+            if swept:
                 self.state         = f"SWEEP_{active_lvl}"
                 self.trigger_level = active_lvl
                 sweep_ll = round(min(cur_sweep_low, ltp), 2)
@@ -818,7 +878,10 @@ class StrategyStrikeState:
                 self.signal = f"★ {self.opt_type} SWEEP {active_lvl}{note}{re_tag} — Awaiting Reclaim & Candle Close"
 
             # Step 2: Support Reclaimed — Await Candle Close Confirmation
-            elif (self.state == f"SWEEP_{active_lvl}" or (self.state == "WAITING" and valid_low < sup_thresh and ltp < r1)) and ltp >= fs_sup:
+            # (old rule only: a day low under the level seen from WAITING also counted as the sweep,
+            #  so a setup could start from a dip the app never watched, e.g. before a restart)
+            elif (self.state == f"SWEEP_{active_lvl}" or (ALLOW_UNWATCHED_DIP and self.state == "WAITING"
+                                                          and valid_low < sup_thresh and ltp < r1)) and ltp >= fs_sup:
                 self.state         = f"RECLAIM_{active_lvl}"
                 self.trigger_level = active_lvl
                 if self.ll == 0:
@@ -828,42 +891,30 @@ class StrategyStrikeState:
                 self.signal = f"★ {self.opt_type} RECLAIM {active_lvl} — Awaiting Bullish Candle Close"
 
             elif self.state == f"RECLAIM_{active_lvl}":
-                # Confirmation candle: a 5M candle that has fully CLOSED, opened in or after the
-                # sweep candle, and closed green above the support level. A candle still forming
-                # never counts.
+                # Confirmation candle: the first 5M candle that has fully CLOSED back above the
+                # support level, opened in or after the sweep candle. A candle still forming never
+                # counts. Its own wick is part of the sweep, never the retest: the retest has to
+                # come after this candle has closed.
                 candle_ok = False
-                wick_retested = False
                 if has_closed_candle and closed.get("bucket", -1) >= self.sweep_bucket:
                     c_close = closed["close"]
                     c_open  = closed["open"]
-                    c_low   = closed.get("low", c_close)
-                    if c_close >= fs_sup and c_close >= c_open:
+                    if c_close >= fs_sup and (CONF_ANY_COLOUR or c_close >= c_open):
                         candle_ok = True
-                        if c_low <= fs_sup * 1.015:
-                            wick_retested = True
 
                 if candle_ok:
                     self.conf_high = round(closed.get("high", closed["close"]), 2)
                     self.conf_low  = round(closed.get("low", closed["close"]), 2)
+                    self.conf_close = round(closed["close"], 2)
                     self.state = f"RETEST_{active_lvl}"
-                    self.retest_low = round(min(ltp, valid_low), 2)
-                    if wick_retested:
-                        self.retest_done = True
-                        self.state = "TRADING_IN_FAVOR_BUY"
-                        self.signal = f"★ {self.opt_type} {active_lvl} Confirmation Candle Closed Bullish (Retest Wick) — Buy Above {self.conf_high:.2f}"
-                    else:
-                        self.retest_done = False
-                        self.signal = f"★ {self.opt_type} {active_lvl} Confirmation Candle Closed Bullish (High {self.conf_high:.2f}) — Watching Retest"
+                    self.retest_done = False
+                    self.retest_low = 0.0
+                    self.signal = f"★ {self.opt_type} {active_lvl} Closed Above (High {self.conf_high:.2f}) — Watching Retest of {active_lvl} {fs_sup:.2f}"
+                    self._buy_retest_step(ltp, fs_sup, active_lvl)
 
             elif self.state == f"RETEST_{active_lvl}":
-                # Step 3: Retest Support level (price dips towards level holding above LL)
-                if ltp <= fs_sup * 1.015:
-                    self.retest_done = True
-                    self.retest_low = round(min(self.retest_low if self.retest_low > 0 else ltp, ltp), 2)
-                    self.state = "TRADING_IN_FAVOR_BUY"
-                    self.signal = f"★ {self.opt_type} {active_lvl} Retested @ {self.retest_low:.2f} — Watching In-Favour Push"
-                elif ltp < self.ll:
-                    self.ll = round(ltp, 2)
+                # Step 3: after the close, price pulls back to the level and holds above it
+                self._buy_retest_step(ltp, fs_sup, active_lvl)
 
             elif self.state == "TRADING_IN_FAVOR_BUY":
                 # Step 4: after the retest, price breaks ABOVE the confirmation candle's high -> BUY.
@@ -984,7 +1035,11 @@ class StrategyStrikeState:
 
             # Step 1: Sweep / Push above R2 (Records NEW HH)
             cur_sweep_high = c["high"] if (c.get("high", 0) > 0 and c["high"] > ltp) else ltp
-            if ltp > fr2 or (self.state == "WAITING" and (cur_sweep_high >= r_lvl or ltp >= r_lvl * 0.99)):
+            if REQUIRE_LEVEL_BREAK:
+                swept = ltp > fr2 or (self.state == "WAITING" and cur_sweep_high > r_lvl)
+            else:
+                swept = ltp > fr2 or (self.state == "WAITING" and (cur_sweep_high >= r_lvl or ltp >= r_lvl * 0.99))
+            if swept:
                 self.state         = f"SWEEP_{act}"
                 self.trigger_level = act
                 sweep_hh = round(max(cur_sweep_high, ltp), 2)
@@ -1001,7 +1056,8 @@ class StrategyStrikeState:
                 self.signal = f"▼ {self.opt_type} SWEEP {act}{re_tag} — Awaiting Rejection & Candle Close"
 
             # Step 2: R2 Rejected — Await Candle Close Confirmation
-            elif (self.state == f"SWEEP_{act}" or (self.state == "WAITING" and valid_high > r_lvl and ltp > s1)) and ltp <= fr2:
+            elif (self.state == f"SWEEP_{act}" or (ALLOW_UNWATCHED_DIP and self.state == "WAITING"
+                                                   and valid_high > r_lvl and ltp > s1)) and ltp <= fr2:
                 self.state         = f"RECLAIM_{act}"
                 self.trigger_level = act
                 if self.hh == 0:
@@ -1011,42 +1067,30 @@ class StrategyStrikeState:
                 self.signal = f"▼ {self.opt_type} REJECT {act} — Awaiting Bearish Candle Close"
 
             elif self.state == f"RECLAIM_{act}":
-                # Confirmation candle: a fully CLOSED 5M candle, opened in or after the sweep
-                # candle, that closed red below R2. A candle still forming never counts.
+                # Confirmation candle: the first fully CLOSED 5M candle back below R2, opened in or
+                # after the sweep candle. A candle still forming never counts, and its own wick is
+                # part of the sweep: the retest has to come after this candle has closed.
                 candle_ok = False
-                wick_retested = False
                 if has_closed_candle and closed.get("bucket", -1) >= self.sweep_bucket:
                     c_close = closed["close"]
                     c_open  = closed["open"]
-                    c_high  = closed.get("high", c_close)
-                    if c_close <= fr2 and c_close <= c_open:
+                    if c_close <= fr2 and (CONF_ANY_COLOUR or c_close <= c_open):
                         candle_ok = True
-                        if c_high >= fr2 * 0.985:
-                            wick_retested = True
 
                 if candle_ok:
                     self.conf_high = round(closed.get("high", closed["close"]), 2)
                     self.conf_low  = round(closed.get("low", closed["close"]), 2)
+                    self.conf_close = round(closed["close"], 2)
                     self.hh = round(max(self.hh, self.conf_high), 2)
                     self.state = f"RETEST_{act}"
-                    self.retest_high = round(max(ltp, valid_high), 2)
-                    if wick_retested:
-                        self.retest_done = True
-                        self.state = "TRADING_IN_FAVOR_SELL"
-                        self.signal = f"▼ {self.opt_type} R2 Confirmation Candle Closed Bearish (Retest Wick) — Sell Below {self.conf_low:.2f}"
-                    else:
-                        self.retest_done = False
-                        self.signal = f"▼ {self.opt_type} R2 Confirmation Candle Closed Bearish (Low {self.conf_low:.2f}) — Watching Retest"
+                    self.retest_done = False
+                    self.retest_high = 0.0
+                    self.signal = f"▼ {self.opt_type} {act} Closed Below (Low {self.conf_low:.2f}) — Watching Retest of {act} {fr2:.2f}"
+                    self._sell_retest_step(ltp, fr2, act)
 
             elif self.state == f"RETEST_{act}":
-                # Step 3: Retest R2 level (price bounces towards R2 holding below HH)
-                if ltp >= fr2 * 0.985:
-                    self.retest_done = True
-                    self.retest_high = round(max(self.retest_high if self.retest_high > 0 else ltp, ltp), 2)
-                    self.state = "TRADING_IN_FAVOR_SELL"
-                    self.signal = f"▼ {self.opt_type} R2 Retested @ {self.retest_high:.2f} — Watching In-Favour Drop"
-                elif ltp > self.hh:
-                    self.hh = round(ltp, 2)
+                # Step 3: after the close, price pushes back up to R2 and holds below it
+                self._sell_retest_step(ltp, fr2, act)
 
             elif self.state == "TRADING_IN_FAVOR_SELL":
                 # Step 4: after the retest, price breaks BELOW the confirmation candle's low -> SELL.

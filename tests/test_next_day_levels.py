@@ -126,4 +126,13 @@ FakeDT.v=datetime(2026,10,12,14,0)
 plan=pl.generate_plan("NIFTY")
 assert plan["prev_ohlc"]["close"]==22520.45, plan["prev_ohlc"]
 print("E before 15:30 the last completed day (9 Oct) is used: OK")
+# F) Next Expiry unticked: the 15:45 levels are built for the current expiry only
+FakeDT.v=datetime(2026,10,12,15,45)
+os.remove(app.STRIKE_PIVOT_NEXT_CACHE); f._next_levels_date=None
+f.forward_tracker.set_allowed_expiries(["13OCT2026"])
+f.build_next_day_levels("NIFTY")
+by=collections.Counter(v["expiry"] for v in json.load(open(app.STRIKE_PIVOT_NEXT_CACHE))["strikes"].values())
+assert set(by)=={"13OCT2026"}, by
+f.forward_tracker.set_allowed_expiries(None)
+print("F Next Expiry unticked: next-day levels for the current expiry only:", dict(by), ": OK")
 print("NEXT-DAY LEVEL TESTS PASSED")

@@ -30,7 +30,8 @@
     lastMaxOi: '',
     plannerData: null,
     otherSymbol: 'BANKNIFTY',
-    otherExpiry: 'ALL',
+    otherExpiry: 'CURRENT',
+    fno: { data: null, symbol: 'ALL', side: 'ALL', tf: 'ALL', type: 'ALL', expiry: 'ALL', date: '' },
     otherFilter: 'ALL',
     otherData: null,
     mappedConfig: {
@@ -241,6 +242,7 @@
       if (targetPane) targetPane.classList.add('active');
       if (tabId === 'tab-planner') loadPlannerDeck(state.symbol);
       if (tabId === 'tab-other-symbols' && !state.otherData) calculateOtherSymbols();
+      if (tabId === 'tab-other-symbols') loadFnoOrders();
       if (tabId === 'tab-performance') loadPerformanceTab();
       if (tabId === 'tab-mapped-strikes') loadMappedStrikesData();
     });
@@ -1302,6 +1304,199 @@
       renderOtherSymbolsTable();
     });
   });
+
+  // ── DAILY F&O ORDERS (symbols other than NIFTY, current expiry by default) ──
+  const fnoEls = {
+    info: document.getElementById('fno-plan-info'),
+    chips: document.getElementById('fno-symbol-chips'),
+    status: document.getElementById('fno-status-text'),
+    tbody: document.getElementById('tbody-fno-orders'),
+    genExpiry: document.getElementById('fno-gen-expiry'),
+    btnGen: document.getElementById('btn-fno-generate'),
+    btnRefresh: document.getElementById('btn-fno-refresh'),
+    selExpiry: document.getElementById('fno-filter-expiry'),
+    selDate: document.getElementById('fno-filter-date'),
+    listChips: document.getElementById('fno-list-chips'),
+    addInput: document.getElementById('fno-add-symbol'),
+    btnAdd: document.getElementById('btn-fno-add'),
+    btnReset: document.getElementById('btn-fno-reset'),
+  };
+  let fnoPollTimer = null;
+
+  function escHtml(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  async function loadFnoOrders() {
+    if (!fnoEls.tbody) return;
+    try {
+      const q = state.fno.date ? `?date=${encodeURIComponent(state.fno.date)}` : '';
+      const res = await fetch(`/api/fno-orders${q}`);
+      const data = await res.json();
+      if (!data.success) {
+        if (fnoEls.status) fnoEls.status.textContent = `Error: ${data.error || 'failed'}`;
+        return;
+      }
+      state.fno.data = data;
+      renderFnoList(data.configured || []);
+      renderFnoFilters();
+      renderFnoOrders();
+      const st = data.status || {};
+      if (fnoEls.status) {
+        fnoEls.status.textContent = st.running
+          ? `⏳ ${st.symbol || ''} ${st.done}/${st.total} — ${st.message}`
+          : `Status: ${st.message || 'Idle'}`;
+      }
+      if (fnoEls.btnGen) {
+        fnoEls.btnGen.disabled = !!st.running;
+        fnoEls.btnGen.textContent = st.running ? '⏳ GENERATING...' : '⚡ GENERATE ALL F&O';
+      }
+      clearTimeout(fnoPollTimer);
+      if (st.running) fnoPollTimer = setTimeout(loadFnoOrders, 4000);
+    } catch (e) {
+      if (fnoEls.status) fnoEls.status.textContent = `Error: ${e}`;
+    }
+  }
+
+  function renderFnoList(syms) {
+    if (!fnoEls.listChips) return;
+    fnoEls.listChips.innerHTML = '<span class="cluster-label">DAILY LIST:</span>' + (syms.length
+      ? syms.map(s => `<span class="fno-list-chip">${escHtml(s)}<button class="fno-del" data-fno-del="${escHtml(s)}" title="Remove ${escHtml(s)}">×</button></span>`).join('')
+      : '<span class="text-muted">empty: add a symbol</span>');
+    fnoEls.listChips.querySelectorAll('.fno-del').forEach(b => b.addEventListener('click', () => editFnoSymbol('remove', b.getAttribute('data-fno-del'))));
+  }
+
+  async function editFnoSymbol(action, symbol) {
+    try {
+      const res = await fetch('/api/fno-orders/symbols', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, symbol: symbol || '' })
+      });
+      const data = await res.json();
+      if (data.success) {
+        renderFnoList(data.symbols || []);
+        if (state.fno.data) state.fno.data.configured = data.symbols || [];
+        const what = action === 'reset' ? 'List reset to the indices' : `${symbol} ${action === 'add' ? 'added to' : 'removed from'} the daily list`;
+        showToast(`✅ ${what}`, 'green');
+        if (action === 'add' && fnoEls.addInput) fnoEls.addInput.value = '';
+      } else {
+        showToast(`F&O list: ${data.error || 'failed'}`, 'red');
+      }
+    } catch (e) {
+      showToast(`F&O list error: ${e}`, 'red');
+    }
+  }
+  if (fnoEls.btnAdd) fnoEls.btnAdd.addEventListener('click', () => editFnoSymbol('add', (fnoEls.addInput.value || '').trim().toUpperCase()));
+  if (fnoEls.addInput) fnoEls.addInput.addEventListener('keydown', e => { if (e.key === 'Enter') fnoEls.btnAdd.click(); });
+  if (fnoEls.btnReset) fnoEls.btnReset.addEventListener('click', () => editFnoSymbol('reset', ''));
+
+  function renderFnoFilters() {
+    const d = state.fno.data || {};
+    const summary = d.summary || {};
+    const syms = d.symbols || [];
+    if (state.fno.symbol !== 'ALL' && !syms.includes(state.fno.symbol)) state.fno.symbol = 'ALL';
+    if (fnoEls.info) {
+      fnoEls.info.textContent = d.plan_date
+        ? `Plan ${d.plan_date} | ${syms.length} symbols | ${(d.expiry_mode || 'CURRENT')} expiry | generated ${d.generated_at || '-'}`
+        : `Not generated yet | daily list: ${(d.configured || []).join(', ') || '-'}`;
+    }
+    if (fnoEls.chips) {
+      const total = syms.reduce((n, s) => n + ((summary[s] || {}).orders || 0), 0);
+      const chip = (sym, label, title) => `<button class="filter-pill fno-sym-pill${state.fno.symbol === sym ? ' active' : ''}" data-fno-sym="${escHtml(sym)}" title="${escHtml(title || '')}">${label}</button>`;
+      fnoEls.chips.innerHTML = '<span class="cluster-label">SYMBOL:</span>' + chip('ALL', `ALL (${total})`) +
+        syms.map(s => {
+          const m = summary[s] || {};
+          const warn = m.error ? ' ⚠' : '';
+          return chip(s, `${escHtml(s)} (${m.orders || 0})${warn}`, m.error || `${(m.expiries || []).join(', ')}${m.missing ? ` | ${m.missing} contract(s) without a candle` : ''}`);
+        }).join('');
+      fnoEls.chips.querySelectorAll('.fno-sym-pill').forEach(b => b.addEventListener('click', () => {
+        state.fno.symbol = b.getAttribute('data-fno-sym');
+        renderFnoFilters();
+        renderFnoOrders();
+      }));
+    }
+    if (fnoEls.selExpiry) {
+      const exps = [...new Set((d.setups || []).filter(s => state.fno.symbol === 'ALL' || s.symbol === state.fno.symbol).map(s => s.expiry))];
+      if (state.fno.expiry !== 'ALL' && !exps.includes(state.fno.expiry)) state.fno.expiry = 'ALL';
+      fnoEls.selExpiry.innerHTML = ['ALL', ...exps].map(e => `<option value="${escHtml(e)}"${e === state.fno.expiry ? ' selected' : ''}>${escHtml(e)}</option>`).join('');
+    }
+    if (fnoEls.selDate) {
+      const dates = d.dates || [];
+      fnoEls.selDate.innerHTML = dates.map(x => `<option value="${escHtml(x)}"${x === d.plan_date ? ' selected' : ''}>${escHtml(x)}</option>`).join('');
+    }
+  }
+
+  function renderFnoOrders() {
+    if (!fnoEls.tbody) return;
+    const f = state.fno;
+    const list = ((f.data || {}).setups || []).filter(s =>
+      (f.symbol === 'ALL' || s.symbol === f.symbol) &&
+      (f.side === 'ALL' || s.side === f.side) &&
+      (f.tf === 'ALL' || s.timeframe === f.tf) &&
+      (f.type === 'ALL' || s.type === f.type) &&
+      (f.expiry === 'ALL' || s.expiry === f.expiry));
+    if (!list.length) {
+      const none = (f.data && (f.data.setups || []).length) ? 'No orders match the selected filters.' : 'No daily F&amp;O orders yet. They are generated at 3:45 PM, or click <strong>⚡ GENERATE ALL F&amp;O</strong>.';
+      fnoEls.tbody.innerHTML = `<tr><td colspan="16" class="empty-state">${none}</td></tr>`;
+      return;
+    }
+    const n = v => (v ? `₹${Number(v).toFixed(2)}` : '-');
+    fnoEls.tbody.innerHTML = list.map(s => {
+      const isBuy = s.side === 'BUY';
+      const tf = s.timeframe === '1H' ? '<span class="badge badge-1h">⏳ 1H</span>' : '<span class="badge badge-15m">⭐ 15M</span>';
+      return `<tr class="${isBuy ? 'buy-row' : 'sell-row'}">
+        <td><strong>${escHtml(s.symbol)}</strong></td>
+        <td>${escHtml(s.expiry)}</td>
+        <td>${tf}</td>
+        <td><strong class="font-mono">${escHtml(s.strike)}</strong></td>
+        <td><strong class="${s.type === 'CE' ? 'text-green' : 'text-gold'}">${escHtml(s.type)}</strong></td>
+        <td><strong class="${isBuy ? 'text-green' : 'text-red'}">${escHtml(s.side)}</strong></td>
+        <td class="font-mono">${n(s.ref_close)}</td>
+        <td class="font-mono text-cyan">${n(s.live_cmp)}</td>
+        <td class="font-mono"><strong>${n(s.entry_price)}</strong></td>
+        <td class="font-mono text-green">${n(s.target_1)}</td>
+        <td class="font-mono text-green">${n(s.target_2)}</td>
+        <td class="font-mono text-green">${n(s.target_3)}</td>
+        <td class="font-mono text-green">${n(s.target_4)}</td>
+        <td class="font-mono text-red">${n(s.sl)}</td>
+        <td><span class="badge badge-both">${escHtml(s.rr || '-')}</span></td>
+        <td class="text-muted" title="${escHtml(s.source || '')}">${escHtml(s.candle_date || '-')}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  [['.fno-side-pill', 'data-fno-side', 'side'], ['.fno-tf-pill', 'data-fno-tf', 'tf'], ['.fno-type-pill', 'data-fno-type', 'type']].forEach(([sel, attr, key]) => {
+    document.querySelectorAll(sel).forEach(btn => btn.addEventListener('click', () => {
+      document.querySelectorAll(sel).forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.fno[key] = btn.getAttribute(attr);
+      renderFnoOrders();
+    }));
+  });
+  if (fnoEls.selExpiry) fnoEls.selExpiry.addEventListener('change', () => { state.fno.expiry = fnoEls.selExpiry.value; renderFnoOrders(); });
+  if (fnoEls.selDate) fnoEls.selDate.addEventListener('change', () => { state.fno.date = fnoEls.selDate.value; loadFnoOrders(); });
+  if (fnoEls.btnRefresh) fnoEls.btnRefresh.addEventListener('click', () => loadFnoOrders());
+  if (fnoEls.btnGen) {
+    fnoEls.btnGen.addEventListener('click', async () => {
+      const exp = (fnoEls.genExpiry && fnoEls.genExpiry.value) || 'CURRENT';
+      try {
+        fnoEls.btnGen.disabled = true;
+        const res = await fetch('/api/fno-orders/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expiry: exp })
+        });
+        const data = await res.json();
+        showToast(data.success ? `⚡ Generating ${exp} expiry F&O orders...` : `F&O orders: ${data.error || 'failed'}`, data.success ? 'blue' : 'red');
+        state.fno.date = '';
+        setTimeout(loadFnoOrders, 1000);
+      } catch (e) {
+        showToast(`F&O orders error: ${e}`, 'red');
+        fnoEls.btnGen.disabled = false;
+      }
+    });
+  }
 
   // ── Expiries & Feed Start/Stop ──
   async function loadExpiries(sym) {

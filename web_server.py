@@ -49,6 +49,7 @@ get_symbol_step = engine.get_symbol_step
 get_symbol_lot_size = engine.get_symbol_lot_size
 EXCHANGE_CONFIG = engine.EXCHANGE_CONFIG
 _safe_float = engine._safe_float
+import fno_planner
 advanced_engine = getattr(engine, "advanced_engine", None)
 if not advanced_engine:
     from advanced_strategy import advanced_engine
@@ -128,7 +129,11 @@ class ManualCloseRequest(BaseModel):
 
 class OtherSymbolsRequest(BaseModel):
     symbol: str = "BANKNIFTY"
-    expiry: str = "ALL"
+    expiry: str = "CURRENT"   # current expiry only unless NEXT / ALL is picked
+
+class FnoOrdersRequest(BaseModel):
+    symbols: List[str] = []    # empty: the configured daily list
+    expiry: str = "CURRENT"    # CURRENT (default), NEXT or ALL
 
 # ── Continuous Next-Day Plan Storage & Date Functions ───────────
 PLANS_FILE = os.path.join(BASE_DIR, "next_day_plans.json")
@@ -1136,6 +1141,12 @@ def background_eod_scheduler():
                     print(f"[WEB EOD 3:45PM] ⏰ Next-Day Plan generated & stored for target date: {plan_data.get('target_trading_date')}\n")
                 except Exception as nd_err:
                     print(f"[WEB EOD 3:45PM] next-day level calc error: {nd_err}")
+                # Current-expiry orders of the other F&O symbols ("F&O Orders" tab), in the background
+                try:
+                    if fno_planner.start_daily_run(engine):
+                        print("[WEB EOD 3:45PM] F&O symbols: current-expiry orders started in the background")
+                except Exception as fno_err:
+                    print(f"[WEB EOD 3:45PM] F&O orders start error: {fno_err}")
 
         except Exception as e:
             print(f"[EOD SCHEDULER] error: {e}")
@@ -1491,7 +1502,7 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
       - Targets T1-T4, SL blank until confirmed, Live CMP, R:R
     """
     sym = (req.symbol or "BANKNIFTY").strip().upper()
-    req_exp = (req.expiry or "ALL").strip().upper()
+    req_exp = (req.expiry or "CURRENT").strip().upper()
     exch = get_symbol_exchange(sym)
     step = get_symbol_step(sym, exch)
     lot = get_symbol_lot_size(sym, exch)
@@ -1558,22 +1569,7 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
             pass
 
     for exp_item in target_expiries:
-        combos = [
-            ("15M", "PE", f15.get("pe_strikes", [])[:2], "BUY", "★ BUY (S2/S1 Reclaim)"),
-            ("15M", "CE", f15.get("ce_strikes", [])[:2], "BUY", "★ BUY (S2/S1 Reclaim)"),
-            ("15M", "CE", f15.get("ce_strikes", [])[:2], "SELL", "▼ SELL (R2/R1 Reject)"),
-            ("15M", "PE", f15.get("pe_strikes", [])[:2], "SELL", "▼ SELL (R2/R1 Reject)"),
-            ("1H", "PE", f1h.get("pe_strikes", [])[:2], "BUY", "★ BUY (S2/S1 Reclaim)"),
-            ("1H", "CE", f1h.get("ce_strikes", [])[:2], "BUY", "★ BUY (S2/S1 Reclaim)"),
-            ("1H", "CE", f1h.get("ce_strikes", [])[:2], "SELL", "▼ SELL (R2/R1 Reject)"),
-            ("1H", "PE", f1h.get("pe_strikes", [])[:2], "SELL", "▼ SELL (R2/R1 Reject)"),
-        ]
-        # Pivot (P) strike: traded on both CE and PE for 15M and 1H
-        for _tf, _fo in (("15M", f15), ("1H", f1h)):
-            _ps = list(_fo.get("p_strikes") or ([_fo["P_STRIKE"]] if _fo.get("P_STRIKE") else []))
-            for _ot in ("CE", "PE"):
-                combos.append((_tf, _ot, _ps, "BUY", "★ BUY (S2/S1 Reclaim)"))
-                combos.append((_tf, _ot, _ps, "SELL", "▼ SELL (R2/R1 Reject)"))
+        combos = fno_planner.focus_combos(f15, f1h)
 
         seen = set()
         for tf, ot, stk_list, side, setup_name in combos:
@@ -1611,45 +1607,13 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
                 # Option contract Fibonacci pivots
                 c_info = opt_piv_cache.get((ot, stk, exp_item)) or {}
                 opt_p = _safe_float(c_info.get("P", 0))
-                opt_s1 = _safe_float(c_info.get("S1", 0))
-                opt_s2 = _safe_float(c_info.get("S2", 0))
-                opt_s3 = _safe_float(c_info.get("S3", 0))
-                opt_r1 = _safe_float(c_info.get("R1", 0))
-                opt_r2 = _safe_float(c_info.get("R2", 0))
-                opt_r3 = _safe_float(c_info.get("R3", 0))
 
                 if opt_p <= 0:
                     continue   # no official-candle levels for this contract yet; never estimate them
 
-                is_buy = (side == "BUY")
-                if is_buy:
-                    planned_ep = opt_s2 if opt_s2 > 0.05 else opt_s1
-                    if planned_ep <= 0.05: planned_ep = round(ltp * 0.95, 2)
-                    tgt1 = opt_s1 if (opt_s1 > planned_ep) else opt_p
-                    if tgt1 <= planned_ep: tgt1 = round(planned_ep * 1.25, 2)
-                    tgt2 = opt_p if (opt_p > tgt1) else opt_r1
-                    if tgt2 <= tgt1: tgt2 = round(tgt1 * 1.20, 2)
-                    tgt3 = opt_r1 if (opt_r1 > tgt2) else opt_r2
-                    if tgt3 <= tgt2: tgt3 = round(tgt2 * 1.20, 2)
-                    tgt4 = opt_r2 if (opt_r2 > tgt3) else opt_r3
-                    if tgt4 <= tgt3: tgt4 = round(tgt3 * 1.20, 2)
-                    sl_val = opt_s3 if opt_s3 > 0.05 else round(planned_ep * 0.88, 2)
-                    rr = f"{((tgt1 - planned_ep) / max(planned_ep - sl_val, 0.5)):.1f}:1" if (planned_ep > sl_val) else "1:2.0"
-                    sig = f"Reversal BUY @ S2:{planned_ep:.2f} | Reclaim S2 | T1:{tgt1:.2f} T2:{tgt2:.2f}"
-                else:
-                    planned_ep = opt_r2 if opt_r2 > 0.05 else opt_r1
-                    if planned_ep <= 0.05: planned_ep = round(ltp * 1.05, 2)
-                    tgt1 = opt_r1 if (opt_r1 < planned_ep and opt_r1 > 0) else opt_p
-                    if tgt1 >= planned_ep: tgt1 = round(planned_ep * 0.80, 2)
-                    tgt2 = opt_p if (opt_p < tgt1 and opt_p > 0) else opt_s1
-                    if tgt2 >= tgt1: tgt2 = round(tgt1 * 0.80, 2)
-                    tgt3 = opt_s1 if (opt_s1 < tgt2 and opt_s1 > 0) else opt_s2
-                    if tgt3 >= tgt2: tgt3 = round(tgt2 * 0.80, 2)
-                    tgt4 = opt_s2 if (opt_s2 < tgt3 and opt_s2 > 0) else opt_s3
-                    if tgt4 >= tgt3: tgt4 = round(tgt3 * 0.80, 2)
-                    sl_val = opt_r3 if opt_r3 > 0.05 else round(planned_ep * 1.12, 2)
-                    rr = f"{((planned_ep - tgt1) / max(sl_val - planned_ep, 0.5)):.1f}:1" if (sl_val > planned_ep) else "1:2.0"
-                    sig = f"Reversal SELL @ R2:{planned_ep:.2f} | Rejection R2 | T1:{tgt1:.2f} T2:{tgt2:.2f}"
+                o = fno_planner.order_from_levels(c_info, side, ltp)
+                planned_ep, sl_val, rr, sig = o["entry_price"], o["sl"], o["rr"], o["signal"]
+                tgt1, tgt2, tgt3, tgt4 = o["target_1"], o["target_2"], o["target_3"], o["target_4"]
 
                 rows.append({
                     "timeframe": tf,
@@ -1692,6 +1656,49 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
         },
         "setups": rows
     }
+
+# ── Daily F&O orders (symbols other than NIFTY) ──────────────────
+@app.get("/api/fno-orders")
+async def get_fno_orders(date: str = "", symbol: str = "ALL"):
+    """Stored daily orders of the other F&O symbols (latest plan date by default), with the
+    run's progress while one is going."""
+    try:
+        out = fno_planner.flat_orders(date or None, symbol)
+        snap = dict(feed.live_data)
+        for s in out["setups"]:
+            tick = snap.get(str(s.get("token", ""))) or {}
+            s["live_cmp"] = round(_safe_float(tick.get("ltp", 0)), 2)
+        out["configured"] = fno_planner.configured_symbols(Session.scrip_df)
+        out["status"] = dict(fno_planner.status)
+        out["success"] = True
+        return out
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+class FnoSymbolRequest(BaseModel):
+    action: str = "add"        # add, remove or reset
+    symbol: str = ""
+
+@app.post("/api/fno-orders/symbols")
+async def edit_fno_symbols(req: FnoSymbolRequest):
+    """Add / remove a symbol of the daily F&O orders list (reset: back to the indices)."""
+    try:
+        return fno_planner.edit_symbols(req.action, req.symbol, Session.scrip_df)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/fno-orders/generate")
+async def generate_fno_orders(req: FnoOrdersRequest):
+    """Starts a run in the background: current expiry by default, NEXT / ALL only when asked."""
+    if fno_planner.status.get("running"):
+        return {"success": False, "error": "A run is already in progress", "status": dict(fno_planner.status)}
+    if Session.scrip_df is None:
+        return {"success": False, "error": "Instrument list not loaded yet (Angel One login pending)"}
+    exp = (req.expiry or "CURRENT").strip().upper()
+    syms = [s for s in (req.symbols or []) if s and s.strip()] or None
+    threading.Thread(target=fno_planner.generate, args=(engine,),
+                     kwargs={"symbols": syms, "expiry_mode": exp}, daemon=True, name="fno-orders").start()
+    return {"success": True, "message": f"Generating {exp.lower()} expiry orders", "expiry": exp}
 
 @app.post("/api/other-symbols/load-plan")
 async def load_other_symbols_to_plan(req: OtherSymbolsRequest):

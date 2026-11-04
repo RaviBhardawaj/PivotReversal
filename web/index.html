@@ -293,9 +293,9 @@
       <div class="control-unit">
         <label>EXPIRY</label>
         <select id="other-sel-expiry" class="terminal-select min-w-140">
-          <option value="ALL">ALL EXPIRIES</option>
-          <option value="CURRENT">CURRENT EXPIRY</option>
+          <option value="CURRENT" selected>CURRENT EXPIRY</option>
           <option value="NEXT">NEXT EXPIRY</option>
+          <option value="ALL">ALL EXPIRIES</option>
         </select>
       </div>
 
@@ -340,8 +340,8 @@
 
       <div class="filter-cluster">
         <span class="cluster-label">EXPIRY:</span>
-        <button class="filter-pill other-exp-pill active" data-other-exp="ALL">ALL EXPIRIES</button>
-        <button class="filter-pill other-exp-pill" data-other-exp="CURRENT">CURRENT</button>
+        <button class="filter-pill other-exp-pill" data-other-exp="ALL">ALL EXPIRIES</button>
+        <button class="filter-pill other-exp-pill active" data-other-exp="CURRENT">CURRENT</button>
         <button class="filter-pill other-exp-pill" data-other-exp="NEXT">NEXT</button>
       </div>
 
@@ -379,6 +379,96 @@
         </tbody>
       </table>
     </div>
+
+    <!-- Daily F&O orders: every symbol other than NIFTY, generated at 3:45 PM (current expiry) -->
+    <section class="fno-daily-panel" id="fno-daily-panel">
+      <div class="scanner-toolbar">
+        <div class="filter-cluster">
+          <span class="cluster-label">📅 DAILY F&amp;O ORDERS:</span>
+          <span class="fno-plan-info" id="fno-plan-info">Loading...</span>
+        </div>
+        <div class="filter-cluster">
+          <select id="fno-gen-expiry" class="terminal-select" title="Expiry to generate">
+            <option value="CURRENT" selected>CURRENT EXPIRY</option>
+            <option value="NEXT">NEXT EXPIRY</option>
+            <option value="ALL">CURRENT + NEXT</option>
+          </select>
+          <button id="btn-fno-generate" class="btn btn-primary font-bold" title="Generate orders for every configured F&amp;O symbol">⚡ GENERATE ALL F&amp;O</button>
+          <button id="btn-fno-refresh" class="btn btn-secondary" title="Reload stored orders">↻ REFRESH</button>
+        </div>
+      </div>
+
+      <div class="scanner-toolbar fno-filter-bar">
+        <div class="filter-cluster fno-symbol-chips" id="fno-list-chips">
+          <span class="cluster-label">DAILY LIST:</span>
+        </div>
+        <div class="filter-cluster">
+          <input type="text" id="fno-add-symbol" class="terminal-input fno-add-input" placeholder="Add symbol e.g. RELIANCE" maxlength="20">
+          <button id="btn-fno-add" class="btn btn-success font-bold">+ ADD</button>
+          <button id="btn-fno-reset" class="btn btn-secondary" title="Back to the 5 indices">RESET</button>
+        </div>
+      </div>
+      <div class="scanner-toolbar fno-filter-bar">
+        <div class="filter-cluster fno-symbol-chips" id="fno-symbol-chips">
+          <span class="cluster-label">SYMBOL:</span>
+        </div>
+      </div>
+      <div class="scanner-toolbar fno-filter-bar">
+        <div class="filter-cluster">
+          <span class="cluster-label">SIDE:</span>
+          <button class="filter-pill fno-side-pill active" data-fno-side="ALL">ALL</button>
+          <button class="filter-pill fno-side-pill" data-fno-side="BUY">🟢 BUY</button>
+          <button class="filter-pill fno-side-pill" data-fno-side="SELL">🔴 SELL</button>
+        </div>
+        <div class="filter-cluster">
+          <span class="cluster-label">TIMEFRAME:</span>
+          <button class="filter-pill fno-tf-pill active" data-fno-tf="ALL">ALL</button>
+          <button class="filter-pill fno-tf-pill" data-fno-tf="15M">⭐ 15M</button>
+          <button class="filter-pill fno-tf-pill" data-fno-tf="1H">⏳ 1H</button>
+        </div>
+        <div class="filter-cluster">
+          <span class="cluster-label">TYPE:</span>
+          <button class="filter-pill fno-type-pill active" data-fno-type="ALL">ALL</button>
+          <button class="filter-pill fno-type-pill" data-fno-type="CE">CE</button>
+          <button class="filter-pill fno-type-pill" data-fno-type="PE">PE</button>
+        </div>
+        <div class="filter-cluster">
+          <span class="cluster-label">EXPIRY:</span>
+          <select id="fno-filter-expiry" class="terminal-select"><option value="ALL">ALL</option></select>
+          <span class="cluster-label">DATE:</span>
+          <select id="fno-filter-date" class="terminal-select"></select>
+        </div>
+        <div class="max-oi-indicator" id="fno-status-text">Status: --</div>
+      </div>
+
+      <div class="terminal-table-container">
+        <table class="terminal-table" id="table-fno-orders">
+          <thead>
+            <tr>
+              <th>SYMBOL</th>
+              <th>EXPIRY</th>
+              <th>TIMEFRAME</th>
+              <th>STRIKE</th>
+              <th>TYPE</th>
+              <th>SIDE</th>
+              <th>REF CLOSE (₹)</th>
+              <th>LIVE (₹)</th>
+              <th>ENTRY (₹)</th>
+              <th>T1 (₹)</th>
+              <th>T2 (₹)</th>
+              <th>T3 (₹)</th>
+              <th>T4 (₹)</th>
+              <th>SL (₹)</th>
+              <th>R:R</th>
+              <th>CANDLE</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-fno-orders">
+            <tr><td colspan="16" class="empty-state">No daily F&amp;O orders yet. They are generated at 3:45 PM, or click <strong>⚡ GENERATE ALL F&amp;O</strong>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </main>
 
   <!-- TAB 3: TRADE JOURNAL & FORWARD TEST -->

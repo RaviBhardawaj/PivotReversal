@@ -4402,6 +4402,12 @@ class FeedEngine:
             print("[EOD] eod_planner.py started (output: eod_planner_output.log)\n")
         except Exception as _ep_err:
             print(f"[EOD] eod_planner auto-run error: {_ep_err}")
+        try:   # current-expiry orders of the other F&O symbols ("F&O Orders" sheet tab)
+            import fno_planner
+            if fno_planner.start_daily_run(sys.modules[__name__]):
+                print("[EOD] F&O symbols: current-expiry orders started in the background")
+        except Exception as _fno_err:
+            print(f"[EOD] F&O orders start error: {_fno_err}")
 
     def fetch_and_map_all_strikes(self, symbol=None, expiry=None, force_fetch=True, mode="session") -> dict:
         """

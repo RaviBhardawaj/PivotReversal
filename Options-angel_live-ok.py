@@ -266,6 +266,42 @@ def is_live_market_open(dt: datetime = None) -> bool:
     cur_t = dt.time()
     return dt_time(9, 15, 0) <= cur_t <= dt_time(15, 30, 0)
 
+
+def _expiry_date(expiry):
+    """'09NOV2026' -> date, or None when it isn't an expiry string."""
+    try:
+        return datetime.strptime(str(expiry).strip().upper(), "%d%b%Y").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def roll_expiries(expiries, open_expiries, today: date = None) -> list:
+    """The expiries to subscribe today, nearest first.
+
+    An expiry that has passed (e.g. yesterday's 03NOV2026 on 4 Nov, still in a cached or
+    morning instrument list) has no live contracts: watching it means the real current
+    expiry (09NOV2026) gets no ticks and every S2/R2 setup on it is missed (AJ, 4 Nov:
+    23750 PE 09NOV S2 113). Each passed expiry is replaced by the nearest open one that
+    isn't loaded yet (open_expiries: still-open expiries, nearest first), so the current
+    expiry is always watched."""
+    today = today or datetime.now().date()
+    kept, dropped = [], 0
+    for e in expiries or []:
+        d = _expiry_date(e)
+        if d is not None and d < today:
+            dropped += 1
+        elif e and e not in kept:
+            kept.append(e)
+    for e in open_expiries or []:
+        if dropped <= 0:
+            break
+        d = _expiry_date(e)
+        if e and e not in kept and (d is None or d >= today):
+            kept.append(e)
+            dropped -= 1
+    return sorted(kept, key=lambda e: _expiry_date(e) or date.max)
+
+
 # ═══════════════════════════════════════════════════════════
 # FIBONACCI PIVOTS & REVERSAL STRATEGY LOGIC
 # ═══════════════════════════════════════════════════════════
@@ -3830,6 +3866,12 @@ class FeedEngine:
         """
         if isinstance(expiries, str):
             expiries = [expiries]
+        # Never watch an expiry that has passed in place of today's current one
+        rolled = roll_expiries(expiries, self.upcoming_expiries(symbol, 6))
+        if rolled and rolled != list(expiries):
+            print(f"[EXPIRY] {', '.join(e for e in expiries if e not in rolled)} has expired — "
+                  f"watching {' + '.join(rolled)}")
+            expiries = rolled
         self._prep_args = (exchange, symbol, list(expiries), n_strikes)
 
         cfg    = EXCHANGE_CONFIG.get(exchange, EXCHANGE_CONFIG["NFO"])
@@ -4291,6 +4333,14 @@ class FeedEngine:
         all_exps = self.upcoming_expiries(symbol, n=12, from_day=ref_date)
         from advanced_strategy.engine import get_monthly_expiry as _calc_m
         return _calc_m(all_exps, ref_date)
+
+    def loaded_expiry_passed(self, today: date = None) -> bool:
+        """True when the feed was prepared with an expiry that has since passed."""
+        args = getattr(self, "_prep_args", None)
+        if not args:
+            return False
+        today = today or datetime.now().date()
+        return any((_expiry_date(e) or date.max) < today for e in args[2])
 
     def roll_day(self, today_date: str) -> bool:
         """Once per calendar day: drop the previous day's strike states and closed-trade cache.
@@ -5701,10 +5751,13 @@ class FeedEngine:
                         # New day while running: subscribe the new pivot strikes
                         new_set = {x for x in focus.get("all_focus", []) if x > 0}
                         subscribed = {m["strike"] for m in self.token_to_meta.values()}
-                        if (not same_day and new_set and not new_set.issubset(subscribed)
-                                and getattr(self, "_prep_args", None)):
+                        # App kept running past an expiry day: move to today's current expiry
+                        expiry_passed = self.loaded_expiry_passed()
+                        if (not same_day and getattr(self, "_prep_args", None)
+                                and (expiry_passed or (new_set and not new_set.issubset(subscribed)))):
                             try:
-                                print(f"[PIVOT] New session strikes {sorted(new_set)} — re-subscribing WebSocket")
+                                why = "expiry rolled" if expiry_passed else "new session strikes"
+                                print(f"[PIVOT] {why} {sorted(new_set)} — re-subscribing WebSocket")
                                 self.prepare(*self._prep_args)
                                 self._schedule_reconnect(reason="new session pivot strikes")
                             except Exception as rp_err:
@@ -9097,7 +9150,7 @@ class ControlPanel:
                 print("[START] WebSocket connecting...")
                 time.sleep(1)
 
-                exp_label = " + ".join(expiries_to_load)
+                exp_label = " + ".join(feed._prep_args[2] if getattr(feed, "_prep_args", None) else expiries_to_load)
                 print(f"[START] LIVE — {symbol} | {exp_label} | {len(strikes)} strikes")
                 self.root.after(0, lambda: self._set_status(
                     f"● LIVE | {symbol} | {exp_label} | ATM~{atm} | +/-{n} strikes"))

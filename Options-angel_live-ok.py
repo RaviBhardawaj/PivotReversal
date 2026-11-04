@@ -3334,13 +3334,67 @@ def get_gspread_client():
     gc = gspread.authorize(creds)
     # A Sheets call without a timeout can hang the feed loop forever — cap every request
     try:
-        gc.set_timeout(20)
+        gc.set_timeout(SHEETS_TIMEOUT)
     except Exception:
-        try:
-            gc.session.request = functools.partial(gc.session.request, timeout=20)
-        except Exception:
-            pass
+        pass
+    _make_sheets_session_resilient(gc, creds)
     return gc
+
+
+SHEETS_TIMEOUT = 20      # seconds per Google Sheets request
+SHEETS_RETRIES = 3       # extra tries after an SSL / connection failure
+
+def _make_sheets_session_resilient(gc, creds):
+    """Give every thread its own HTTPS connection to Google Sheets and retry dropped connections.
+    gspread keeps one requests session for the whole client, and the feed loop, forward-test sync,
+    order log and formatting threads all write through it at once. A requests session is not
+    thread-safe: two threads on one TLS connection garble each other's records, which Google
+    answers with 'SSLV3_ALERT_BAD_RECORD_MAC'. Each thread now gets its own session; when a
+    connection still breaks (SSL error, reset, network blip), that thread's session is thrown
+    away and the call is retried on a fresh connection a few times before giving up."""
+    owner = getattr(gc, "http_client", gc)            # gspread 6 keeps it on http_client, 5 on the client
+    shared = getattr(owner, "session", None)
+    if shared is None or not hasattr(shared, "request"):
+        return
+    auth = getattr(owner, "auth", None) or creds
+    try:
+        from google.auth.transport.requests import AuthorizedSession
+    except Exception:
+        return
+    local = threading.local()
+
+    def _session():
+        s = getattr(local, "session", None)
+        if s is None:
+            s = AuthorizedSession(auth)
+            local.session = s
+        return s
+
+    def _drop_session():
+        s = getattr(local, "session", None)
+        local.session = None
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def request(method, url, *args, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = SHEETS_TIMEOUT
+        for attempt in range(SHEETS_RETRIES + 1):
+            try:
+                return _session().request(method, url, *args, **kwargs)
+            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
+                _drop_session()
+                if attempt >= SHEETS_RETRIES:
+                    raise
+                wait = 0.5 * (2 ** attempt)
+                print(f"[SHEET] connection to Google dropped ({type(e).__name__}); "
+                      f"retrying on a fresh connection in {wait:.1f}s ({attempt + 1}/{SHEETS_RETRIES})")
+                time.sleep(wait)
+
+    shared.request = request
 
 # ═══════════════════════════════════════════════════════════
 # SESSION
@@ -4910,6 +4964,33 @@ class FeedEngine:
 
 
     # ── Google Sheets ──────────────────────────────────────
+    def setup_sheet_safe(self, symbol, strikes, retry_every=60):
+        """Set up the Google Sheet without ever stopping trading. If Google can't be reached,
+        the live feed and orders start anyway (sheet writes are skipped while self.ws is None)
+        and the sheet setup keeps retrying in the background until it works or the feed stops."""
+        self._sheet_setup_gen = gen = getattr(self, "_sheet_setup_gen", 0) + 1   # a later START replaces any old retry
+        try:
+            self.setup_sheet(symbol, strikes)
+            return True
+        except Exception as e:
+            self.ws = None   # a half-done setup must not be written to
+            print(f"[SHEET] Google Sheet setup failed ({str(e)[:160]}); trading continues, "
+                  f"retrying the sheet every {retry_every}s")
+
+        def _retry():
+            while True:
+                time.sleep(retry_every)
+                if self._sheet_setup_gen != gen or not getattr(self, "running", False):
+                    return
+                try:
+                    self.setup_sheet(symbol, strikes)
+                    print("[SHEET] Google Sheet connected again")
+                    return
+                except Exception as e:
+                    print(f"[SHEET] Google Sheet still unreachable ({str(e)[:120]}); next try in {retry_every}s")
+        threading.Thread(target=_retry, daemon=True, name="sheet-setup-retry").start()
+        return False
+
     def setup_sheet(self, symbol, strikes):
         """Set up Google Sheet with 21 columns including all Fibonacci Pivots on both CE and PE."""
         gc          = get_gspread_client()
@@ -9090,8 +9171,8 @@ class ControlPanel:
                 print(f"[START] Got {len(strikes)} strikes, ATM~{atm}")
 
                 print("[START] Setting up Google Sheet...")
-                feed.setup_sheet(symbol, strikes)
-                print("[START] Sheet setup done, starting WebSocket...")
+                feed.setup_sheet_safe(symbol, strikes)
+                print("[START] Starting WebSocket...")
 
                 feed.start_ws()
                 print("[START] WebSocket connecting...")

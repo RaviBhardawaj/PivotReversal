@@ -9171,5 +9171,10 @@ if __name__=="__main__":
             else:
                 root.after(2000, _auto_start)
         root.after(5000, _auto_start)
+    try:   # browser view of this window on http://127.0.0.1:8780 (GLASS_DASHBOARD_PORT=0 turns it off)
+        import glass_dashboard
+        glass_dashboard.start(app, sys.modules[__name__])
+    except Exception as _gd_err:
+        print(f"[GLASS] Glass dashboard not started: {_gd_err}")
     root.mainloop()
 

@@ -12,6 +12,7 @@ placement through Angel One, Dhan or Jainam XTS.
 | `brokers/` | Order engine and broker adapters (`angel.py`, `dhan.py`, `xts.py`) |
 | `eod_planner.py` | End-of-day planner that builds the next day's pivot plan |
 | `web_server.py`, `web/` | Local web dashboard (bound to localhost; it never places orders) |
+| `glass_dashboard.py`, `glass_web/` | Glass dashboard: browser view of the running launcher on http://127.0.0.1:8780 |
 | `run_option_chain.command`, `run.sh`, `run_web.sh` | Launchers (macOS / shell) |
 | `LiveOptionChain.app` | macOS launcher app |
 | `dhan_login.py` | Stand-alone Dhan PIN + TOTP login helper |
@@ -59,3 +60,16 @@ daily candle from Angel One's historical API, the same H/L/C TradingView uses fo
 - On TradingView, compare on a chart of the same contract and expiry, with the timeframe set to
   Daily (on a 1H chart "Auto" switches to weekly pivots). S levels below 0.05 show as 0.05.
 - Test: `python3 tests/test_strike_pivots.py`
+
+## Glass dashboard (browser view of the launcher)
+
+When `Options-angel_live-ok.py` starts, it also serves a glass-style copy of its window on
+**http://127.0.0.1:8780/**. It runs inside the launcher, so it shows the same feed, reversal rows,
+filters and order engine, and its buttons (START / STOP, filters, AUTO-TRADE, ■ STOP, ⚙ Settings,
+Next-Day Plan, Map Strike Levels, Gap Check, FT filter) do exactly what the Tk buttons do. Changing a
+filter or the symbol in the browser changes it in the Tk window too. It never starts a second feed or
+order engine, and the existing `web_server.py` dashboard is not affected.
+
+- Only reachable from this Mac (bound to 127.0.0.1). Standard library only, no new packages.
+- `GLASS_DASHBOARD_PORT=8790` picks another port; `GLASS_DASHBOARD_PORT=0` turns it off.
+- Try it without the market: `python3 tests/run_glass_demo.py` (made-up NIFTY data, no login, no orders).

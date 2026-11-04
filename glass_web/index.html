@@ -9,14 +9,14 @@
 <link rel="stylesheet" href="/glass.css">
 </head>
 <body>
-<div class="wrap">
+<div class="app">
 
 <header class="glass">
   <div class="brand">
     <div class="logo">◆</div>
-    <div><h1>Fibonacci Pivot Reversal</h1>
-      <p>1H Support/Resistance strikes · 5M liquidity sweep &amp; reclaim · Live alerts &amp; Google Sheets</p></div>
+    <div><h1>Fibonacci Pivot Reversal</h1><p>15M intraday &amp; 1H structure · 5M sweep &amp; reclaim</p></div>
   </div>
+  <div class="statusbar" id="statusbar" title=""><span id="status-text">Connecting…</span></div>
   <div class="pills">
     <div class="pill" id="pill-market"><span class="dot"></span><span>Market</span></div>
     <div class="pill" id="pill-feed"><span class="dot"></span><span>Feed</span></div>
@@ -26,9 +26,7 @@
 
 <div class="glass banner" id="launcher-banner" hidden>⚠️ The Python launcher is running. Close it before you start the scanner here, so the feed, sheet and orders aren't doubled.</div>
 
-<div class="glass statusbar" id="statusbar"><span class="dot"></span><span id="status-text">Connecting…</span></div>
-
-<div class="grid top">
+<div class="top">
   <section class="glass card">
     <h3>Live scanner control</h3>
     <div class="form">
@@ -36,9 +34,7 @@
       <div><label for="c-symbol">Symbol</label>
         <input id="c-symbol" list="c-symbols" autocomplete="off" spellcheck="false"><datalist id="c-symbols"></datalist></div>
       <div><label for="c-expiry">Expiry (current)</label><select id="c-expiry"></select></div>
-      <div><label for="c-next">Next expiry</label>
-        <div class="row"><select id="c-next"></select>
-          <label class="toggle"><input type="checkbox" id="c-usenext"> Enable</label></div></div>
+      <div><label for="c-next">Next expiry <label class="toggle inl-t"><input type="checkbox" id="c-usenext"> Enable</label></label><select id="c-next"></select></div>
       <div class="span2"><label for="c-strikes">Strikes (ATM ±) <b class="mono accent" id="c-strikes-val">10</b></label>
         <input type="range" id="c-strikes" min="3" max="50" value="10"></div>
     </div>
@@ -46,29 +42,33 @@
   </section>
 
   <section class="glass card">
-    <h3 id="u-title">Underlying</h3>
-    <div class="spot"><span class="v mono" id="u-price">--</span><span class="mono" id="u-dir"></span></div>
-    <div class="kv">
-      <div><span>Daily zone</span><b id="u-zone">--</b></div>
-      <div><span>Direction</span><b id="u-direction">--</b></div>
-      <div><span>1H bias</span><b id="u-h1">--</b></div>
+    <div class="uhead">
+      <h3 id="u-title" class="m0">Underlying</h3>
+      <span class="v mono" id="u-price">--</span><span class="mono" id="u-dir"></span>
+      <span class="small">Zone <b id="u-zone">--</b></span>
+      <span class="small">Dir <b id="u-direction">--</b></span>
+      <span class="small">1H <b id="u-h1">--</b></span>
     </div>
+    <table class="mtf mono">
+      <thead><tr><th class="l">TF</th><th class="l">Zone</th><th>S3</th><th>S2</th><th>S1</th><th>P</th><th>R1</th><th>R2</th><th>R3</th></tr></thead>
+      <tbody id="mtf-body"></tbody>
+    </table>
     <div class="tf mono">
       <div class="t15" id="u-f15">⭐ 15M · loading…</div>
       <div class="t1h" id="u-f1h">⏳ 1H · loading…</div>
     </div>
-    <div class="small mt" id="u-desc"></div>
+    <div class="small ell" id="u-desc"></div>
   </section>
 
   <section class="glass card">
     <h3 id="o-title">Auto-trade</h3>
     <div class="stats">
-      <div class="stat"><span>Today's trades</span><b class="mono" id="o-trades">--</b></div>
+      <div class="stat"><span>Trades</span><b class="mono" id="o-trades">--</b></div>
       <div class="stat"><span>P&amp;L</span><b class="mono" id="o-pnl">--</b></div>
-      <div class="stat"><span>Open positions</span><b class="mono" id="o-open">--</b></div>
-      <div class="stat"><span>Day loss limit</span><b class="mono" id="o-limit">--</b></div>
+      <div class="stat"><span>Open</span><b class="mono" id="o-open">--</b></div>
+      <div class="stat"><span>Loss limit</span><b class="mono" id="o-limit">--</b></div>
     </div>
-    <div class="small mt" id="o-note"></div>
+    <div class="small ell mt" id="o-note"></div>
     <div class="orderbar">
       <div class="pill" id="o-conn"><span class="dot"></span><span>Broker</span></div>
       <button class="btn" id="b-auto">AUTO-TRADE: OFF</button>
@@ -78,34 +78,23 @@
   </section>
 </div>
 
-<section class="glass card mt14">
-  <h3>Multi-timeframe Fibonacci pivots</h3>
-  <div class="scroll-x"><table class="mtf mono">
-    <thead><tr><th class="l">TF</th><th class="l">Zone</th><th>S3</th><th>S2</th><th>S1</th><th>P</th><th>R1</th><th>R2</th><th>R3</th></tr></thead>
-    <tbody id="mtf-body"></tbody>
-  </table></div>
-</section>
-
-<section class="glass card mt14">
-  <div class="dash-h"><h3 class="m0">Live Fibonacci reversal dashboard · 15M intraday &amp; 1H structure sweeps</h3><span class="small" id="d-info"></span></div>
+<section class="glass card dashcard">
+  <div class="dash-h"><h3 class="m0">Live Fibonacci reversal dashboard</h3><span class="small ell grow" id="d-maxoi"></span><span class="small" id="d-info"></span></div>
   <div class="filters" id="d-filters"></div>
   <div class="tablewrap"><table class="mono dash">
     <thead id="d-head"></thead><tbody id="d-body"></tbody>
   </table></div>
-  <div class="small mt" id="d-maxoi"></div>
 </section>
 
 <section class="glass tools">
   <button class="btn" id="b-plan">📋 Next-day plan &amp; focus strikes</button>
-  <button class="btn" id="b-map">📐 Map strike levels (TV exact)</button>
+  <button class="btn" id="b-map">📐 Map strike levels</button>
   <span class="small">Levels from</span><select id="t-source" class="auto"></select>
-  <button class="btn" id="b-gap">⚡ Gap check (09:16)</button>
-  <a class="btn" id="b-sheet" target="_blank" rel="noopener">📊 Open Google Sheet ↗</a>
+  <button class="btn" id="b-gap">⚡ Gap check</button>
+  <a class="btn" id="b-sheet" target="_blank" rel="noopener">📊 Google Sheet ↗</a>
   <span class="small">🎯 FT filter</span>
   <span class="fg" id="t-ft"></span>
 </section>
-
-<p class="foot small">Glass dashboard · runs on its own with <code>run_glass_dashboard.command</code> · bound to this Mac only (127.0.0.1)</p>
 </div>
 
 <!-- modals -->

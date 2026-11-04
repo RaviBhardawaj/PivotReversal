@@ -84,6 +84,7 @@ function renderHeader(s) {
   const st = s.status || {};
   $("status-text").textContent = st.text || "Ready";
   $("statusbar").style.color = st.color || "";
+  $("statusbar").title = st.text || "";
   $("launcher-banner").hidden = !s.launcher_running;
   $("b-start").disabled = !s.start_enabled;
   $("b-stop").disabled = !s.stop_enabled;
@@ -106,7 +107,7 @@ function renderUnderlying(s) {
   const fl = (f) => f ? `CE ${f.ce.join(" / ") || "-"} · PE ${f.pe.join(" / ") || "-"} · P ${f.p.join(" / ") || "-"}` : "-";
   $("u-f15").textContent = "⭐ 15M · " + fl((s.focus || {})["15M"]);
   $("u-f1h").textContent = "⏳ 1H · " + fl((s.focus || {})["1H"]);
-  $("u-desc").textContent = [u.dir_desc, u.h1_action].filter(Boolean).join(" · ");
+  $("u-desc").textContent = [u.dir_desc, u.h1_action].filter(Boolean).join(" · "); $("u-desc").title = $("u-desc").textContent;
   $("u-f15").title = s.sec_15m || ""; $("u-f1h").title = s.sec_1h || "";
 }
 
@@ -128,7 +129,7 @@ function renderOrders(o) {
 
 function renderPivots(p) {
   const col = {"Weekly": "var(--p)", "Daily": "#93c5fd", "1-Hour": "var(--y)", "15-Min": "#86efac"};
-  const cell = (v, cls) => `<td class="${cls}">${v ? num(v) : "--"}</td>`;
+  const cell = (v, cls) => `<td class="${cls}">${v ? Number(v).toFixed(1) : "--"}</td>`;
   const html = (p || []).map((r) => `<tr><td class="l" style="color:${col[r.tf]}">${esc(r.tf)}</td><td class="l">${esc(r.zone)}</td>` +
     cell(r.S3, "lvl-s") + cell(r.S2, "lvl-s") + cell(r.S1, "lvl-s") + cell(r.P, "lvl-p") + cell(r.R1, "lvl-r") + cell(r.R2, "lvl-r") + cell(r.R3, "lvl-r") + "</tr>").join("");
   if ($("mtf-body").dataset.k !== html) { $("mtf-body").dataset.k = html; $("mtf-body").innerHTML = html; }

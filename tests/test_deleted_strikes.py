@@ -51,7 +51,6 @@ import headless_tk
 headless_tk.install()
 spec = importlib.util.spec_from_file_location("launcher", os.path.join(BASE, "Options-angel_live-ok.py"))
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-m.deleted_strikes.DELETED_FILE = ds.DELETED_FILE
 class Clock(datetime):
     @classmethod
     def now(cls, tz=None): return MON_10

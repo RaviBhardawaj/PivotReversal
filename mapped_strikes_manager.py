@@ -78,22 +78,26 @@ class MappedStrikesManager:
 
     def get_config(self) -> Dict[str, Any]:
         with self.lock:
+            strikes = list(self.data.get("strikes", []))
+            expiries = sorted(list({str(s.get("expiry", "")).strip().upper() for s in strikes if str(s.get("expiry", "")).strip()}))
             return {
                 "restrict_to_selected_only": self.data.get("restrict_to_selected_only", False),
                 "default_lots": self.data.get("default_lots", 1),
-                "strikes": list(self.data.get("strikes", [])),
+                "strikes": strikes,
+                "expiries": expiries,
                 "updated_at": self.data.get("updated_at", "")
             }
 
     @staticmethod
-    def make_id(symbol: str, strike: float, opt_type: str) -> str:
+    def make_id(symbol: str, strike: float, opt_type: str, expiry: str = "") -> str:
         sym = str(symbol or "NIFTY").strip().upper()
         ot = str(opt_type or "BOTH").strip().upper()
+        exp = str(expiry or "").strip().upper()
         try:
             stk = f"{float(strike):g}"
         except (ValueError, TypeError):
             stk = str(strike)
-        return f"{sym}_{stk}_{ot}"
+        return f"{sym}_{stk}_{ot}_{exp}" if exp else f"{sym}_{stk}_{ot}"
 
     def add_strike(
         self,
@@ -103,11 +107,13 @@ class MappedStrikesManager:
         lots: int = 1,
         source: str = "Manual",
         notes: str = "",
-        enabled: bool = True
+        enabled: bool = True,
+        expiry: str = ""
     ) -> Dict[str, Any]:
         with self.lock:
             sym = str(symbol or "NIFTY").strip().upper()
             ot = str(opt_type or "BOTH").strip().upper()
+            exp = str(expiry or "").strip().upper()
             if ot not in ("CE", "PE", "BOTH"):
                 ot = "BOTH"
             try:
@@ -118,12 +124,14 @@ class MappedStrikesManager:
             if stk_val <= 0:
                 raise ValueError("Invalid strike value")
 
-            item_id = self.make_id(sym, stk_val, ot)
+            item_id = self.make_id(sym, stk_val, ot, exp)
             existing = next((s for s in self.data["strikes"] if s.get("id") == item_id), None)
             
             if existing:
                 existing["lots"] = max(1, int(lots))
                 existing["enabled"] = bool(enabled)
+                if exp:
+                    existing["expiry"] = exp
                 if source:
                     existing["source"] = source
                 if notes:
@@ -135,6 +143,7 @@ class MappedStrikesManager:
                     "symbol": sym,
                     "strike": stk_val,
                     "opt_type": ot,
+                    "expiry": exp,
                     "lots": max(1, int(lots)),
                     "enabled": bool(enabled),
                     "source": source or "Manual",
@@ -143,7 +152,7 @@ class MappedStrikesManager:
                 }
                 self.data["strikes"].append(item)
 
-            self.data["strikes"].sort(key=lambda x: (x.get("symbol", ""), float(x.get("strike", 0)), x.get("opt_type", "")))
+            self.data["strikes"].sort(key=lambda x: (x.get("symbol", ""), x.get("expiry", ""), float(x.get("strike", 0)), x.get("opt_type", "")))
             self.save()
             return item
 
@@ -172,6 +181,35 @@ class MappedStrikesManager:
                 return True
             return False
 
+    def delete_strikes(self, item_ids: List[str]) -> int:
+        """Deletes multiple strikes by a list of item IDs."""
+        with self.lock:
+            ids_set = set(str(i) for i in item_ids if i)
+            initial_len = len(self.data["strikes"])
+            self.data["strikes"] = [s for s in self.data["strikes"] if s.get("id") not in ids_set]
+            deleted = initial_len - len(self.data["strikes"])
+            if deleted > 0:
+                self.save()
+            return deleted
+
+    def delete_strikes_by_expiry(self, expiry: str, symbol: Optional[str] = None) -> int:
+        """Deletes all mapped strikes for a specific expiry date (and optional symbol)."""
+        with self.lock:
+            exp_clean = str(expiry or "").strip().upper()
+            sym_clean = str(symbol or "").strip().upper() if symbol else ""
+            initial_len = len(self.data["strikes"])
+            self.data["strikes"] = [
+                s for s in self.data["strikes"]
+                if not (
+                    str(s.get("expiry", "")).strip().upper() == exp_clean
+                    and (not sym_clean or str(s.get("symbol", "")).strip().upper() == sym_clean)
+                )
+            ]
+            deleted = initial_len - len(self.data["strikes"])
+            if deleted > 0:
+                self.save()
+            return deleted
+
     def clear_strikes(self) -> int:
         with self.lock:
             count = len(self.data["strikes"])
@@ -179,7 +217,7 @@ class MappedStrikesManager:
             self.save()
             return count
 
-    def is_strike_active(self, symbol: str, strike: float, opt_type: str = "") -> bool:
+    def is_strike_active(self, symbol: str, strike: float, opt_type: str = "", expiry: str = "") -> bool:
         """
         Checks whether logic/trading is active for this strike.
         If restricted mode is OFF, returns True.
@@ -191,6 +229,7 @@ class MappedStrikesManager:
             
             sym = str(symbol or "").strip().upper()
             ot = str(opt_type or "").strip().upper()
+            exp = str(expiry or "").strip().upper()
             try:
                 stk_val = round(float(strike), 2)
             except (ValueError, TypeError):
@@ -200,6 +239,8 @@ class MappedStrikesManager:
                 if not item.get("enabled", True):
                     continue
                 if sym and item.get("symbol", "").upper() != sym:
+                    continue
+                if exp and item.get("expiry") and item.get("expiry").upper() != exp:
                     continue
                 try:
                     i_stk = round(float(item.get("strike", 0)), 2)
@@ -243,7 +284,7 @@ class MappedStrikesManager:
 
             return fallback_lots
 
-    def import_from_focus(self, focus_15m: dict, focus_1h: dict, symbol: str = "NIFTY", default_lots: int = 1) -> int:
+    def import_from_focus(self, focus_15m: dict, focus_1h: dict, symbol: str = "NIFTY", default_lots: int = 1, expiry: str = "") -> int:
         """
         Auto-populates mapped strikes from today's calculated 15M & 1H focus levels.
         """
@@ -251,6 +292,7 @@ class MappedStrikesManager:
             count = 0
             sym = str(symbol or "NIFTY").strip().upper()
             lots = max(1, int(default_lots or self.data.get("default_lots", 1)))
+            exp = str(expiry or "").strip().upper()
 
             # 1. 15M levels
             if focus_15m:
@@ -259,19 +301,19 @@ class MappedStrikesManager:
                 p_stk = focus_15m.get("P_STRIKE")
 
                 if ce1:
-                    self.add_strike(sym, ce1, "CE", lots, source="15M:R1", notes="15M Intraday R1 Reclaim")
+                    self.add_strike(sym, ce1, "CE", lots, source="15M:R1", notes="15M Intraday R1 Reclaim", expiry=exp)
                     count += 1
                 if ce2:
-                    self.add_strike(sym, ce2, "CE", lots, source="15M:R2", notes="15M Intraday R2 Reclaim")
+                    self.add_strike(sym, ce2, "CE", lots, source="15M:R2", notes="15M Intraday R2 Reclaim", expiry=exp)
                     count += 1
                 if pe1:
-                    self.add_strike(sym, pe1, "PE", lots, source="15M:S1", notes="15M Intraday S1 Reclaim")
+                    self.add_strike(sym, pe1, "PE", lots, source="15M:S1", notes="15M Intraday S1 Reclaim", expiry=exp)
                     count += 1
                 if pe2:
-                    self.add_strike(sym, pe2, "PE", lots, source="15M:S2", notes="15M Intraday S2 Reclaim")
+                    self.add_strike(sym, pe2, "PE", lots, source="15M:S2", notes="15M Intraday S2 Reclaim", expiry=exp)
                     count += 1
                 if p_stk:
-                    self.add_strike(sym, p_stk, "BOTH", lots, source="15M:P", notes="15M Intraday Pivot Zone")
+                    self.add_strike(sym, p_stk, "BOTH", lots, source="15M:P", notes="15M Intraday Pivot Zone", expiry=exp)
                     count += 1
 
             # 2. 1H levels
@@ -281,19 +323,19 @@ class MappedStrikesManager:
                 h_p = focus_1h.get("P_STRIKE")
 
                 if h_ce1:
-                    self.add_strike(sym, h_ce1, "CE", lots, source="1H:R1", notes="1H Structure R1 Reclaim")
+                    self.add_strike(sym, h_ce1, "CE", lots, source="1H:R1", notes="1H Structure R1 Reclaim", expiry=exp)
                     count += 1
                 if h_ce2:
-                    self.add_strike(sym, h_ce2, "CE", lots, source="1H:R2", notes="1H Structure R2 Reclaim")
+                    self.add_strike(sym, h_ce2, "CE", lots, source="1H:R2", notes="1H Structure R2 Reclaim", expiry=exp)
                     count += 1
                 if h_pe1:
-                    self.add_strike(sym, h_pe1, "PE", lots, source="1H:S1", notes="1H Structure S1 Reclaim")
+                    self.add_strike(sym, h_pe1, "PE", lots, source="1H:S1", notes="1H Structure S1 Reclaim", expiry=exp)
                     count += 1
                 if h_pe2:
-                    self.add_strike(sym, h_pe2, "PE", lots, source="1H:S2", notes="1H Structure S2 Reclaim")
+                    self.add_strike(sym, h_pe2, "PE", lots, source="1H:S2", notes="1H Structure S2 Reclaim", expiry=exp)
                     count += 1
                 if h_p:
-                    self.add_strike(sym, h_p, "BOTH", lots, source="1H:P", notes="1H Structure Pivot Zone")
+                    self.add_strike(sym, h_p, "BOTH", lots, source="1H:P", notes="1H Structure Pivot Zone", expiry=exp)
                     count += 1
 
             return count

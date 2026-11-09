@@ -170,7 +170,7 @@ $("d-filters").addEventListener("click", (e) => {
   }
   if (b.dataset.g) {
     const set = new Set(f.filters[b.dataset.g] || []);
-    set.has(b._k) ? set.delete(b._k) : set.add(b._k);
+    set.has(b.dataset.k) ? set.delete(b.dataset.k) : set.add(b.dataset.k);
     f.filters[b.dataset.g] = [...set];
   } else if (b.dataset.x) f[b.dataset.x] = !f[b.dataset.x];
   localFilters = f; holdFor("filters");

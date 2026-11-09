@@ -4421,7 +4421,10 @@ class FeedEngine:
     def get_monthly_expiry(self, symbol: str, ref_date: date = None) -> str:
         """Finds the monthly expiry for symbol (last expiry of current calendar month)."""
         all_exps = self.upcoming_expiries(symbol, n=12, from_day=ref_date)
-        from advanced_strategy.engine import get_monthly_expiry as _calc_m
+        try:
+            from advanced_strategy.engine import get_monthly_expiry as _calc_m
+        except ImportError:   # advance strategy removed: no monthly expiry needed
+            return ""
         return _calc_m(all_exps, ref_date)
 
     def roll_day(self, today_date: str) -> bool:

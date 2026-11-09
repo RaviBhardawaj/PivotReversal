@@ -86,7 +86,7 @@ tbody tr:hover td{background:rgba(255,255,255,.045)}
 .tag.buy{color:#86efac;border-color:rgba(74,222,128,.45);background:rgba(34,197,94,.12)}.tag.sell{color:#fca5a5;border-color:rgba(248,113,113,.45);background:rgba(239,68,68,.12)}
 .tag.tf{color:var(--mut);font-weight:600;margin-left:3px}.tag.p{color:var(--c);border-color:rgba(34,211,238,.45);margin-left:3px}
 .stk{font-weight:700;font-size:13px;margin-right:6px;color:var(--tx)}
-.sub{display:block;font-size:10.5px;color:var(--dim);margin-top:1px}
+.sub{display:block;font-size:10.5px;color:var(--dim);margin-top:1px}.sub.near{color:var(--y);font-weight:600}
 .st{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;font:600 11px var(--ui);background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--mut)}
 .st.setup{color:var(--y);border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.08)}
 .st.live{color:#fff;background:linear-gradient(135deg,#16a34a,#047857);border-color:#22c55e}.st.live.sell{background:linear-gradient(135deg,#dc2626,#991b1b);border-color:#ef4444}

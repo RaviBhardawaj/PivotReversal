@@ -89,6 +89,34 @@
 <section class="glass card mt14">
   <div class="dash-h"><h3 class="m0">Live Fibonacci reversal dashboard · 15M intraday &amp; 1H structure sweeps</h3><span class="small" id="d-info"></span></div>
   <div class="filters" id="d-filters"></div>
+  <div class="dash-strike-bar row" style="justify-content:space-between;margin-bottom:10px;padding:8px 12px;background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:12px;align-items:center;">
+    <!-- Left: Expiry Filter Selector -->
+    <div class="row" style="gap:8px;">
+      <span class="small" style="font-weight:600;color:var(--mut);">EXPIRY VIEW:</span>
+      <div id="dash-exp-pills" class="fg">
+        <button class="chip a" data-exp="ALL">ALL EXPIRIES</button>
+        <button class="chip" data-exp="CURRENT">CURRENT</button>
+        <button class="chip" data-exp="NEXT">NEXT</button>
+      </div>
+      <select id="dash-exp-select" class="auto" style="height:28px;font-size:11.5px;padding:2px 8px;font-weight:600;color:var(--c);">
+        <option value="ALL">All Expiries</option>
+      </select>
+    </div>
+
+    <!-- Right: Delete / Manage Options -->
+    <div class="row" style="gap:8px;">
+      <span class="small mono" id="dash-sel-count" style="display:none;color:var(--c);">0 selected</span>
+      <button class="btn stop" id="dash-del-selected" style="padding:5px 12px;font-size:12px;" disabled>
+        🗑️ Delete Selected (<span id="dash-del-num">0</span>)
+      </button>
+      <button class="btn stop" id="dash-del-expiry" style="padding:5px 12px;font-size:12px;" title="Delete / Exclude all strikes belonging to currently selected expiry">
+        🗑️ Delete All for Expiry (<span id="dash-exp-name">ALL</span>)
+      </button>
+      <button class="btn" id="dash-restore-btn" style="padding:5px 12px;font-size:12px;color:var(--y);border-color:rgba(251,191,36,.4);display:none;">
+        ↺ Restore Deleted (<span id="dash-restore-num">0</span>)
+      </button>
+    </div>
+  </div>
   <div class="tablewrap"><table class="mono dash">
     <thead id="d-head"></thead><tbody id="d-body"></tbody>
   </table></div>
@@ -98,6 +126,7 @@
 <section class="glass tools">
   <button class="btn" id="b-plan">📋 Next-day plan &amp; focus strikes</button>
   <button class="btn" id="b-map">📐 Map strike levels (TV exact)</button>
+  <button class="btn" id="b-mapped">🎯 Mapped strikes &amp; radar</button>
   <span class="small">Levels from</span><select id="t-source" class="auto"></select>
   <button class="btn" id="b-gap">⚡ Gap check (09:16)</button>
   <a class="btn" id="b-sheet" target="_blank" rel="noopener">📊 Open Google Sheet ↗</a>
@@ -127,6 +156,98 @@
   <div class="row"><label class="toggle"><input type="checkbox" id="mp-s3" checked> Include S3 / R3 (max 6 strikes)</label>
     <span class="grow"></span><button class="btn" id="mp-refresh">🔄 Refresh focus levels</button></div>
   <div class="tablewrap mt"><table class="mono dash"><thead id="mp-head"></thead><tbody id="mp-body"></tbody></table></div>
+</div></div>
+
+<div class="modal" id="m-mapped" hidden><div class="glass dialog wide">
+  <div class="dlg-h">
+    <h2>🎯 Mapped Strikes &amp; Radar Matrix</h2>
+    <button class="btn icon" data-close aria-label="Close">✕</button>
+  </div>
+  <div class="small muted mt">
+    Manage custom radar strikes and lot sizing. When logic restriction is enabled, the strategy scans and trades ONLY enabled strikes.
+  </div>
+
+  <!-- Top toolbar: Expiry selection & Restriction mode -->
+  <div class="row mt" style="justify-content:space-between;gap:12px;">
+    <div class="row" style="gap:10px;">
+      <label for="mm-exp-filter" style="margin:0;align-self:center;">Select Expiry:</label>
+      <select id="mm-exp-filter" class="auto" style="min-width:160px;font-weight:600;color:var(--c);">
+        <option value="ALL">All Expiries</option>
+      </select>
+      <label class="toggle" title="When ON, live orders and scanner only trade strikes enabled in this list">
+        <input type="checkbox" id="mm-restricted-toggle">
+        <span style="font-weight:600;">Logic Restriction Mode: <b id="mm-restricted-label" class="dn">OFF</b></span>
+      </label>
+    </div>
+    <div class="row" style="gap:8px;">
+      <button class="btn go" id="mm-import-btn" title="Import today's 15M and 1H focus strikes for the selected expiry">⚡ Import Focus Strikes</button>
+      <button class="btn" id="mm-toggle-add-btn">➕ Add Custom Strike</button>
+      <button class="btn go" id="mm-save-btn">💾 Save Lots</button>
+    </div>
+  </div>
+
+  <!-- Inline Add Strike Form (hidden by default) -->
+  <div id="mm-add-card" class="glass card mt" style="padding:12px;background:rgba(0,0,0,.35);" hidden>
+    <div class="small accent" style="font-weight:600;margin-bottom:8px;">Add New Strike to Radar</div>
+    <div class="row" style="gap:8px;">
+      <input id="mma-symbol" placeholder="Symbol" value="NIFTY" style="width:100px;text-transform:uppercase;">
+      <select id="mma-expiry" style="width:140px;"></select>
+      <input id="mma-strike" type="number" placeholder="Strike (e.g. 23000)" style="width:150px;">
+      <select id="mma-type" style="width:90px;">
+        <option value="CE">CE</option>
+        <option value="PE">PE</option>
+        <option value="BOTH">BOTH</option>
+      </select>
+      <input id="mma-lots" type="number" placeholder="Lots" value="1" min="1" max="50" style="width:70px;">
+      <input id="mma-note" placeholder="Note / Strategy Source" style="flex:1;min-width:140px;">
+      <button class="btn go" id="mma-submit-btn">Add Strike</button>
+      <button class="btn" id="mma-cancel-btn">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Action & Delete Bar: single & multiple delete options with expiry -->
+  <div class="row mt" style="justify-content:space-between;padding:8px 12px;background:rgba(255,255,255,.03);border-radius:10px;border:1px solid var(--line);">
+    <div class="row" style="gap:12px;">
+      <label class="toggle" style="color:var(--tx);font-size:12px;">
+        <input type="checkbox" id="mm-select-all"> Select All Visible
+      </label>
+      <span class="small mono" id="mm-sel-info">0 selected</span>
+    </div>
+    <div class="row" style="gap:8px;">
+      <button class="btn stop" id="mm-del-selected-btn" disabled>
+        🗑️ Delete Selected (<span id="mm-del-count">0</span>)
+      </button>
+      <button class="btn stop" id="mm-del-expiry-btn" title="Delete all strikes belonging to the currently selected expiry">
+        🗑️ Delete All for Expiry (<span id="mm-del-exp-name">ALL</span>)
+      </button>
+      <button class="btn danger" id="mm-clear-all-btn" title="Remove all mapped strikes">
+        🗑️ Clear All
+      </button>
+    </div>
+  </div>
+
+  <!-- Strikes Table -->
+  <div class="tablewrap mt" style="max-height:460px;">
+    <table class="mono dash">
+      <thead>
+        <tr>
+          <th style="width:36px;text-align:center;">☑</th>
+          <th style="width:60px;text-align:center;">Active</th>
+          <th class="l">Symbol</th>
+          <th class="l">Expiry</th>
+          <th>Strike</th>
+          <th class="l">Type</th>
+          <th style="width:80px;text-align:center;">Lots</th>
+          <th>LTP</th>
+          <th class="l">Source / Note</th>
+          <th style="width:80px;text-align:center;">Action</th>
+        </tr>
+      </thead>
+      <tbody id="mm-tbody">
+        <tr class="empty"><td colspan="10">Loading mapped strikes…</td></tr>
+      </tbody>
+    </table>
+  </div>
 </div></div>
 
 <div class="modal" id="m-settings" hidden><div class="glass dialog wide">

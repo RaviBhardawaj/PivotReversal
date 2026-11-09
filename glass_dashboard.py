@@ -21,6 +21,8 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import deleted_strikes   # dashboard deletes, kept on disk until restored
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "glass_web")
 DEFAULT_PORT = 8780
@@ -30,7 +32,6 @@ STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=
 
 NEXT_DAY_MODES = [
     ("PLAN", "📋 Next-day plan setups"),
-    ("ADVANCE", "🛡️ Advance strategy plan"),
     ("15M", "⭐ 15M intraday (2 CE + 2 PE)"),
     ("1H", "⏳ 1H structure (2 CE + 2 PE)"),
     ("BOTH", "🎯 Both 15M & 1H focus"),
@@ -172,6 +173,7 @@ class GlassDashboard:
             "rows": rows,
             "level_source": a.level_source_var.get(),
             "ft_filter": a.ft_tf_filter_var.get(),
+            "excluded_strikes": sorted(list(getattr(m.feed, "excluded_strikes", set()))),
             "taken_at": time.time(),
         }
 
@@ -217,6 +219,11 @@ class GlassDashboard:
             orders = {"error": str(e)}
         with self.notes_lock:
             notes = list(self.notes)
+        # Deleted strikes are hidden here (and get no new entries in ForwardTestTracker.log_entry)
+        dkeys = deleted_strikes.active_keys()
+        snap["rows"] = [r for r in (snap.get("rows") or [])
+                        if deleted_strikes.key(sym, (r.get("v") or {}).get("Expiry"), (r.get("v") or {}).get("Strike"),
+                                               (r.get("v") or {}).get("Type")) not in dkeys]
         snap.update({
             "now": datetime.now().strftime("%H:%M:%S"),
             "market_open": bool(m.is_live_market_open()),
@@ -232,6 +239,8 @@ class GlassDashboard:
             "level_sources": list(m.LEVEL_SOURCES.values()),
             "filter_groups": [{"group": g, "options": [{"key": k, "label": t} for k, t in opts]}
                               for g, opts in m.DASH_FILTER_GROUPS],
+            "excluded_strikes": self._excluded_list(),
+            "deleted_strikes": deleted_strikes.active(),
             "notes": notes,
         })
         return snap
@@ -255,7 +264,7 @@ class GlassDashboard:
                 a._on_next_expiry_selected()
             if "use_next" in body:
                 a.use_next_exp.set(bool(body["use_next"]))
-                a._refresh_display()
+                a._on_use_next_exp_toggled()   # updates which expiries may get orders
             if "strikes" in body:
                 n = max(3, min(50, int(body["strikes"])))
                 a.strikes_var.set(n)
@@ -425,7 +434,12 @@ class GlassDashboard:
 
         rows = []
 
+        dkeys = deleted_strikes.active_keys()
+
         def add(vals, ot):
+            _v = dict(zip(NEXT_DAY_COLS, [str(x) for x in vals]))
+            if deleted_strikes.key(sym, _v.get("Expiry"), _v.get("Strike"), ot) in dkeys:
+                return                          # deleted on the dashboard
             rows.append({"v": dict(zip(NEXT_DAY_COLS, [str(x) for x in vals])), "type": ot})
 
         def plan_setup_row(fg, stp, sd, ll, hh):
@@ -436,16 +450,7 @@ class GlassDashboard:
                  _fmt(stp.get("target_1")), _fmt(stp.get("target_2")), _fmt(stp.get("target_3")),
                  _fmt(stp.get("target_4")), str(stp.get("rr", "-"))] + lv(sd), ot)
 
-        if mode == "ADVANCE":
-            eng = self.app.advanced_engine
-            adv = eng.get_next_day_plan()
-            if not adv or not adv.get("setups"):
-                m_exp = getattr(feed, "monthly_expiry", "") or feed.get_monthly_expiry(sym)
-                adv = eng.build_next_day_plan(sym, m_exp, strikes_dict=strikes_dict, mtf_pivots=mtf_all, daily_focus=focus)
-            for stp in (adv or {}).get("setups", []):
-                plan_setup_row(stp.get("focus_group", "Advance"), stp, stp.get("pivots") or {},
-                               stp.get("ll_price"), stp.get("hh_price"))
-        elif mode == "PLAN" and nd_plan.get("setups"):
+        if mode == "PLAN" and nd_plan.get("setups"):
             for stp in nd_plan.get("setups", []):
                 sl = _f(stp.get("sl"))
                 plan_setup_row(f"Plan ({stp.get('timeframe', 'Intraday')})", stp,
@@ -598,6 +603,189 @@ class GlassDashboard:
         eng = self.m.live_order_manager.engine
         return {"ok": True, "orders": list(reversed(list(eng.recent)[-20:]))}
 
+    # ── mapped strikes management with expiry selection and single/multiple delete ──
+    def mapped_strikes_get(self):
+        try:
+            from mapped_strikes_manager import mapped_strikes_mgr
+            cfg = mapped_strikes_mgr.get_config()
+            snap_ctrl = self.snap.get("controls", {})
+            cur_exp = snap_ctrl.get("expiry") or ""
+            next_exp = snap_ctrl.get("next_expiry") or ""
+            all_exp = list(snap_ctrl.get("expiries") or [])
+            exp_set = set(cfg.get("expiries", []))
+            if cur_exp: exp_set.add(cur_exp)
+            if next_exp: exp_set.add(next_exp)
+            for e in all_exp:
+                if e: exp_set.add(e)
+            cfg["all_expiries"] = sorted(list(exp_set))
+            cfg["current_expiry"] = cur_exp
+            cfg["next_expiry"] = next_exp
+            # Attach live prices if available from feed
+            feed = self.m.feed
+            for s in cfg.get("strikes", []):
+                try:
+                    ot = s.get("opt_type", "CE")
+                    stk = int(float(s.get("strike", 0)))
+                    exp = s.get("expiry") or cur_exp
+                    s["ltp"] = feed.get_strike_ltp(ot, stk, exp) if feed else 0.0
+                except Exception:
+                    s["ltp"] = 0.0
+            return {"ok": True, "config": cfg}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def mapped_strikes_add(self, body):
+        try:
+            from mapped_strikes_manager import mapped_strikes_mgr
+            sym = body.get("symbol") or self.snap.get("controls", {}).get("symbol") or "NIFTY"
+            strike = float(body.get("strike", 0))
+            ot = body.get("opt_type", "BOTH")
+            lots = int(body.get("lots", 1))
+            exp = body.get("expiry") or ""
+            note = body.get("note") or ""
+            source = body.get("source") or "Manual"
+            item = mapped_strikes_mgr.add_strike(sym, strike, ot, lots, source=source, notes=note, expiry=exp)
+            return {"ok": True, "item": item, "config": mapped_strikes_mgr.get_config()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def mapped_strikes_delete(self, body):
+        try:
+            from mapped_strikes_manager import mapped_strikes_mgr
+            item_id = body.get("id") or body.get("strike_id") or ""
+            ok = mapped_strikes_mgr.delete_strike(item_id)
+            return {"ok": ok, "message": "Strike deleted" if ok else "Strike not found", "config": mapped_strikes_mgr.get_config()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def mapped_strikes_delete_multiple(self, body):
+        try:
+            from mapped_strikes_manager import mapped_strikes_mgr
+            ids = body.get("ids") or []
+            if not isinstance(ids, list):
+                ids = [ids]
+            count = mapped_strikes_mgr.delete_strikes(ids)
+            return {"ok": True, "count": count, "message": f"Deleted {count} strike(s)", "config": mapped_strikes_mgr.get_config()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def mapped_strikes_delete_expiry(self, body):
+        try:
+            from mapped_strikes_manager import mapped_strikes_mgr
+            exp = body.get("expiry") or ""
+            sym = body.get("symbol") or None
+            count = mapped_strikes_mgr.delete_strikes_by_expiry(exp, sym)
+            return {"ok": True, "count": count, "message": f"Deleted {count} strike(s) for expiry {exp}", "config": mapped_strikes_mgr.get_config()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def mapped_strikes_clear(self):
+        try:
+            from mapped_strikes_manager import mapped_strikes_mgr
+            count = mapped_strikes_mgr.clear_strikes()
+            return {"ok": True, "count": count, "message": f"Cleared {count} strike(s)", "config": mapped_strikes_mgr.get_config()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def mapped_strikes_toggle(self, body):
+        try:
+            from mapped_strikes_manager import mapped_strikes_mgr
+            enabled = bool(body.get("enabled", False))
+            val = mapped_strikes_mgr.set_restricted_mode(enabled)
+            return {"ok": True, "restricted_mode": val, "config": mapped_strikes_mgr.get_config()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def mapped_strikes_save(self, body):
+        try:
+            from mapped_strikes_manager import mapped_strikes_mgr
+            if "strikes" in body:
+                mapped_strikes_mgr.data["strikes"] = body["strikes"]
+            if "restrict_to_selected_only" in body:
+                mapped_strikes_mgr.set_restricted_mode(bool(body["restrict_to_selected_only"]))
+            if "default_lots" in body:
+                mapped_strikes_mgr.set_default_lots(int(body["default_lots"]))
+            mapped_strikes_mgr.save()
+            return {"ok": True, "message": "Saved mapped strikes configuration", "config": mapped_strikes_mgr.get_config()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def mapped_strikes_import_focus(self, body):
+        try:
+            from mapped_strikes_manager import mapped_strikes_mgr
+            feed = self.m.feed
+            c = self.snap.get("controls", {})
+            sym = body.get("symbol") or c.get("symbol") or "NIFTY"
+            exp = body.get("expiry") or c.get("expiry") or ""
+            lots = int(body.get("lots") or mapped_strikes_mgr.data.get("default_lots", 1))
+            f15 = feed.focus_15m or (feed.daily_focus or {}).get("15M", {}) or {}
+            f1h = feed.focus_1h or (feed.daily_focus or {}).get("1H", {}) or {}
+            count = mapped_strikes_mgr.import_from_focus(f15, f1h, symbol=sym, default_lots=lots, expiry=exp)
+            return {"ok": True, "imported_count": count, "message": f"Imported {count} focus strike(s) for {exp or 'all'}", "config": mapped_strikes_mgr.get_config()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── main live dashboard strikes: delete (kept until restored) ──
+    # Deletes are saved in deleted_strikes.json by deleted_strikes.py, so they survive the
+    # snapshot refresh, a page reload and an app restart. A deleted strike is hidden from the
+    # dashboard and the next-day plan, and the strategy takes no new entry on it. Open trades
+    # are not touched. ↺ Restore (one or all) brings strikes back.
+    @staticmethod
+    def _excluded_list():
+        return [f"{d['symbol']}|{d['strike']}|{d['type']}|{d['expiry']}" for d in deleted_strikes.active()]
+
+    def _sym(self, body=None):
+        return ((body or {}).get("symbol") or (self.snap.get("controls") or {}).get("symbol") or "NIFTY")
+
+    def _done(self, msg, **extra):
+        try:
+            self.on_tk(self.app._refresh_display)
+        except Exception:
+            pass
+        print(f"[DELETED STRIKES] {msg}")
+        return {"ok": True, "message": msg, "excluded": self._excluded_list(), **extra}
+
+    def strikes_delete(self, body):
+        sym, stk, ot, exp = self._sym(body), body.get("strike", 0), body.get("opt_type") or body.get("type", ""), body.get("expiry", "")
+        r = deleted_strikes.delete([{"symbol": sym, "strike": stk, "type": ot, "expiry": exp}])
+        if not r["added"] and not deleted_strikes.is_deleted(sym, ot, stk, exp):
+            return {"ok": False, "error": f"Could not delete {stk} {ot}: strike or type missing"}
+        return self._done(f"Deleted strike {deleted_strikes._norm_strike(stk)} {ot} ({exp or 'ALL'})",
+                          key=deleted_strikes.key(sym, exp, stk, ot))
+
+    def strikes_delete_multiple(self, body):
+        items = [{"symbol": s.get("symbol") or self._sym(), "strike": s.get("strike", 0),
+                  "type": s.get("opt_type") or s.get("type", ""), "expiry": s.get("expiry", "")}
+                 for s in body.get("strikes", [])]
+        r = deleted_strikes.delete(items)
+        return self._done(f"Deleted {r['added']} strike(s)", count=r["added"])
+
+    def strikes_delete_expiry(self, body):
+        exp = str(body.get("expiry", "")).strip().upper()
+        if not exp or exp == "ALL":
+            return {"ok": False, "error": "Please select a specific expiry date to delete"}
+        sym = self._sym(body)
+        items = [{"symbol": sym, "strike": (r.get("v") or {}).get("Strike"), "type": (r.get("v") or {}).get("Type"),
+                  "expiry": exp}
+                 for r in self.live_state().get("rows", [])
+                 if str((r.get("v") or {}).get("Expiry", "")).strip().upper() == exp]
+        r = deleted_strikes.delete(items)
+        return self._done(f"Deleted {r['added']} strike(s) of expiry {exp}", count=r["added"])
+
+    def strikes_restore(self, body):
+        if body.get("all"):
+            r = deleted_strikes.restore(None)
+            return self._done(f"Restored all {r['restored']} deleted strike(s)", restored=r["restored"])
+        key = body.get("key", "")
+        if "|" in key:                         # the page's own "SYM|STRIKE|TYPE|EXPIRY" key
+            sym, stk, ot, exp = (key.split("|") + ["", "", "", ""])[:4]
+            key = deleted_strikes.key(sym, exp, stk, ot)
+        elif not key:
+            key = deleted_strikes.key(self._sym(body), body.get("expiry", ""), body.get("strike", 0),
+                                      body.get("opt_type") or body.get("type", ""))
+        r = deleted_strikes.restore([key])
+        return self._done(f"Restored {r['restored']} strike(s)", restored=r["restored"])
+
 
 def _make_handler(dash):
     class Handler(BaseHTTPRequestHandler):
@@ -634,6 +822,8 @@ def _make_handler(dash):
                                                               q.get("refresh") == "1"))
                 if u.path == "/api/settings":
                     return self._send(200, dash.settings())
+                if u.path == "/api/mapped-strikes":
+                    return self._send(200, dash.mapped_strikes_get())
                 if u.path == "/api/orders/recent":
                     return self._send(200, dash.recent_orders())
                 if u.path == "/api/health":
@@ -668,6 +858,18 @@ def _make_handler(dash):
                 "/api/settings/use": lambda: dash.broker_use(body),
                 "/api/settings/save": lambda: dash.save_settings(body),
                 "/api/settings/strikes-preview": lambda: dash.strikes_preview(body),
+                "/api/mapped-strikes/add": lambda: dash.mapped_strikes_add(body),
+                "/api/mapped-strikes/delete": lambda: dash.mapped_strikes_delete(body),
+                "/api/mapped-strikes/delete-multiple": lambda: dash.mapped_strikes_delete_multiple(body),
+                "/api/mapped-strikes/delete-expiry": lambda: dash.mapped_strikes_delete_expiry(body),
+                "/api/mapped-strikes/clear": dash.mapped_strikes_clear,
+                "/api/mapped-strikes/toggle": lambda: dash.mapped_strikes_toggle(body),
+                "/api/mapped-strikes/save": lambda: dash.mapped_strikes_save(body),
+                "/api/mapped-strikes/import-focus": lambda: dash.mapped_strikes_import_focus(body),
+                "/api/strikes/delete": lambda: dash.strikes_delete(body),
+                "/api/strikes/delete-multiple": lambda: dash.strikes_delete_multiple(body),
+                "/api/strikes/delete-expiry": lambda: dash.strikes_delete_expiry(body),
+                "/api/strikes/restore": lambda: dash.strikes_restore(body),
             }
             fn = routes.get(u.path)
             if not fn:

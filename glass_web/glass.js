@@ -184,17 +184,93 @@ function cellHTML(c, v) {
   return esc(v);
 }
 
+// ── Dashboard delete bar state ────────────────────────────
+let dashSelectedKeys = new Set(); // "Symbol|Strike|Type|Expiry" keys
+let dashCurrentExpiry = "ALL";    // expiry pill selection
+
+function dashRowKey(v) {
+  return `${v.Symbol || "NIFTY"}|${v.Strike}|${v.Type}|${v.Expiry || ""}`;
+}
+
 function renderDash(s) {
   const cols = s.columns || [];
   const showPlan = filterState(s).show_plan;
   const disp = cols.filter((c) => !LV.includes(c) && !PLAN.includes(c)).concat(LV.filter((c) => cols.includes(c)), showPlan ? PLAN.filter((c) => cols.includes(c)) : []);
-  const head = "<tr>" + disp.map((c) => `<th class="${LEFT.has(c) ? "l" : ""}">${esc(c)}</th>`).join("") + "</tr>";
+
+  // Header: leading checkbox + data cols + trailing delete
+  const chkHead = `<th style="width:28px;text-align:center;"><input type="checkbox" id="dash-chk-all" title="Select all visible"></th>`;
+  const delHead = `<th style="width:38px;"></th>`;
+  const head = "<tr>" + chkHead + disp.map((c) => `<th class="${LEFT.has(c) ? "l" : ""}">${esc(c)}</th>`).join("") + delHead + "</tr>";
   if ($("d-head").dataset.k !== head) { $("d-head").dataset.k = head; $("d-head").innerHTML = head; }
+
   const rows = s.rows || [];
-  const body = rows.length ? rows.map((r) => `<tr class="${esc(r.tag)}">` + disp.map((c) => `<td class="${LEFT.has(c) ? "l" : ""}">${cellHTML(c, r.v[c] ?? "")}</td>`).join("") + "</tr>").join("")
-    : `<tr class="empty"><td colspan="${disp.length || 1}">${s.feed_running ? "No rows match the filters" : "Start the live scanner to fill the dashboard"}</td></tr>`;
+  // Filter by selected expiry pill
+  const visibleRows = dashCurrentExpiry === "ALL" ? rows : rows.filter((r) => {
+    if (dashCurrentExpiry === "CURRENT") return r.v.Expiry === (s.controls?.expiry || "");
+    if (dashCurrentExpiry === "NEXT")    return r.v.Expiry === (s.controls?.next_expiry || "");
+    return String(r.v.Expiry || "").toUpperCase() === dashCurrentExpiry;
+  });
+
+  const excl = new Set(s.excluded_strikes || []);
+
+  let body;
+  if (!visibleRows.length) {
+    const colSpan = disp.length + 2;
+    body = `<tr class="empty"><td colspan="${colSpan}">${s.feed_running ? "No rows match the filters" : "Start the live scanner to fill the dashboard"}</td></tr>`;
+  } else {
+    body = visibleRows.map((r) => {
+      const key = dashRowKey(r.v);
+      const isExcl  = excl.has(key);
+      const isSel   = dashSelectedKeys.has(key);
+      const rowStyle = isExcl ? "opacity:0.38;text-decoration:line-through;" : "";
+      const exclAttr = isExcl ? " data-excluded=\"1\"" : "";
+      const chk = `<td style="text-align:center;"><input type="checkbox" class="dash-row-chk" data-key="${esc(key)}" data-sym="${esc(r.v.Symbol||"NIFTY")}" data-strike="${esc(r.v.Strike)}" data-type="${esc(r.v.Type)}" data-expiry="${esc(r.v.Expiry||"")}"${isSel ? " checked" : ""}></td>`;
+      const cells = disp.map((c) => `<td class="${LEFT.has(c) ? "l" : ""}">${cellHTML(c, r.v[c] ?? "")}</td>`).join("");
+      const delBtn = `<td style="text-align:center;">${isExcl
+        ? `<button class="btn icon dash-restore-row" data-key="${esc(key)}" data-sym="${esc(r.v.Symbol||"NIFTY")}" data-strike="${esc(r.v.Strike)}" data-type="${esc(r.v.Type)}" data-expiry="${esc(r.v.Expiry||"")}" title="Restore this strike" style="color:var(--y);font-size:13px;">↺</button>`
+        : `<button class="btn icon stop dash-del-row" data-key="${esc(key)}" data-sym="${esc(r.v.Symbol||"NIFTY")}" data-strike="${esc(r.v.Strike)}" data-type="${esc(r.v.Type)}" data-expiry="${esc(r.v.Expiry||"")}" title="Exclude this strike" style="font-size:13px;">🗑️</button>`
+      }</td>`;
+      return `<tr class="${esc(r.tag)}" style="${rowStyle}"${exclAttr}>${chk}${cells}${delBtn}</tr>`;
+    }).join("");
+  }
+
   if ($("d-body").dataset.k !== body) { $("d-body").dataset.k = body; $("d-body").innerHTML = body; }
   $("d-maxoi").textContent = s.max_oi || "";
+
+  // Sync select-all checkbox
+  const allChk = document.getElementById("dash-chk-all");
+  if (allChk && visibleRows.length) {
+    allChk.checked = visibleRows.every((r) => dashSelectedKeys.has(dashRowKey(r.v)));
+    allChk.indeterminate = !allChk.checked && visibleRows.some((r) => dashSelectedKeys.has(dashRowKey(r.v)));
+  }
+}
+
+function renderDashBar(s) {
+  // Populate expiry dropdown from rows
+  const rows = s.rows || [];
+  const expiries = [...new Set(rows.map((r) => r.v.Expiry || "").filter(Boolean))].sort();
+  const sel = $("dash-exp-select");
+  const curVal = sel.value;
+  sel.innerHTML = `<option value="ALL">All Expiries</option>` + expiries.map((e) => `<option value="${esc(e)}"${e === curVal ? " selected" : ""}>${esc(e)}</option>`).join("");
+  if (expiries.includes(curVal)) sel.value = curVal;
+
+  // Expiry name label in bulk-delete button
+  $("dash-exp-name").textContent = dashCurrentExpiry === "ALL" ? "ALL" : dashCurrentExpiry;
+
+  // Selected count badge
+  const selCount = dashSelectedKeys.size;
+  $("dash-del-num").textContent = selCount;
+  $("dash-del-selected").disabled = selCount === 0;
+  const selCountEl = $("dash-sel-count");
+  if (selCountEl) { selCountEl.textContent = `${selCount} selected`; selCountEl.style.display = selCount ? "" : "none"; }
+
+  // Restore button visibility
+  const excl = s.excluded_strikes || [];
+  const restoreBtn = $("dash-restore-btn");
+  if (restoreBtn) {
+    restoreBtn.style.display = excl.length ? "" : "none";
+    $("dash-restore-num").textContent = excl.length;
+  }
 }
 
 function renderTools(s) {
@@ -214,7 +290,7 @@ function renderNotes(s) {
 function render(s) {
   S = s;
   renderHeader(s); renderControls(s.controls); renderUnderlying(s); renderOrders(s.orders);
-  renderPivots(s.pivots); renderFilters(s); renderDash(s); renderTools(s); renderNotes(s);
+  renderPivots(s.pivots); renderFilters(s); renderDash(s); renderDashBar(s); renderTools(s); renderNotes(s);
 }
 
 let failures = 0;
@@ -231,8 +307,16 @@ async function poll() {
     }
   }
 }
-setInterval(poll, 1000);
-poll();
+// One request at a time (a slow reply no longer stacks up more requests behind it), and no
+// polling while the tab is hidden; it refreshes at once when you come back to it.
+let pollTimer = null;
+async function pollLoop() {
+  clearTimeout(pollTimer);
+  if (!document.hidden) await poll();
+  pollTimer = setTimeout(pollLoop, 1000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pollLoop(); });
+pollLoop();
 
 // ── controls ─────────────────────────────────────────────
 const sendCtl = (key, body) => { holdFor(key, 4000); return act("/api/controls", body); };
@@ -416,3 +500,415 @@ $("s-tabs").addEventListener("click", (e) => {
   if (b.dataset.tab === "strikes" && SET) preview();
 });
 $("b-settings").addEventListener("click", openSettings);
+
+// ── Dashboard Strike Delete Bar — event wiring ───────────
+
+// Expiry pills (ALL / CURRENT / NEXT)
+document.getElementById("dash-exp-pills").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-exp]");
+  if (!b) return;
+  dashCurrentExpiry = b.dataset.exp;
+  document.querySelectorAll("#dash-exp-pills .chip").forEach((c) => c.classList.toggle("a", c === b));
+  // Sync the dropdown to "ALL" when pill is active
+  const sel = $("dash-exp-select");
+  if (dashCurrentExpiry === "ALL" || dashCurrentExpiry === "CURRENT" || dashCurrentExpiry === "NEXT") {
+    sel.value = "ALL";
+  }
+  dashSelectedKeys.clear();
+  if (S) { renderDash(S); renderDashBar(S); }
+});
+
+// Expiry dropdown
+document.getElementById("dash-exp-select").addEventListener("change", (e) => {
+  dashCurrentExpiry = e.target.value;
+  // Deactivate all pills when dropdown picks a specific expiry
+  document.querySelectorAll("#dash-exp-pills .chip").forEach((c) => c.classList.remove("a"));
+  if (dashCurrentExpiry === "ALL") {
+    const allPill = document.querySelector("#dash-exp-pills [data-exp='ALL']");
+    if (allPill) allPill.classList.add("a");
+  }
+  dashSelectedKeys.clear();
+  if (S) { renderDash(S); renderDashBar(S); }
+});
+
+// Select-all header checkbox (delegated via click on d-head)
+document.getElementById("d-head").addEventListener("change", (e) => {
+  const chk = e.target.closest("#dash-chk-all");
+  if (!chk || !S) return;
+  const rows = S.rows || [];
+  const visibleRows = dashCurrentExpiry === "ALL" ? rows : rows.filter((r) => {
+    if (dashCurrentExpiry === "CURRENT") return r.v.Expiry === (S.controls?.expiry || "");
+    if (dashCurrentExpiry === "NEXT")    return r.v.Expiry === (S.controls?.next_expiry || "");
+    return String(r.v.Expiry || "").toUpperCase() === dashCurrentExpiry;
+  });
+  if (chk.checked) visibleRows.forEach((r) => dashSelectedKeys.add(dashRowKey(r.v)));
+  else visibleRows.forEach((r) => dashSelectedKeys.delete(dashRowKey(r.v)));
+  renderDash(S); renderDashBar(S);
+});
+
+// Row checkbox change (delegated from d-body)
+document.getElementById("d-body").addEventListener("change", (e) => {
+  const chk = e.target.closest(".dash-row-chk");
+  if (!chk) return;
+  if (chk.checked) dashSelectedKeys.add(chk.dataset.key);
+  else dashSelectedKeys.delete(chk.dataset.key);
+  if (S) renderDashBar(S);
+});
+
+// Row-level single delete (🗑️)
+document.getElementById("d-body").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".dash-del-row");
+  if (!btn) return;
+  const { sym, strike, type, expiry } = btn.dataset;
+  const label = `${sym} ${strike} ${type}${expiry ? " (" + expiry + ")" : ""}`;
+  if (!(await confirmBox("Exclude Strike?", `Delete "${label}"?\n\nIt is hidden from the dashboard and gets no new entries (saved, also after a restart). Open trades are not touched. Use ↺ Restore to bring it back.`, "Exclude"))) return;
+  const r = await api("/api/strikes/delete", { symbol: sym, strike: parseFloat(strike), opt_type: type, expiry: expiry || "" });
+  if (r.ok === false) { toast(r.error || "Failed to exclude strike", true); return; }
+  dashSelectedKeys.delete(btn.dataset.key);
+  toast(`🗑️ ${label} excluded`);
+  poll();
+});
+
+// Row-level restore (↺)
+document.getElementById("d-body").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".dash-restore-row");
+  if (!btn) return;
+  const { sym, strike, type, expiry } = btn.dataset;
+  const label = `${sym} ${strike} ${type}${expiry ? " (" + expiry + ")" : ""}`;
+  const r = await api("/api/strikes/restore", { symbol: sym, strike: parseFloat(strike), opt_type: type, expiry: expiry || "" });
+  if (r.ok === false) { toast(r.error || "Failed to restore", true); return; }
+  toast(`↺ ${label} restored`);
+  poll();
+});
+
+// Delete Selected button
+document.getElementById("dash-del-selected").addEventListener("click", async () => {
+  const count = dashSelectedKeys.size;
+  if (count === 0) return;
+  if (!(await confirmBox("Exclude Selected Strikes?", `Delete ${count} selected strike(s)?\n\nThey are hidden from the dashboard and get no new entries (saved, also after a restart). Open trades are not touched. Use ↺ Restore to bring them back.`, `Exclude (${count})`))) return;
+  // Convert keys to strike objects
+  const strikes = [...dashSelectedKeys].map((k) => {
+    const [symbol, strike, opt_type, expiry] = k.split("|");
+    return { symbol, strike: parseFloat(strike), opt_type, expiry: expiry || "" };
+  });
+  const r = await api("/api/strikes/delete-multiple", { strikes });
+  if (r.ok === false) { toast(r.error || "Failed to exclude strikes", true); return; }
+  toast(`🗑️ ${count} strikes excluded`);
+  dashSelectedKeys.clear();
+  poll();
+});
+
+// Delete All for Expiry button
+document.getElementById("dash-del-expiry").addEventListener("click", async () => {
+  const exp = dashCurrentExpiry;
+  const label = exp === "ALL" ? "ALL EXPIRIES" : exp;
+  if (!(await confirmBox("Exclude All Strikes for Expiry?", `Exclude all visible strikes for "${label}" from the dashboard?\n\nUse ↺ Restore to bring them back.`, "Exclude All"))) return;
+  const symbol = S?.spot?.symbol || S?.controls?.symbol || "NIFTY";
+  const r = await api("/api/strikes/delete-expiry", { expiry: exp, symbol });
+  if (r.ok === false) { toast(r.error || "Failed to exclude expiry strikes", true); return; }
+  toast(`🗑️ All strikes for ${label} excluded`);
+  dashSelectedKeys.clear();
+  poll();
+});
+
+// Restore All Deleted button
+document.getElementById("dash-restore-btn").addEventListener("click", async () => {
+  if (!(await confirmBox("Restore All Excluded Strikes?", "Bring back all excluded strikes to the live dashboard?", "Restore All"))) return;
+  const r = await api("/api/strikes/restore", { all: true });
+  if (r.ok === false) { toast(r.error || "Restore failed", true); return; }
+  toast("↺ All strikes restored");
+  dashSelectedKeys.clear();
+  poll();
+});
+
+// ── mapped strikes & radar ───────────────────────────────
+let mappedConfig = null;
+let mmSelectedIds = new Set();
+let mmCurrentExp = "ALL";
+
+async function loadMappedStrikes() {
+  $("mm-tbody").innerHTML = '<tr class="empty"><td colspan="10">Loading mapped strikes…</td></tr>';
+  const r = await api("/api/mapped-strikes");
+  if (r.ok === false) {
+    $("mm-tbody").innerHTML = `<tr class="empty"><td colspan="10">${esc(r.error || "Failed to load")}</td></tr>`;
+    return;
+  }
+  mappedConfig = r.config || {strikes: []};
+  
+  // Expiry dropdown
+  const expList = mappedConfig.all_expiries || [];
+  const expOpts = ["ALL", ...expList.filter((e) => e && e !== "ALL")];
+  const curExpVal = expOpts.includes(mmCurrentExp) ? mmCurrentExp : "ALL";
+  $("mm-exp-filter").innerHTML = expOpts.map((e) => `<option value="${esc(e)}"${e === curExpVal ? " selected" : ""}>${e === "ALL" ? "All Expiries" : esc(e)}</option>`).join("");
+  mmCurrentExp = curExpVal;
+
+  // Add card expiry options
+  $("mma-expiry").innerHTML = expList.map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join("") || '<option value="">(None)</option>';
+  if (mappedConfig.current_expiry && expList.includes(mappedConfig.current_expiry)) {
+    $("mma-expiry").value = mappedConfig.current_expiry;
+  }
+
+  // Symbol default
+  if (S && S.spot && S.spot.symbol) {
+    $("mma-symbol").value = S.spot.symbol;
+  }
+
+  // Restriction mode toggle
+  const restr = Boolean(mappedConfig.restrict_to_selected_only);
+  $("mm-restricted-toggle").checked = restr;
+  $("mm-restricted-label").textContent = restr ? "ON" : "OFF";
+  $("mm-restricted-label").className = restr ? "up" : "dn";
+
+  renderMappedTable();
+}
+
+function renderMappedTable() {
+  if (!mappedConfig) return;
+  const strikes = mappedConfig.strikes || [];
+  const filtered = strikes.filter((s) => {
+    if (mmCurrentExp === "ALL") return true;
+    return String(s.expiry || "").toUpperCase() === mmCurrentExp.toUpperCase();
+  });
+
+  $("mm-del-exp-name").textContent = mmCurrentExp;
+  $("mm-select-all").checked = filtered.length > 0 && filtered.every((s) => mmSelectedIds.has(s.id));
+
+  updateDelSelectedBtn();
+
+  if (!filtered.length) {
+    $("mm-tbody").innerHTML = `<tr class="empty"><td colspan="10">No strikes mapped${mmCurrentExp !== "ALL" ? " for expiry " + esc(mmCurrentExp) : ""}. Click ⚡ Import Focus Strikes or ➕ Add Custom Strike.</td></tr>`;
+    return;
+  }
+
+  $("mm-tbody").innerHTML = filtered.map((s) => {
+    const isChecked = mmSelectedIds.has(s.id);
+    const ot = esc(s.opt_type || "CE");
+    const otClass = ot === "PE" ? "pe" : (ot === "CE" ? "ce" : "buy");
+    const ltpStr = s.ltp ? num(s.ltp, 2) : "-";
+    return `<tr data-id="${esc(s.id)}" style="${s.enabled ? "" : "opacity:0.55;"}">
+      <td style="text-align:center;"><input type="checkbox" class="mm-chk" data-id="${esc(s.id)}"${isChecked ? " checked" : ""}></td>
+      <td style="text-align:center;"><label class="toggle" style="margin:0;"><input type="checkbox" class="mm-act" data-id="${esc(s.id)}"${s.enabled ? " checked" : ""}></label></td>
+      <td class="l"><b>${esc(s.symbol || "NIFTY")}</b></td>
+      <td class="l mono small">${esc(s.expiry || "-")}</td>
+      <td><b>${esc(s.strike)}</b></td>
+      <td class="l"><span class="tag ${otClass}">${ot}</span></td>
+      <td style="text-align:center;"><input type="number" class="mm-lot-inp" data-id="${esc(s.id)}" value="${s.lots || 1}" min="1" max="50" style="width:58px;text-align:center;padding:4px 6px;"></td>
+      <td class="mono ${s.ltp ? "accent" : "muted"}">${ltpStr}</td>
+      <td class="l small muted" title="${esc(s.notes || "")}">${esc(s.source || "Manual")}: ${esc(s.notes || "-")}</td>
+      <td style="text-align:center;"><button class="btn icon stop mm-del-btn" data-id="${esc(s.id)}" title="Delete Strike">🗑️</button></td>
+    </tr>`;
+  }).join("");
+}
+
+function updateDelSelectedBtn() {
+  const count = mmSelectedIds.size;
+  $("mm-del-count").textContent = count;
+  $("mm-del-selected-btn").disabled = count === 0;
+  $("mm-sel-info").textContent = `${count} selected`;
+}
+
+// ── Event bindings for Mapped Strikes modal ──
+$("b-mapped").addEventListener("click", () => {
+  openModal("m-mapped");
+  mmSelectedIds.clear();
+  loadMappedStrikes();
+});
+
+$("mm-exp-filter").addEventListener("change", (e) => {
+  mmCurrentExp = e.target.value;
+  renderMappedTable();
+});
+
+$("mm-restricted-toggle").addEventListener("change", async (e) => {
+  const on = e.target.checked;
+  const r = await api("/api/mapped-strikes/toggle", {enabled: on});
+  if (r.ok === false) {
+    toast(r.error || "Toggle failed", true);
+    e.target.checked = !on;
+    return;
+  }
+  mappedConfig = r.config;
+  $("mm-restricted-label").textContent = on ? "ON" : "OFF";
+  $("mm-restricted-label").className = on ? "up" : "dn";
+  toast(`Restriction mode: ${on ? "ON (Only mapped strikes traded)" : "OFF (All focus strikes traded)"}`);
+});
+
+$("mm-toggle-add-btn").addEventListener("click", () => {
+  const card = $("mm-add-card");
+  card.hidden = !card.hidden;
+});
+
+$("mma-cancel-btn").addEventListener("click", () => {
+  $("mm-add-card").hidden = true;
+});
+
+$("mma-submit-btn").addEventListener("click", async () => {
+  const sym = $("mma-symbol").value.trim().toUpperCase() || "NIFTY";
+  const exp = $("mma-expiry").value.trim().toUpperCase();
+  const stk = parseFloat($("mma-strike").value);
+  const ot = $("mma-type").value;
+  const lots = parseInt($("mma-lots").value, 10) || 1;
+  const note = $("mma-note").value.trim();
+
+  if (!stk || stk <= 0) {
+    toast("Please enter a valid strike price", true);
+    return;
+  }
+
+  const r = await api("/api/mapped-strikes/add", {symbol: sym, expiry: exp, strike: stk, opt_type: ot, lots, note});
+  if (r.ok === false) {
+    toast(r.error || "Failed to add strike", true);
+    return;
+  }
+  mappedConfig = r.config;
+  $("mma-strike").value = "";
+  $("mma-note").value = "";
+  $("mm-add-card").hidden = true;
+  toast(`✅ Added ${sym} ${stk} ${ot} (${exp || "All"})`);
+  loadMappedStrikes();
+});
+
+$("mm-select-all").addEventListener("change", (e) => {
+  const checked = e.target.checked;
+  const filtered = (mappedConfig?.strikes || []).filter((s) => {
+    if (mmCurrentExp === "ALL") return true;
+    return String(s.expiry || "").toUpperCase() === mmCurrentExp.toUpperCase();
+  });
+  filtered.forEach((s) => {
+    if (checked) mmSelectedIds.add(s.id);
+    else mmSelectedIds.delete(s.id);
+  });
+  renderMappedTable();
+});
+
+// Delegation for table checkboxes, lot inputs, active toggle & single delete
+$("mm-tbody").addEventListener("change", (e) => {
+  const chk = e.target.closest(".mm-chk");
+  if (chk) {
+    const id = chk.dataset.id;
+    if (chk.checked) mmSelectedIds.add(id);
+    else mmSelectedIds.delete(id);
+    updateDelSelectedBtn();
+    return;
+  }
+  const actInp = e.target.closest(".mm-act");
+  if (actInp) {
+    const id = actInp.dataset.id;
+    const st = (mappedConfig?.strikes || []).find((x) => x.id === id);
+    if (st) {
+      st.enabled = actInp.checked;
+      const tr = actInp.closest("tr");
+      if (tr) tr.style.opacity = st.enabled ? "1" : "0.55";
+    }
+    return;
+  }
+  const lotInp = e.target.closest(".mm-lot-inp");
+  if (lotInp) {
+    const id = lotInp.dataset.id;
+    const val = parseInt(lotInp.value, 10);
+    const st = (mappedConfig?.strikes || []).find((x) => x.id === id);
+    if (st && val > 0) st.lots = val;
+    return;
+  }
+});
+
+// Single Delete Button (🗑️ in row)
+$("mm-tbody").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".mm-del-btn");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const st = (mappedConfig?.strikes || []).find((x) => x.id === id);
+  const label = st ? `${st.symbol} ${st.strike} ${st.opt_type} (${st.expiry || "ALL"})` : id;
+  if (!(await confirmBox("Delete Strike?", `Remove ${label} from mapped radar?`, "Delete"))) return;
+  
+  const r = await api("/api/mapped-strikes/delete", {id});
+  if (r.ok === false) {
+    toast(r.error || "Delete failed", true);
+    return;
+  }
+  mmSelectedIds.delete(id);
+  mappedConfig = r.config;
+  toast("🗑️ Strike deleted");
+  renderMappedTable();
+});
+
+// Multiple Delete: Delete Selected
+$("mm-del-selected-btn").addEventListener("click", async () => {
+  const count = mmSelectedIds.size;
+  if (count === 0) return;
+  if (!(await confirmBox("Delete Selected Strikes?", `Delete ${count} selected strike(s) from mapped radar?`, `Delete (${count})`))) return;
+
+  const r = await api("/api/mapped-strikes/delete-multiple", {ids: [...mmSelectedIds]});
+  if (r.ok === false) {
+    toast(r.error || "Failed to delete strikes", true);
+    return;
+  }
+  mmSelectedIds.clear();
+  mappedConfig = r.config;
+  toast(`🗑️ ${r.message || "Selected strikes deleted"}`);
+  renderMappedTable();
+});
+
+// Bulk Delete by Expiry: Delete All for Expiry
+$("mm-del-expiry-btn").addEventListener("click", async () => {
+  if (!(await confirmBox("Delete All for Expiry?", `Delete all mapped strikes for expiry "${mmCurrentExp}"?`, "Delete Expiry"))) return;
+
+  const r = await api("/api/mapped-strikes/delete-expiry", {
+    expiry: mmCurrentExp,
+    symbol: S?.spot?.symbol || "NIFTY"
+  });
+  if (r.ok === false) {
+    toast(r.error || "Delete failed", true);
+    return;
+  }
+  mmSelectedIds.clear();
+  mappedConfig = r.config;
+  toast(`🗑️ ${r.message || "Deleted strikes for expiry"}`);
+  loadMappedStrikes();
+});
+
+// Clear All
+$("mm-clear-all-btn").addEventListener("click", async () => {
+  if (!(await confirmBox("Clear All Mapped Strikes?", "Are you sure you want to remove ALL mapped strikes across all expiries?", "Clear All"))) return;
+  const r = await api("/api/mapped-strikes/clear", {});
+  if (r.ok === false) {
+    toast(r.error || "Clear failed", true);
+    return;
+  }
+  mmSelectedIds.clear();
+  mappedConfig = r.config;
+  toast("🗑️ Cleared all mapped strikes");
+  loadMappedStrikes();
+});
+
+// Import Focus Strikes
+$("mm-import-btn").addEventListener("click", async () => {
+  const exp = mmCurrentExp === "ALL" ? "" : mmCurrentExp;
+  const r = await api("/api/mapped-strikes/import-focus", {
+    symbol: S?.spot?.symbol || "NIFTY",
+    expiry: exp
+  });
+  if (r.ok === false) {
+    toast(r.error || "Import failed", true);
+    return;
+  }
+  mappedConfig = r.config;
+  toast(`⚡ ${r.message || "Imported focus strikes"}`);
+  loadMappedStrikes();
+});
+
+// Save Lots & Strikes
+$("mm-save-btn").addEventListener("click", async () => {
+  if (!mappedConfig) return;
+  const r = await api("/api/mapped-strikes/save", {
+    strikes: mappedConfig.strikes,
+    restrict_to_selected_only: mappedConfig.restrict_to_selected_only,
+    default_lots: mappedConfig.default_lots
+  });
+  if (r.ok === false) {
+    toast(r.error || "Save failed", true);
+    return;
+  }
+  mappedConfig = r.config;
+  toast("💾 Saved mapped strikes and lots to disk");
+});

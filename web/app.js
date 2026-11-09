@@ -273,13 +273,11 @@
       showToast('Connected to Quantum Terminal Live Feed', 'green');
     };
 
+    // Draw at most once per frame and not at all while the tab is hidden: only the newest
+    // message is kept, and it is drawn when the tab is shown again.
     state.ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        handleWsMessage(data);
-      } catch (err) {
-        console.error('WS parse error:', err);
-      }
+      state.pendingWs = event.data;
+      if (!document.hidden && !state.wsFrame) state.wsFrame = requestAnimationFrame(flushWs);
     };
 
     state.ws.onclose = () => {
@@ -316,6 +314,21 @@
   }
 
   // ── Handle Incoming WebSocket & Snapshot Messages ──
+  function flushWs() {
+    state.wsFrame = 0;
+    const raw = state.pendingWs;
+    state.pendingWs = null;
+    if (!raw) return;
+    try {
+      handleWsMessage(JSON.parse(raw));
+    } catch (err) {
+      console.error('WS parse error:', err);
+    }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.pendingWs && !state.wsFrame) state.wsFrame = requestAnimationFrame(flushWs);
+  });
+
   function handleWsMessage(data) {
     if (data.type === 'TICK_UPDATE') {
       updateHeaderAndSpot(data);
@@ -1023,7 +1036,8 @@
         const res = await fetch('/api/planner/generate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol: state.symbol })
+          // current-expiry orders by default; next-expiry ones only with the NEXT expiry selected
+          body: JSON.stringify({ symbol: state.symbol, include_next: state.plannerExpiry === 'NEXT' })
         });
         const data = await res.json();
         if (data.success) {
@@ -1961,10 +1975,10 @@
           const res = await fetch('/api/mapped-strikes/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ strike_id: id })
+            body: JSON.stringify({ strike_id: id, id: id })
           });
           const resp = await res.json();
-          if (resp.status === 'success' && resp.config) {
+          if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
             state.mappedConfig = resp.config;
             updateMappedStrikesSummary(state.mappedConfig);
             renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
@@ -2012,7 +2026,7 @@
           body: JSON.stringify({ symbol: sym, lots })
         });
         const resp = await res.json();
-        if (resp.status === 'success' && resp.config) {
+        if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
           state.mappedConfig = resp.config;
           updateMappedStrikesSummary(state.mappedConfig);
           renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
@@ -2038,7 +2052,7 @@
           })
         });
         const resp = await res.json();
-        if (resp.status === 'success' && resp.config) {
+        if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
           state.mappedConfig = resp.config;
           updateMappedStrikesSummary(state.mappedConfig);
           renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
@@ -2059,7 +2073,7 @@
           headers: { 'Content-Type': 'application/json' }
         });
         const resp = await res.json();
-        if (resp.status === 'success' && resp.config) {
+        if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
           state.mappedConfig = resp.config;
           updateMappedStrikesSummary(state.mappedConfig);
           renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
@@ -2097,7 +2111,7 @@
           })
         });
         const resp = await res.json();
-        if (resp.status === 'success' && resp.config) {
+        if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
           state.mappedConfig = resp.config;
           updateMappedStrikesSummary(state.mappedConfig);
           renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);

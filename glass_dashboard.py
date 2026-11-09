@@ -126,8 +126,21 @@ class GlassDashboard:
                 self.app._tk_after(500, tick)
         self.app._tk_after(500, tick)
 
+    def _current_expiry_only(self):
+        """The dashboard lists the current expiry only: keep the launcher's expiry ticks on
+        'Current', so next / far expiry rows are never listed. Runs on the Tk thread."""
+        a = self.app
+        try:
+            if a.exp_next_var.get() or not a.exp_cur_var.get():
+                a.exp_cur_var.set(True)
+                a.exp_next_var.set(False)
+                a._on_dash_filter_changed()
+        except Exception:
+            pass
+
     def _take_snapshot(self):
         a, m = self.app, self.m
+        self._current_expiry_only()
         tree = a.tree
         cols = list(tree["columns"])
         rows = []
@@ -173,7 +186,6 @@ class GlassDashboard:
             "rows": rows,
             "level_source": a.level_source_var.get(),
             "ft_filter": a.ft_tf_filter_var.get(),
-            "excluded_strikes": sorted(list(getattr(m.feed, "excluded_strikes", set()))),
             "taken_at": time.time(),
         }
 
@@ -220,10 +232,21 @@ class GlassDashboard:
         with self.notes_lock:
             notes = list(self.notes)
         # Deleted strikes are hidden here (and get no new entries in ForwardTestTracker.log_entry)
+        # Current expiry only (no next / far expiry rows); deleted strikes stay hidden. Each row
+        # carries its contract key "k" so the page can update rows in place.
+        cur_exp = str((snap.get("controls") or {}).get("expiry") or "").strip().upper()
         dkeys = deleted_strikes.active_keys()
-        snap["rows"] = [r for r in (snap.get("rows") or [])
-                        if deleted_strikes.key(sym, (r.get("v") or {}).get("Expiry"), (r.get("v") or {}).get("Strike"),
-                                               (r.get("v") or {}).get("Type")) not in dkeys]
+        rows = []
+        for r in snap.get("rows") or []:
+            v = r.get("v") or {}
+            r_exp = str(v.get("Expiry") or "").strip().upper()
+            if cur_exp and r_exp not in ("", "-", cur_exp):
+                continue
+            k = deleted_strikes.key(sym, v.get("Expiry"), v.get("Strike"), v.get("Type"))
+            if k not in dkeys:
+                rows.append({**r, "k": f"{k}|{v.get('Side', '')}"})
+        snap["rows"] = rows
+        snap["current_expiry"] = cur_exp
         snap.update({
             "now": datetime.now().strftime("%H:%M:%S"),
             "market_open": bool(m.is_live_market_open()),
@@ -298,16 +321,15 @@ class GlassDashboard:
         def run():
             if body.get("clear"):
                 a._clear_dash_filters()
+                self._current_expiry_only()
                 return {"ok": True}
             for g in body.get("filters", {}) or {}:
                 ticked = set(body["filters"][g] or [])
                 for (grp, key), var in a.dash_filter_vars.items():
                     if grp == g:
                         var.set(key in ticked)
-            if "exp_cur" in body:
-                a.exp_cur_var.set(bool(body["exp_cur"]))
-            if "exp_next" in body:
-                a.exp_next_var.set(bool(body["exp_next"]))
+            a.exp_cur_var.set(True)      # current expiry only
+            a.exp_next_var.set(False)
             if "show_plan" in body:
                 a.show_plan_cols_var.set(bool(body["show_plan"]))
             a._on_dash_filter_changed()
@@ -510,6 +532,7 @@ class GlassDashboard:
             "focus_ce": (nd_plan.get("resistance") or {}).get("focus_ce", []),
             "focus_pe": (nd_plan.get("support") or {}).get("focus_pe", []),
             "columns": NEXT_DAY_COLS, "rows": rows,
+            "deleted_strikes": deleted_strikes.active(),
         }
 
     # ── settings (same four tabs as the launcher's ⚙ Settings window) ──
@@ -772,6 +795,16 @@ class GlassDashboard:
         r = deleted_strikes.delete(items)
         return self._done(f"Deleted {r['added']} strike(s) of expiry {exp}", count=r["added"])
 
+    def strikes_regenerate(self, body):
+        """↻ Regenerate: bring every deleted strike back and rebuild today's strike levels."""
+        r = deleted_strikes.restore(None)
+        try:
+            self.on_tk(self.app._on_map_strike_levels_click)
+            msg = f"Restored {r['restored']} deleted strike(s); rebuilding strike levels (the status line shows progress)"
+        except Exception as e:
+            msg = f"Restored {r['restored']} deleted strike(s); level rebuild not started: {e}"
+        return self._done(msg, restored=r["restored"])
+
     def strikes_restore(self, body):
         if body.get("all"):
             r = deleted_strikes.restore(None)
@@ -870,6 +903,7 @@ def _make_handler(dash):
                 "/api/strikes/delete-multiple": lambda: dash.strikes_delete_multiple(body),
                 "/api/strikes/delete-expiry": lambda: dash.strikes_delete_expiry(body),
                 "/api/strikes/restore": lambda: dash.strikes_restore(body),
+                "/api/strikes/regenerate": lambda: dash.strikes_regenerate(body),
             }
             fn = routes.get(u.path)
             if not fn:

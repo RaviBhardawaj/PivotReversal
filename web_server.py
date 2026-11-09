@@ -108,7 +108,47 @@ class ConnectionManager:
         for dc in dead_connections:
             self.disconnect(dc)
 
+    async def broadcast_text(self, text: str):
+        dead_connections = []
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(text)
+            except Exception:
+                dead_connections.append(connection)
+        for dc in dead_connections:
+            self.disconnect(dc)
+
 manager = ConnectionManager()
+
+
+# ── Read-once file cache ───────────────────────────────────────
+# The dashboard payload is rebuilt for every broadcast; re-reading and re-parsing the same files
+# each time cost far more than building the payload. A file is read again only when it changes.
+_FILE_CACHE: Dict[str, Any] = {}
+
+
+def _cached_file(path: str, parse):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _FILE_CACHE.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    val = parse(path)
+    _FILE_CACHE[path] = (key, val)
+    return val
+
+
+def _read_json(path):
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def _read_csv_rows(path):
+    with open(path, "r", newline="") as f:
+        return list(csv.DictReader(f))
 
 # ── Pydantic Request Models ────────────────────────────────────
 class StartFeedRequest(BaseModel):
@@ -478,17 +518,16 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
     opt_piv_cache = {}
     if os.path.exists(cache_file):
         try:
-            with open(cache_file, "r") as cf:
-                _cj = json.load(cf)
-                # only levels built for the session TradingView shows now
-                c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
-                for t_id, s_info in c_json.items():
-                    ot_k = s_info.get("opt_type", "CE")
-                    stk_k = int(s_info.get("strike", 0))
-                    exp_k = s_info.get("expiry", "")
-                    opt_piv_cache[(ot_k, stk_k, exp_k)] = s_info
-                    if exp_k == curr_exp:
-                        opt_piv_cache[(ot_k, stk_k)] = s_info
+            _cj = _cached_file(cache_file, _read_json) or {}
+            # only levels built for the session TradingView shows now
+            c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+            for t_id, s_info in c_json.items():
+                ot_k = s_info.get("opt_type", "CE")
+                stk_k = int(s_info.get("strike", 0))
+                exp_k = s_info.get("expiry", "")
+                opt_piv_cache[(ot_k, stk_k, exp_k)] = s_info
+                if exp_k == curr_exp:
+                    opt_piv_cache[(ot_k, stk_k)] = s_info
         except Exception:
             pass
 
@@ -497,12 +536,10 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
     closed_trades_raw = []
     if os.path.exists(FORWARD_TEST_FILE):
         try:
-            with open(FORWARD_TEST_FILE, "r", newline="") as f:
-                reader = csv.DictReader(f)
-                for r in reader:
-                    if r.get("Status", "").strip() == "CLOSED":
-                        if r.get("Date", "").strip() == today_date:
-                            closed_trades_raw.append(r)
+            for r in _cached_file(FORWARD_TEST_FILE, _read_csv_rows) or []:
+                if r.get("Status", "").strip() == "CLOSED":
+                    if r.get("Date", "").strip() == today_date:
+                        closed_trades_raw.append(dict(r))
         except Exception as _fe:
             print(f"[CSV READ ERROR] {_fe}")
 
@@ -1027,17 +1064,26 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
     }
 
 # ── Background Broadcast Worker ────────────────────────────────
+BROADCAST_INTERVAL_S = float(os.getenv("WEB_BROADCAST_INTERVAL", "1.0"))
+
+
 async def broadcast_loop():
-    """Broadcasts 100-200ms real-time state to connected WebSocket clients."""
+    """Sends the dashboard state to connected WebSocket clients once a second.
+
+    It used to rebuild and send the full payload every 100 ms on the event loop, which kept a CPU
+    core busy and made the browser redraw every table ten times a second. The payload is now built
+    in a worker thread (so API calls stay responsive), serialised once, and shared by all clients.
+    """
     while True:
+        started = time.monotonic()
         try:
             if manager.active_connections:
                 req_sym = getattr(feed, 'symbol', 'NIFTY')
-                payload = get_dashboard_payload(requested_sym=req_sym, requested_exp="ALL")
-                await manager.broadcast(payload)
+                payload = await asyncio.to_thread(get_dashboard_payload, requested_sym=req_sym, requested_exp="ALL")
+                await manager.broadcast_text(json.dumps(payload, default=str))
         except Exception as e:
             print(f"[WS BROADCAST] error: {e}")
-        await asyncio.sleep(0.1)   # 100ms ultra-fast real-time tick interval
+        await asyncio.sleep(max(0.1, BROADCAST_INTERVAL_S - (time.monotonic() - started)))
 
 # ── Background EOD Scheduler (3:00 PM Square-off & 3:45 PM Next-Day) ──
 def background_eod_scheduler():
@@ -1491,12 +1537,11 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
     opt_piv_cache = {}
     if os.path.exists(cache_file):
         try:
-            with open(cache_file, "r") as cf:
-                _cj = json.load(cf)
-                # only levels built for the session TradingView shows now
-                c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
-                for t_id, s_info in c_json.items():
-                    opt_piv_cache[(s_info.get("opt_type", "CE"), int(s_info.get("strike", 0)), s_info.get("expiry", ""))] = s_info
+            _cj = _cached_file(cache_file, _read_json) or {}
+            # only levels built for the session TradingView shows now
+            c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+            for t_id, s_info in c_json.items():
+                opt_piv_cache[(s_info.get("opt_type", "CE"), int(s_info.get("strike", 0)), s_info.get("expiry", ""))] = s_info
         except Exception:
             pass
 

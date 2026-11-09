@@ -273,13 +273,11 @@
       showToast('Connected to Quantum Terminal Live Feed', 'green');
     };
 
+    // Draw at most once per frame and not at all while the tab is hidden: only the newest
+    // message is kept, and it is drawn when the tab is shown again.
     state.ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        handleWsMessage(data);
-      } catch (err) {
-        console.error('WS parse error:', err);
-      }
+      state.pendingWs = event.data;
+      if (!document.hidden && !state.wsFrame) state.wsFrame = requestAnimationFrame(flushWs);
     };
 
     state.ws.onclose = () => {
@@ -316,6 +314,21 @@
   }
 
   // ── Handle Incoming WebSocket & Snapshot Messages ──
+  function flushWs() {
+    state.wsFrame = 0;
+    const raw = state.pendingWs;
+    state.pendingWs = null;
+    if (!raw) return;
+    try {
+      handleWsMessage(JSON.parse(raw));
+    } catch (err) {
+      console.error('WS parse error:', err);
+    }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.pendingWs && !state.wsFrame) state.wsFrame = requestAnimationFrame(flushWs);
+  });
+
   function handleWsMessage(data) {
     if (data.type === 'TICK_UPDATE') {
       updateHeaderAndSpot(data);

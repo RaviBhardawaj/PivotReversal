@@ -54,4 +54,19 @@ assert entry(t, NXT, 22500) is not None
 assert entry(t, FAR, 22550) is None
 assert orders == [CUR, NXT], orders
 print("C ticked: next-expiry order placed, far expiry still skipped: OK")
+
+# D. open next/far-expiry trades are removed once the gate is set (not live-order ones)
+t2=app.ForwardTestTracker(os.path.join(tempfile.mkdtemp(),"fwd.csv")); t2.paper_only=True
+a=entry(t2, CUR, 22600); b=entry(t2, NXT, 22650); c=entry(t2, FAR, 22700)
+c["Order_ID"]="QUEUED"                           # a real broker order: never dropped silently
+t2.set_allowed_expiries(app.allowed_entry_expiries(CUR, NXT, False))
+left=sorted(x["Expiry"] for x in t2.get_active_trades())
+assert left==sorted([CUR, FAR]), left
+assert b["Status"]=="REMOVED"
+import csv as _c
+rows={r["Trade_ID"]:r for r in _c.DictReader(open(t2.filepath))}
+assert rows[b["Trade_ID"]]["Status"]=="REMOVED" and rows[a["Trade_ID"]]["Status"]=="ACTIVE"
+t3=app.ForwardTestTracker(t2.filepath); t3.paper_only=True       # restart: removed trade stays gone
+assert NXT not in {x["Expiry"] for x in t3.get_active_trades()}, t3.get_active_trades()
+print("D open next-expiry trade removed (REMOVED in the log, gone after restart); live-order trade kept: OK")
 print("NEXT EXPIRY GATE TESTS PASSED")

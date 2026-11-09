@@ -2081,9 +2081,44 @@ class ForwardTestTracker:
         self._init_file()
 
     def set_allowed_expiries(self, expiries):
-        """Restrict new entries to these expiries (None or empty = no restriction)."""
+        """Restrict new entries to these expiries (None or empty = no restriction), and take
+        open trades of any other expiry (next / far) off the dashboard."""
         allowed = {str(e).strip().upper() for e in (expiries or []) if str(e or "").strip()}
         self.allowed_expiries = allowed or None
+        if self.allowed_expiries:
+            self.remove_disallowed_open()
+
+    @staticmethod
+    def _has_live_order(t) -> bool:
+        oid = str(t.get('Order_ID', '') or '').strip()
+        low = oid.lower()
+        return bool(oid) and not (low.startswith('no order') or low.startswith('backfilled')
+                                  or low.startswith('removed'))
+
+    def remove_disallowed_open(self) -> list:
+        """Open trades on an expiry that may not be traded (next / far) are removed: off the
+        dashboard and the open-trades snapshot, marked REMOVED in the trade log (not CLOSED, so
+        they never count in P&L). A trade with a live broker order is kept, so a real position
+        is never left unwatched."""
+        removed = []
+        for t in self.get_active_trades():
+            if self.expiry_allowed(t.get('Expiry', '')):
+                continue
+            if self._has_live_order(t):
+                print(f"⚠️  [FWD TEST] Kept {t.get('Type')} {t.get('Strike')} {t.get('Expiry')}: it has a live order ({t.get('Order_ID')})")
+                continue
+            t['Status'] = 'REMOVED'
+            t['Exit_Reason'] = 'Removed: not current expiry'
+            t['Exit_Time'] = datetime.now().strftime('%H:%M:%S')
+            for k in [k for k, v in self.active_trades.items() if v is t]:
+                del self.active_trades[k]
+            self._update_trade_in_file(t)
+            removed.append(t)
+        if removed:
+            self._save_snapshot()
+            print(f"🧹 [FWD TEST] Removed {len(removed)} open next/far-expiry trade(s): "
+                  + ", ".join(f"{t.get('Type')} {t.get('Strike')} {t.get('Expiry')}" for t in removed))
+        return removed
 
     def expiry_allowed(self, expiry) -> bool:
         if not self.allowed_expiries:
@@ -9196,14 +9231,12 @@ class ControlPanel:
             expiries_to_load.append(next_exp)
         self._apply_expiry_gate()
 
-        # Always include monthly expiry for Advance Strategy (1H Structure)
+        # Monthly expiry: remembered, but no longer subscribed when it is not one of the above
+        # (a far expiry gets no orders, and fewer subscriptions keep the dashboard fast)
         m_exp = feed.get_monthly_expiry(symbol)
         if m_exp:
             feed.monthly_expiry = m_exp
             feed.advanced_engine.monthly_expiry = m_exp
-            if m_exp not in expiries_to_load:
-                expiries_to_load.append(m_exp)
-                print(f"[START] Added Monthly Expiry for Advance Strategy: {m_exp}")
 
         self._set_status("Connecting & setting up Google Sheet...")
         for b in getattr(self, "_start_buttons", [self.start_btn]):

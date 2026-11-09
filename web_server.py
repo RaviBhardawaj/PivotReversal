@@ -1254,7 +1254,7 @@ async def start_feed(req: StartFeedRequest):
 
     if not req_exp or req_exp in ["CURRENT", ""]:
         target_exp = curr_exp
-        exp_list = [curr_exp, next_exp] if (next_exp and next_exp != curr_exp) else [curr_exp]
+        exp_list = [curr_exp]   # current expiry only: next is opened manually (NEXT / ALL)
     elif req_exp == "NEXT":
         target_exp = next_exp
         exp_list = [next_exp, curr_exp] if (curr_exp and curr_exp != next_exp) else [next_exp]
@@ -1266,7 +1266,7 @@ async def start_feed(req: StartFeedRequest):
         exp_list = [req_exp]
     else:
         target_exp = curr_exp
-        exp_list = [curr_exp, next_exp] if (next_exp and next_exp != curr_exp) else [curr_exp]
+        exp_list = [curr_exp]
 
     feed.symbol = sym
     feed.expiry = curr_exp
@@ -1313,7 +1313,7 @@ async def start_feed(req: StartFeedRequest):
 
                 try:
                     feed.fetch_and_map_all_strikes(symbol=sym, expiry=curr_exp, force_fetch=True)
-                    if next_exp and next_exp != curr_exp:
+                    if next_exp and next_exp != curr_exp and next_exp in exp_list:   # only when opened
                         feed.fetch_and_map_all_strikes(symbol=sym, expiry=next_exp, force_fetch=True)
                 except Exception as map_err:
                     print(f"[WEB FEED] strike map notice: {map_err}")

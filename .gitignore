@@ -45,3 +45,4 @@ service_account.json
 fno_orders.json
 fno_orders.json.tmp
 .fno_auto_*
+deleted_strikes.json

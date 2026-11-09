@@ -188,14 +188,56 @@ function renderDash(s) {
   const cols = s.columns || [];
   const showPlan = filterState(s).show_plan;
   const disp = cols.filter((c) => !LV.includes(c) && !PLAN.includes(c)).concat(LV.filter((c) => cols.includes(c)), showPlan ? PLAN.filter((c) => cols.includes(c)) : []);
-  const head = "<tr>" + disp.map((c) => `<th class="${LEFT.has(c) ? "l" : ""}">${esc(c)}</th>`).join("") + "</tr>";
+  const head = "<tr><th></th>" + disp.map((c) => `<th class="${LEFT.has(c) ? "l" : ""}">${esc(c)}</th>`).join("") + "</tr>";
   if ($("d-head").dataset.k !== head) { $("d-head").dataset.k = head; $("d-head").innerHTML = head; }
   const rows = s.rows || [];
-  const body = rows.length ? rows.map((r) => `<tr class="${esc(r.tag)}">` + disp.map((c) => `<td class="${LEFT.has(c) ? "l" : ""}">${cellHTML(c, r.v[c] ?? "")}</td>`).join("") + "</tr>").join("")
-    : `<tr class="empty"><td colspan="${disp.length || 1}">${s.feed_running ? "No rows match the filters" : "Start the live scanner to fill the dashboard"}</td></tr>`;
+  const body = rows.length ? rows.map((r) => `<tr class="${esc(r.tag)}"><td>${delBtn(r.v.Strike, r.v.Type, r.v.Expiry)}</td>` +
+      disp.map((c) => `<td class="${LEFT.has(c) ? "l" : ""}">${cellHTML(c, r.v[c] ?? "")}</td>`).join("") + "</tr>").join("")
+    : `<tr class="empty"><td colspan="${disp.length + 1}">${s.feed_running ? "No rows match the filters" : "Start the live scanner to fill the dashboard"}</td></tr>`;
   if ($("d-body").dataset.k !== body) { $("d-body").dataset.k = body; $("d-body").innerHTML = body; }
   $("d-maxoi").textContent = s.max_oi || "";
+  const del = s.deleted || [];
+  const dh = del.length ? `<span class="small">🗑 Deleted until you regenerate:</span>` +
+    del.map((d) => `<button class="chip" data-restore="${esc(d.key)}" title="Bring this strike back">${esc(d.strike)} ${esc(d.type)} ${esc(d.expiry)} ↺</button>`).join("") +
+    `<button class="chip" data-regen>↻ Regenerate (restore all)</button>` : "";
+  if ($("d-deleted").dataset.k !== dh) { $("d-deleted").dataset.k = dh; $("d-deleted").innerHTML = dh; $("d-deleted").hidden = !del.length; }
 }
+
+// ── delete strikes (kept until Regenerate) ──────────────
+function delBtn(strike, type, expiry) {
+  if (!strike || !type) return "";
+  return `<button class="del" title="Delete this strike: hidden and no new entries until you Regenerate" data-del-strike="${esc(strike)}" data-del-type="${esc(type)}" data-del-exp="${esc(expiry || "")}">🗑</button>`;
+}
+async function deleteStrike(b) {
+  const it = {strike: b.dataset.delStrike, type: b.dataset.delType, expiry: b.dataset.delExp};
+  const ok = await confirmBox("Delete strike", `Delete ${it.strike} ${it.type} ${it.expiry}?\n\nIt is hidden from the dashboard and the next-day plan, and the strategy takes no new entry on it, until you press Regenerate. A trade that is already open is not touched.`, "Delete");
+  if (!ok) return false;
+  const r = await api("/api/strikes/delete", {items: [it]});
+  if (r.ok === false) { toast(r.error || "Delete failed", true); return false; }
+  toast(`🗑 Deleted ${it.strike} ${it.type} ${it.expiry}`);
+  poll();
+  return true;
+}
+async function regenerateStrikes() {
+  const ok = await confirmBox("Regenerate", "Bring back every deleted strike and rebuild today's strike levels?", "Regenerate");
+  if (!ok) return false;
+  const r = await api("/api/strikes/regenerate", {});
+  if (r.ok === false) toast(r.error || "Regenerate failed", true); else toast(r.message || "Regenerated");
+  poll();
+  return true;
+}
+document.addEventListener("click", async (e) => {
+  const d = e.target.closest("[data-del-strike]");
+  if (d) { e.stopPropagation(); if (await deleteStrike(d) && !$("m-plan").hidden) loadPlan(); return; }
+  const rs = e.target.closest("[data-restore]");
+  if (rs) {
+    const r = await api("/api/strikes/restore", {keys: [rs.dataset.restore]});
+    if (r.ok === false) toast(r.error || "Restore failed", true); else toast("↺ Strike restored");
+    poll(); if (!$("m-plan").hidden) loadPlan();
+    return;
+  }
+  if (e.target.closest("[data-regen]") && await regenerateStrikes() && !$("m-plan").hidden) loadPlan();
+});
 
 function renderTools(s) {
   if (!held("source") && document.activeElement !== $("t-source")) setSelect($("t-source"), s.level_sources || [], s.level_source || "");
@@ -290,15 +332,19 @@ async function loadPlan(refresh = false) {
     `Index 15M pivots: ${p(r.piv15)}<br>Index 1H pivots: ${p(r.piv1h)}` +
     ((r.focus_ce || []).length || (r.focus_pe || []).length ? `<br>Plan focus: CE ${esc((r.focus_ce || []).join(", "))} | PE ${esc((r.focus_pe || []).join(", "))}` : "");
   $("mp-modes").innerHTML = r.modes.map((m) => `<button class="chip${m.key === r.mode ? " a" : ""}" data-m="${m.key}">${esc(m.label)}</button>`).join("");
-  $("mp-head").innerHTML = "<tr>" + r.columns.map((c, i) => `<th class="${i < 3 ? "l" : ""}">${esc(c)}</th>`).join("") + "</tr>";
-  $("mp-body").innerHTML = r.rows.length ? r.rows.map((row) => `<tr class="${row.type === "PE" ? "pe" : "ce"}">` +
+  $("mp-head").innerHTML = "<tr><th></th>" + r.columns.map((c, i) => `<th class="${i < 3 ? "l" : ""}">${esc(c)}</th>`).join("") + "</tr>";
+  $("mp-body").innerHTML = r.rows.length ? r.rows.map((row) => `<tr class="${row.type === "PE" ? "pe" : "ce"}"><td>${delBtn(row.v.Strike, row.type, row.v.Expiry)}</td>` +
     r.columns.map((c, i) => `<td class="${i < 3 ? "l" : ""}">${esc(row.v[c])}</td>`).join("") + "</tr>").join("")
-    : `<tr class="empty"><td colspan="${r.columns.length}">No rows for this view yet</td></tr>`;
+    : `<tr class="empty"><td colspan="${r.columns.length + 1}">No rows for this view yet</td></tr>`;
+  const del = r.deleted || [];
+  $("mp-deleted").innerHTML = del.length ? `🗑 ${del.length} deleted strike(s) hidden until you regenerate: ` +
+    del.map((d) => `<button class="chip" data-restore="${esc(d.key)}" title="Bring this strike back">${esc(d.strike)} ${esc(d.type)} ${esc(d.expiry)} ↺</button>`).join(" ") : "";
 }
 $("b-plan").addEventListener("click", () => { openModal("m-plan"); loadPlan(); });
 $("mp-modes").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { planMode = b.dataset.m; loadPlan(); } });
 $("mp-s3").addEventListener("change", () => loadPlan());
 $("mp-refresh").addEventListener("click", () => loadPlan(true));
+$("mp-regen").addEventListener("click", async () => { if (await regenerateStrikes()) loadPlan(); });
 
 // ── settings ─────────────────────────────────────────────
 let SET = null, setBroker = "", todayTimer = null;

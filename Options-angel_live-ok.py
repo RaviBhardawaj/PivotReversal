@@ -48,6 +48,7 @@ if BASE_DIR not in sys.path:
 from brokers import (OrderEngine, ADAPTERS, BROKER_LABELS, ALL_LEVELS, LEVEL_LABELS,   # live orders
                      TIMEFRAMES, tf_levels, strike_selection_reason)
 from advanced_strategy import advanced_engine
+import deleted_strikes   # strikes deleted on the dashboard (no new entries until REGENERATE)
 
 # ── Exchange config ───────────────────────────────────────
 EXCHANGE_CONFIG = {
@@ -2231,6 +2232,11 @@ class ForwardTestTracker:
             return None   # No fresh intraday entries after 3:00 PM square-off
         if trade_key in self.active_trades:
             return None   # already tracking this strike — do not duplicate
+        try:
+            if deleted_strikes.is_deleted(symbol, opt_type, strike, expiry, now=datetime.now()):
+                return None   # strike deleted on the dashboard: no new entry until REGENERATE
+        except Exception as _del_err:
+            print(f"[DELETED STRIKES] check note: {_del_err}")
         if closed_key in self._closed_keys_today:
             return None   # same direction already had SL/target close today — no re-entry
         # A BUY needs its SL below the entry, a SELL above it — otherwise the trade would

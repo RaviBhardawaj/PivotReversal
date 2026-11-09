@@ -21,6 +21,8 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import deleted_strikes
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "glass_web")
 DEFAULT_PORT = 8780
@@ -217,6 +219,14 @@ class GlassDashboard:
             orders = {"error": str(e)}
         with self.notes_lock:
             notes = list(self.notes)
+        dkeys = deleted_strikes.active_keys()
+        rows = []
+        for r in snap.get("rows") or []:
+            v = r.get("v") or {}
+            k = deleted_strikes.key(sym, v.get("Expiry"), v.get("Strike"), v.get("Type"))
+            if k not in dkeys:
+                rows.append({**r, "k": k})
+        snap["rows"] = rows
         snap.update({
             "now": datetime.now().strftime("%H:%M:%S"),
             "market_open": bool(m.is_live_market_open()),
@@ -233,6 +243,7 @@ class GlassDashboard:
             "filter_groups": [{"group": g, "options": [{"key": k, "label": t} for k, t in opts]}
                               for g, opts in m.DASH_FILTER_GROUPS],
             "notes": notes,
+            "deleted": deleted_strikes.active(),
         })
         return snap
 
@@ -350,6 +361,37 @@ class GlassDashboard:
         self.on_tk(self.app._on_map_strike_levels_click)
         return {"ok": True, "message": "Mapping strike levels; the status line shows progress"}
 
+    # ── delete strikes / regenerate (deletes are kept until REGENERATE) ──
+    def delete_strikes(self, body):
+        items = body.get("items") or []
+        if not items:
+            return {"ok": False, "error": "No strike selected"}
+        sym = ((self.snap.get("controls") or {}).get("symbol") or "NIFTY")
+        items = [{**it, "symbol": it.get("symbol") or sym} for it in items]
+        r = deleted_strikes.delete(items)
+        names = ", ".join(f"{it.get('strike')} {it.get('type')} {it.get('expiry') or ''}".strip() for it in items)
+        self.note(f"🗑 Deleted {names}: hidden and no new entries until you Regenerate", "info")
+        print(f"[DELETED STRIKES] {names} deleted for session {r['session']}")
+        return r
+
+    def restore_strikes(self, body):
+        r = deleted_strikes.restore(body.get("keys") or None)
+        if r["restored"]:
+            self.note(f"↺ Restored {r['restored']} deleted strike(s)", "info")
+        return r
+
+    def regenerate(self, body):
+        """REGENERATE: bring every deleted strike back and rebuild today's strike levels."""
+        r = deleted_strikes.restore(None)
+        try:
+            self.on_tk(self.app._on_map_strike_levels_click)
+            r["message"] = (f"Restored {r['restored']} deleted strike(s); rebuilding strike levels "
+                            f"(the status line shows progress)")
+        except Exception as e:
+            r["message"] = f"Restored {r['restored']} deleted strike(s); level rebuild not started: {e}"
+        self.note(f"↻ {r['message']}", "info")
+        return r
+
     def ft_filter(self, body):
         v = body.get("value", "ALL")
         if v not in ("ALL", "15M Intraday", "1H Structure"):
@@ -425,8 +467,16 @@ class GlassDashboard:
 
         rows = []
 
+        dkeys = deleted_strikes.active_keys()
+        hidden = [0]
+
         def add(vals, ot):
-            rows.append({"v": dict(zip(NEXT_DAY_COLS, [str(x) for x in vals])), "type": ot})
+            v = dict(zip(NEXT_DAY_COLS, [str(x) for x in vals]))
+            k = deleted_strikes.key(sym, v.get("Expiry"), v.get("Strike"), ot)
+            if k in dkeys:
+                hidden[0] += 1
+                return
+            rows.append({"v": v, "type": ot, "k": k, "symbol": sym})
 
         def plan_setup_row(fg, stp, sd, ll, hh):
             ot = stp.get("type", "CE")
@@ -504,7 +554,8 @@ class GlassDashboard:
             "piv1h": {k: _f(piv1h.get(k)) for k in ("S3", "S2", "S1", "P", "R1", "R2", "R3")},
             "focus_ce": (nd_plan.get("resistance") or {}).get("focus_ce", []),
             "focus_pe": (nd_plan.get("support") or {}).get("focus_pe", []),
-            "columns": NEXT_DAY_COLS, "rows": rows,
+            "columns": NEXT_DAY_COLS, "rows": rows, "hidden": hidden[0],
+            "deleted": deleted_strikes.active(),
         }
 
     # ── settings (same four tabs as the launcher's ⚙ Settings window) ──
@@ -668,6 +719,9 @@ def _make_handler(dash):
                 "/api/settings/use": lambda: dash.broker_use(body),
                 "/api/settings/save": lambda: dash.save_settings(body),
                 "/api/settings/strikes-preview": lambda: dash.strikes_preview(body),
+                "/api/strikes/delete": lambda: dash.delete_strikes(body),
+                "/api/strikes/restore": lambda: dash.restore_strikes(body),
+                "/api/strikes/regenerate": lambda: dash.regenerate(body),
             }
             fn = routes.get(u.path)
             if not fn:

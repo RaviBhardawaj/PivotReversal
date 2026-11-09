@@ -94,3 +94,8 @@ and does not open or need the Tk launcher window.
   `web_server.py` (port 8055) and anything on port 8765 are not affected.
 - `GLASS_DASHBOARD_PORT=8790` picks another port; `GLASS_NO_BROWSER=1` stops it opening the browser.
 - Try it without the market: `python3 tests/run_glass_demo.py` (made-up NIFTY data, no login, no orders).
+- **Delete a strike**: 🗑 on a dashboard row or a next-day plan row hides that contract (strike + CE/PE +
+  expiry) and the strategy takes no new entry on it, live or in the backfill. Open trades are not touched.
+  Deletes are saved in `deleted_strikes.json`, so they survive a refresh and a restart, until you press
+  **↻ Regenerate** (brings every deleted strike back and rebuilds the strike levels) or ↺ on one strike.
+  A delete applies to one session: today in market hours, the next trading day after 15:30.

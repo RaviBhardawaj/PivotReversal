@@ -82,7 +82,7 @@ function renderHeader(s) {
   $("pill-feed").lastElementChild.textContent = s.feed_running ? "Scanner live" : "Scanner stopped";
   $("pill-clock").textContent = (s.now || "--") + " IST";
   const st = s.status || {};
-  $("status-text").textContent = st.text || "Ready";
+  $("status-text").textContent = String(st.text || "Ready").replace(/^\s*[●•]\s*/, "");
   $("statusbar").style.color = st.color || "";
   $("launcher-banner").hidden = !s.launcher_running;
   $("b-start").disabled = !s.start_enabled;
@@ -94,7 +94,7 @@ function dirClass(d) { d = String(d || "").toUpperCase(); return /BULL|BREAKOUT|
 
 function renderUnderlying(s) {
   const u = s.spot || {};
-  $("u-title").textContent = "Underlying · " + (u.symbol || "");
+  $("u-title").textContent = (u.symbol || "Underlying") + " spot";
   $("u-price").textContent = u.price ? num(u.price) : "--";
   $("u-dir").textContent = u.direction || "";
   $("u-dir").className = "mono " + dirClass(u.direction);
@@ -112,7 +112,7 @@ function renderUnderlying(s) {
 
 function renderOrders(o) {
   o = o || {};
-  $("o-title").textContent = "Auto-trade · " + (o.broker || "-");
+  $("o-title").textContent = (o.auto ? "Auto-trade ON · " : "Auto-trade off · ") + (o.broker || "-");
   $("o-trades").textContent = o.trades !== undefined ? `${o.trades} / ${o.max_trades ?? "-"}` : "--";
   const pnl = Number(o.pnl_rs || 0);
   $("o-pnl").textContent = o.pnl_rs !== undefined ? "₹" + pnl.toLocaleString("en-IN", {maximumFractionDigits: 0}) : "--";
@@ -128,21 +128,26 @@ function renderOrders(o) {
 
 function renderPivots(p) {
   const col = {"Weekly": "var(--p)", "Daily": "#93c5fd", "1-Hour": "var(--y)", "15-Min": "#86efac"};
-  const cell = (v, cls) => `<td class="${cls}">${v ? num(v) : "--"}</td>`;
+  const cell = (v, cls) => `<td class="${cls}">${v ? num(v, v >= 1000 ? 0 : 2) : "--"}</td>`;
   const html = (p || []).map((r) => `<tr><td class="l" style="color:${col[r.tf]}">${esc(r.tf)}</td><td class="l">${esc(r.zone)}</td>` +
-    cell(r.S3, "lvl-s") + cell(r.S2, "lvl-s") + cell(r.S1, "lvl-s") + cell(r.P, "lvl-p") + cell(r.R1, "lvl-r") + cell(r.R2, "lvl-r") + cell(r.R3, "lvl-r") + "</tr>").join("");
+    cell(r.S2, "lvl-s") + cell(r.S1, "lvl-s") + cell(r.P, "lvl-p") + cell(r.R1, "lvl-r") + cell(r.R2, "lvl-r") + "</tr>").join("");
   if ($("mtf-body").dataset.k !== html) { $("mtf-body").dataset.k = html; $("mtf-body").innerHTML = html; }
 }
 
-// reversal dashboard
+// ── live trades + watchlist (current expiry only) ─────────
 const LV = ["S3", "S2", "S1", "P", "R1", "R2", "R3"], PLAN = ["Plan S2", "Plan P", "Plan R2", "Plan Signal", "vs Plan"];
-const LEFT = new Set(["Expiry", "Type", "Side", "Trading Zone", "5M State", "Signal", "Status", "Order", "Plan Signal", "vs Plan"]);
 let localFilters = null;
+const pref = (k, d) => { try { const v = localStorage.getItem("glass." + k); return v === null ? d : v; } catch (e) { return d; } };
+const setPref = (k, v) => { try { localStorage.setItem("glass." + k, v); } catch (e) {} };
+let wSort = pref("sort", "strike"), wFull = pref("full", "0") === "1";
+$("w-sort").value = wSort; $("w-full").checked = wFull;
+$("w-sort").addEventListener("change", (e) => { wSort = e.target.value; setPref("sort", wSort); if (S) renderDash(S); });
+$("w-full").addEventListener("change", (e) => { wFull = e.target.checked; setPref("full", wFull ? "1" : "0"); if (S) renderDash(S); });
 
 function filterState(s) {
   if (localFilters && held("filters")) return localFilters;
   localFilters = null;
-  return {filters: s.filters || {}, exp_cur: !!s.exp_cur, exp_next: !!s.exp_next, show_plan: !!s.show_plan};
+  return {filters: s.filters || {}, show_plan: !!s.show_plan};
 }
 
 function renderFilters(s) {
@@ -154,8 +159,7 @@ function renderFilters(s) {
     h += `<span class="fg"><span class="g">${esc(g.group)}</span>` +
       g.options.map((o) => chip(`data-g="${esc(g.group)}" data-k="${esc(o.key)}"`, o.label, ticked.has(o.key), o.key === "P" ? " p" : "")).join("") + "</span>";
   }
-  h += `<span class="fg"><span class="g">📅 Expiry</span>${chip('data-x="exp_cur"', "⚡ Current", f.exp_cur)}${chip('data-x="exp_next"', "⏭ Next", f.exp_next)}</span>`;
-  h += chip('data-x="show_plan"', "📅 Show plan columns", f.show_plan) + '<button class="chip" data-clear>✖ Clear filters</button>';
+  h += chip('data-x="show_plan"', "📅 Plan columns", f.show_plan) + '<button class="chip" data-clear>✖ Clear filters</button>';
   const el = $("d-filters");
   if (el.dataset.k !== h) { el.dataset.k = h; el.innerHTML = h; }
   $("d-info").textContent = s.filter_info || "";
@@ -165,7 +169,7 @@ $("d-filters").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b || !S) return;
   const f = JSON.parse(JSON.stringify(filterState(S)));
   if (b.hasAttribute("data-clear")) {
-    localFilters = {filters: {}, exp_cur: false, exp_next: false, show_plan: false}; holdFor("filters");
+    localFilters = {filters: {}, show_plan: false}; holdFor("filters");
     renderFilters(S); renderDash(S); act("/api/filters", {clear: true}); return;
   }
   if (b.dataset.g) {
@@ -178,100 +182,246 @@ $("d-filters").addEventListener("click", (e) => {
   api("/api/filters", f).then((r) => { if (r.ok === false) toast(r.error || "Filter not applied", true); });
 });
 
-function cellHTML(c, v) {
-  if (c === "Type") return `<span class="tag ${v === "PE" ? "pe" : "ce"}">${esc(v)}</span>`;
-  if (c === "Side") { const buy = /BUY/.test(v); return `<span class="tag ${buy ? "buy" : "sell"}">${buy ? "BUY" : "SELL"}</span>`; }
-  return esc(v);
+// ── row model ──
+const fnum = (v) => { const m = String(v ?? "").replace(/,/g, "").match(/-?\d+(?:\.\d+)?/); return m ? parseFloat(m[0]) : 0; };
+const f2 = (v) => v > 0 ? v.toFixed(2) : "-";
+const strikeNum = (v) => String(v ?? "").replace(/[^\d.]/g, "");
+
+function rowInfo(r) {
+  const v = r.v, tag = r.tag || "", status = String(v.Status || "");
+  const buy = /BUY/.test(v.Side || "");
+  const hits = /T5|Target 5/.test(status) ? 5 : /T4|Target 4/.test(status) ? 4 : /T3|Target 3|All Targets/.test(status) ? 3 : /T2|Target 2/.test(status) ? 2 : /T1|Target 1/.test(status) ? 1 : 0;
+  const isSL = tag === "sl" || /SL Hit|SL HIT/.test(status);
+  const isExit = /Exit|Closed|Square/i.test(status);
+  const live = tag === "active_buy" || tag === "active_sell";
+  const trade = live || tag === "target" || isSL || (hits > 0);
+  const closed = isSL || isExit || hits >= 3;
+  const setup = /ready/.test(tag);
+  const entry = fnum(v.Entry), ltp = fnum(v.LTP), sl = fnum(v.SL);
+  const tg = ["T1", "T2", "T3", "T4", "T5"].map((t) => fnum(v[t]));
+  const move = entry > 0 && ltp > 0 ? (buy ? ltp - entry : entry - ltp) : null;
+  const gap = entry > 0 && ltp > 0 ? (ltp - entry) / entry * 100 : null;   // LTP vs planned entry
+  const zone = String(v["Trading Zone"] || "");
+  return {v, tag, status, buy, hits, isSL, live, trade, closed, setup, entry, ltp, sl, tg, move, gap,
+    is15: /15M/.test(zone), is1h: /1H/.test(zone), isP: /🔷/.test(String(v.Strike)) || /🔷P/.test(zone)};
 }
 
-// ── Dashboard delete bar state ────────────────────────────
-let dashSelectedKeys = new Set(); // "Symbol|Strike|Type|Expiry" keys
-let dashCurrentExpiry = "ALL";    // expiry pill selection
-
-function dashRowKey(v) {
-  return `${v.Symbol || "NIFTY"}|${v.Strike}|${v.Type}|${v.Expiry || ""}`;
+function contractCell(i, withSide) {
+  const v = i.v;
+  return `<span class="stk">${esc(strikeNum(v.Strike))}</span><span class="tag ${v.Type === "PE" ? "pe" : "ce"}">${esc(v.Type)}</span>` +
+    (withSide ? ` <span class="tag ${i.buy ? "buy" : "sell"}">${i.buy ? "BUY" : "SELL"}</span>` : "") +
+    (i.isP ? `<span class="tag p">P</span>` : "") + (i.is15 ? `<span class="tag tf">15M</span>` : "") + (i.is1h ? `<span class="tag tf">1H</span>` : "");
 }
+function statusPill(i) {
+  const s = esc(String(i.status).replace(/^[^\w]+/u, "") || "Pending");
+  if (i.isSL) return `<span class="st loss">🛑 ${s}</span>`;
+  if (i.closed) return `<span class="st win">🏆 ${s}</span>`;
+  if (i.live || i.hits) return `<span class="st live${i.buy ? "" : " sell"}">● ${i.hits ? `LIVE · T${i.hits} hit` : "LIVE"}</span>`;
+  if (i.setup) return `<span class="st setup">⚡ ${esc(i.v["5M State"] || "Setup")}</span>`;
+  return `<span class="st">${esc(i.v["5M State"] || "Waiting")}</span>`;
+}
+const signed = (x, d = 2) => (x > 0 ? "+" : "") + x.toFixed(d);
+
+// Keyed table sync: rows are created once and only the cells that changed are rewritten,
+// so hover, tooltips and checkboxes stay put and the browser does far less work each second.
+function syncRows(tbody, items, sig, emptyHTML) {
+  if (tbody._sig !== sig) { tbody._sig = sig; tbody._map = new Map(); tbody.innerHTML = ""; }
+  const map = tbody._map;
+  if (!items.length) {
+    if (!tbody._empty || tbody._emptyHTML !== emptyHTML) { map.clear(); tbody.innerHTML = emptyHTML; tbody._empty = true; tbody._emptyHTML = emptyHTML; }
+    return;
+  }
+  if (tbody._empty) { tbody.innerHTML = ""; tbody._empty = false; }
+  const seen = new Set();
+  items.forEach((it, idx) => {
+    seen.add(it.key);
+    let e = map.get(it.key);
+    if (!e) {
+      const tr = document.createElement("tr");
+      it.cells.forEach(() => tr.appendChild(document.createElement("td")));
+      e = {tr, h: [], c: [], n: []}; map.set(it.key, e);
+    }
+    if (e.tr.className !== it.cls) e.tr.className = it.cls;
+    it.cells.forEach((c, j) => {
+      const td = e.tr.children[j];
+      if (e.c[j] !== c.c) { e.c[j] = c.c; td.className = c.c || ""; }
+      if (e.h[j] !== c.h) {
+        e.h[j] = c.h; td.innerHTML = c.h;
+        if (c.tick !== undefined && e.n[j] !== undefined && c.tick !== e.n[j]) {
+          const up = c.tick > e.n[j], a = td._f === 1 ? 2 : 1; td._f = a;
+          td.classList.remove("fu1", "fu2", "fd1", "fd2"); td.classList.add((up ? "fu" : "fd") + a);
+        }
+        if (c.title !== undefined) td.title = c.title;
+      }
+      if (c.tick !== undefined) e.n[j] = c.tick;
+    });
+    if (tbody.children[idx] !== e.tr) tbody.insertBefore(e.tr, tbody.children[idx] || null);
+  });
+  for (const [k, e] of map) if (!seen.has(k)) { e.tr.remove(); map.delete(k); }
+}
+
+function renderLive(s, infos) {
+  const trades = infos.filter((i) => i.trade);
+  trades.sort((a, b) => (a.closed - b.closed));
+  const running = trades.filter((i) => !i.closed);
+  $("lt-count").textContent = running.length;
+  $("k-live").textContent = running.length;
+  $("live-card").classList.toggle("has", running.length > 0);
+  const pts = running.reduce((t, i) => t + (i.move || 0), 0);
+  $("lt-summary").innerHTML = trades.length ? `${running.length} running · ${trades.length - running.length} closed today` +
+    (running.length ? ` · open move <b class="mono ${pts >= 0 ? "up" : "dn"}">${signed(pts)} pts</b>` : "") : "";
+  const items = trades.map((i) => {
+    const nx = i.closed ? 0 : Math.min(i.hits + 1, 5);
+    const nxv = nx ? i.tg[nx - 1] : 0;
+    const risk = !i.closed && i.sl > 0 && i.ltp > 0 ? (i.buy ? i.ltp - i.sl : i.sl - i.ltp) : null;
+    const pct = i.move !== null && i.entry > 0 ? i.move / i.entry * 100 : null;
+    const ladder = `<span class="ladder">${i.tg.map((t, j) => t > 0 ? `<span class="${j < i.hits ? "hit" : j + 1 === nx ? "nx" : ""}">T${j + 1} ${t.toFixed(1)}</span>` : "").join("")}</span>`;
+    return {key: i.r.k || i.r.v.Strike + i.r.v.Type + i.r.v.Side, cls: i.closed ? "closed" : "",
+      cells: [
+        {h: contractCell(i, true), c: "l"},
+        {h: statusPill(i), c: "l", title: i.v.Signal || ""},
+        {h: f2(i.entry)},
+        {h: `<span class="big">${f2(i.ltp)}</span>`, tick: i.ltp},
+        {h: i.move === null || i.closed ? "-" : `<span class="big ${i.move >= 0 ? "up" : "dn"}">${signed(i.move)}</span><span class="sub ${i.move >= 0 ? "up" : "dn"}">${signed(pct, 1)}%</span>`},
+        {h: esc(i.v.SL || "-")},
+        {h: risk === null ? "-" : `<span class="${risk >= 0 ? "" : "dn"}">${risk.toFixed(2)}</span>`},
+        {h: nxv > 0 ? `T${nx} <b>${nxv.toFixed(2)}</b>${i.ltp > 0 ? `<span class="sub">${(i.buy ? nxv - i.ltp : i.ltp - nxv).toFixed(2)} away</span>` : ""}` : "-"},
+        {h: ladder, c: "l"},
+        {h: esc(i.v.Order || "-"), c: "l small"},
+      ]};
+  });
+  syncRows($("lt-body"), items, "lt",
+    `<tr class="empty"><td colspan="10">${s.feed_running ? "No live trades yet. Entries appear here the moment a setup triggers." : "Start the live scanner to see live trades"}</td></tr>`);
+}
+
+let dashSelectedKeys = new Map();    // row key -> {strike, type, expiry}
 
 function renderDash(s) {
   const cols = s.columns || [];
   const showPlan = filterState(s).show_plan;
-  const disp = cols.filter((c) => !LV.includes(c) && !PLAN.includes(c)).concat(LV.filter((c) => cols.includes(c)), showPlan ? PLAN.filter((c) => cols.includes(c)) : []);
+  const infos = (s.rows || []).map((r) => Object.assign(rowInfo(r), {r}));
+  renderLive(s, infos);
+  $("w-exp").textContent = s.current_expiry ? `${s.current_expiry} expiry` : "current expiry";
 
-  // Header: leading checkbox + data cols + trailing delete
-  const chkHead = `<th style="width:28px;text-align:center;"><input type="checkbox" id="dash-chk-all" title="Select all visible"></th>`;
-  const delHead = `<th style="width:38px;"></th>`;
-  const head = "<tr>" + chkHead + disp.map((c) => `<th class="${LEFT.has(c) ? "l" : ""}">${esc(c)}</th>`).join("") + delHead + "</tr>";
+  // Compact columns by default; "All columns" adds the rest of the launcher's columns.
+  const base = [
+    ["☑", "c"], ["Strike", "l"], ["Side", "l"], ["LTP", ""], ["Setup", "l"], ["Entry", ""], ["SL", ""],
+    ["T1", ""], ["T2", ""], ["T3", ""], ["Levels S2 · S1 · P · R1 · R2", ""], ["Order", "l"], ["Signal", "l"],
+  ];
+  const extra = wFull ? ["Status", "OI", "Vol", "LL", "HH", "S3", "R3", "T4", "T5", "Trading Zone"].filter((c) => cols.includes(c)) : [];
+  const plan = showPlan ? PLAN.filter((c) => cols.includes(c)) : [];
+  const heads = base.concat(extra.map((c) => [c, /Trading Zone|Status/.test(c) ? "l" : ""]), plan.map((c) => [c, /Signal|vs/.test(c) ? "l" : ""]));
+  const sig = heads.map((h) => h[0]).join("|");
+  const head = "<tr>" + heads.map(([c, cl], j) => j === 0 ? `<th class="c"><input type="checkbox" id="dash-chk-all" title="Select all"></th>` : `<th class="${cl}">${esc(c)}</th>`).join("") + "</tr>";
   if ($("d-head").dataset.k !== head) { $("d-head").dataset.k = head; $("d-head").innerHTML = head; }
 
-  const rows = s.rows || [];
-  // Filter by selected expiry pill
-  const visibleRows = dashCurrentExpiry === "ALL" ? rows : rows.filter((r) => {
-    if (dashCurrentExpiry === "CURRENT") return r.v.Expiry === (s.controls?.expiry || "");
-    if (dashCurrentExpiry === "NEXT")    return r.v.Expiry === (s.controls?.next_expiry || "");
-    return String(r.v.Expiry || "").toUpperCase() === dashCurrentExpiry;
-  });
-
-  const excl = new Set(s.excluded_strikes || []);
-
-  let body;
-  if (!visibleRows.length) {
-    const colSpan = disp.length + 2;
-    body = `<tr class="empty"><td colspan="${colSpan}">${s.feed_running ? "No rows match the filters" : "Start the live scanner to fill the dashboard"}</td></tr>`;
-  } else {
-    body = visibleRows.map((r) => {
-      const key = dashRowKey(r.v);
-      const isExcl  = excl.has(key);
-      const isSel   = dashSelectedKeys.has(key);
-      const rowStyle = isExcl ? "opacity:0.38;text-decoration:line-through;" : "";
-      const exclAttr = isExcl ? " data-excluded=\"1\"" : "";
-      const chk = `<td style="text-align:center;"><input type="checkbox" class="dash-row-chk" data-key="${esc(key)}" data-sym="${esc(r.v.Symbol||"NIFTY")}" data-strike="${esc(r.v.Strike)}" data-type="${esc(r.v.Type)}" data-expiry="${esc(r.v.Expiry||"")}"${isSel ? " checked" : ""}></td>`;
-      const cells = disp.map((c) => `<td class="${LEFT.has(c) ? "l" : ""}">${cellHTML(c, r.v[c] ?? "")}</td>`).join("");
-      const delBtn = `<td style="text-align:center;">${isExcl
-        ? `<button class="btn icon dash-restore-row" data-key="${esc(key)}" data-sym="${esc(r.v.Symbol||"NIFTY")}" data-strike="${esc(r.v.Strike)}" data-type="${esc(r.v.Type)}" data-expiry="${esc(r.v.Expiry||"")}" title="Restore this strike" style="color:var(--y);font-size:13px;">↺</button>`
-        : `<button class="btn icon stop dash-del-row" data-key="${esc(key)}" data-sym="${esc(r.v.Symbol||"NIFTY")}" data-strike="${esc(r.v.Strike)}" data-type="${esc(r.v.Type)}" data-expiry="${esc(r.v.Expiry||"")}" title="Exclude this strike" style="font-size:13px;">🗑️</button>`
-      }</td>`;
-      return `<tr class="${esc(r.tag)}" style="${rowStyle}"${exclAttr}>${chk}${cells}${delBtn}</tr>`;
-    }).join("");
+  let list = infos.slice();
+  if (wSort === "setup") {
+    const rank = (i) => (i.trade && !i.closed ? 0 : i.setup ? 1 : i.trade ? 3 : 2);
+    list.sort((a, b) => rank(a) - rank(b));
+  } else if (wSort === "near") {
+    const d = (i) => (i.gap === null ? 1e9 : Math.abs(i.gap));
+    list.sort((a, b) => d(a) - d(b));
   }
+  const live = new Set(list.map((i) => i.r.k));
+  for (const k of [...dashSelectedKeys.keys()]) if (!live.has(k)) dashSelectedKeys.delete(k);
 
-  if ($("d-body").dataset.k !== body) { $("d-body").dataset.k = body; $("d-body").innerHTML = body; }
+  const items = list.map((i) => {
+    const v = i.v, k = i.r.k;
+    const lv = ["S2", "S1", "P", "R1", "R2"].map((c) => { const x = fnum(v[c]); return x > 0 ? x.toFixed(1) : "-"; }).join(" · ");
+    const gapTxt = i.gap === null || i.trade ? "" : `<span class="sub">${signed(i.gap, 1)}% vs entry</span>`;
+    const cells = [
+      {h: `<input type="checkbox" class="dash-row-chk" data-key="${esc(k)}"${dashSelectedKeys.has(k) ? " checked" : ""}> <button class="del" title="Delete this strike: hidden and no new entries until restored" data-del="${esc(k)}">🗑</button>`, c: "c"},
+      {h: contractCell(i, false), c: "l"},
+      {h: `<span class="tag ${i.buy ? "buy" : "sell"}">${i.buy ? "BUY" : "SELL"}</span>`, c: "l"},
+      {h: `<b>${f2(i.ltp)}</b>${gapTxt}`, tick: i.ltp},
+      {h: statusPill(i), c: "l"},
+      {h: esc(v.Entry || "-")}, {h: esc(v.SL || "-")},
+      {h: esc(v.T1 || "-")}, {h: esc(v.T2 || "-")}, {h: esc(v.T3 || "-")},
+      {h: `<span class="lvls">${lv}</span>`},
+      {h: esc(v.Order || "-"), c: "l small"},
+      {h: esc(v.Signal || ""), c: "l sig", title: v.Signal || ""},
+    ].concat(extra.map((c) => ({h: esc(v[c] ?? ""), c: /Trading Zone|Status/.test(c) ? "l small" : ""})),
+             plan.map((c) => ({h: esc(v[c] ?? ""), c: /Signal|vs/.test(c) ? "l small" : ""})));
+    return {key: k, cls: i.tag, cells};
+  });
+  syncRows($("d-body"), items, sig,
+    `<tr class="empty"><td colspan="${heads.length}">${s.feed_running ? "No rows match the filters" : "Start the live scanner to fill the dashboard"}</td></tr>`);
   $("d-maxoi").textContent = s.max_oi || "";
 
-  // Sync select-all checkbox
-  const allChk = document.getElementById("dash-chk-all");
-  if (allChk && visibleRows.length) {
-    allChk.checked = visibleRows.every((r) => dashSelectedKeys.has(dashRowKey(r.v)));
-    allChk.indeterminate = !allChk.checked && visibleRows.some((r) => dashSelectedKeys.has(dashRowKey(r.v)));
+  const allChk = $("dash-chk-all");
+  if (allChk) {
+    allChk.checked = list.length > 0 && list.every((i) => dashSelectedKeys.has(i.r.k));
+    allChk.indeterminate = !allChk.checked && list.some((i) => dashSelectedKeys.has(i.r.k));
   }
+  renderBulk(s);
 }
 
-function renderDashBar(s) {
-  // Populate expiry dropdown from rows
-  const rows = s.rows || [];
-  const expiries = [...new Set(rows.map((r) => r.v.Expiry || "").filter(Boolean))].sort();
-  const sel = $("dash-exp-select");
-  const curVal = sel.value;
-  sel.innerHTML = `<option value="ALL">All Expiries</option>` + expiries.map((e) => `<option value="${esc(e)}"${e === curVal ? " selected" : ""}>${esc(e)}</option>`).join("");
-  if (expiries.includes(curVal)) sel.value = curVal;
-
-  // Expiry name label in bulk-delete button
-  $("dash-exp-name").textContent = dashCurrentExpiry === "ALL" ? "ALL" : dashCurrentExpiry;
-
-  // Selected count badge
-  const selCount = dashSelectedKeys.size;
-  $("dash-del-num").textContent = selCount;
-  $("dash-del-selected").disabled = selCount === 0;
-  const selCountEl = $("dash-sel-count");
-  if (selCountEl) { selCountEl.textContent = `${selCount} selected`; selCountEl.style.display = selCount ? "" : "none"; }
-
-  // Restore button visibility
-  const excl = s.excluded_strikes || [];
-  const restoreBtn = $("dash-restore-btn");
-  if (restoreBtn) {
-    restoreBtn.style.display = excl.length ? "" : "none";
-    $("dash-restore-num").textContent = excl.length;
-  }
+function renderBulk(s) {
+  const n = dashSelectedKeys.size;
+  $("bulk").hidden = n === 0;
+  $("dash-del-num").textContent = n;
+  $("dash-sel-count").textContent = `${n} selected`;
+  const del = (s && s.deleted_strikes) || [];
+  const dh = del.length ? `<span class="small">🗑 ${del.length} deleted (hidden, no new entries):</span>` +
+    del.map((d) => `<button class="chip" data-restore="${esc(`${d.symbol}|${d.strike}|${d.type}|${d.expiry}`)}" title="Bring this strike back">${esc(d.strike)} ${esc(d.type)} ${esc(d.expiry)} ↺</button>`).join("") +
+    `<button class="chip" data-restore-all>↺ Restore all</button>` : "";
+  const el = $("d-deleted");
+  if (el.dataset.k !== dh) { el.dataset.k = dh; el.innerHTML = dh; el.hidden = !del.length; }
 }
+
+function rowItem(k) {
+  const r = ((S && S.rows) || []).find((x) => x.k === k);
+  return r ? {strike: strikeNum(r.v.Strike), type: r.v.Type, expiry: r.v.Expiry || (S.current_expiry || "")} : null;
+}
+async function deleteItems(items, label) {
+  if (!items.length) return false;
+  const ok = await confirmBox("Delete strike" + (items.length > 1 ? "s" : ""),
+    `Delete ${label}?\n\nIt is hidden from the dashboard and the strategy takes no new entry on it (saved, also after a restart). A trade that is already open is not touched. Use ↺ to bring it back.`, "Delete");
+  if (!ok) return false;
+  const r = await api("/api/strikes/delete-multiple", {strikes: items.map((it) => ({strike: it.strike, opt_type: it.type, expiry: it.expiry}))});
+  if (r.ok === false) { toast(r.error || "Delete failed", true); return false; }
+  toast(`🗑 ${r.message || "Deleted"}`);
+  poll();
+  return true;
+}
+
+$("d-head").addEventListener("change", (e) => {
+  if (e.target.id !== "dash-chk-all" || !S) return;
+  for (const r of S.rows || []) {
+    if (e.target.checked) { const it = rowItem(r.k); if (it) dashSelectedKeys.set(r.k, it); } else dashSelectedKeys.delete(r.k);
+  }
+  renderDash(S);
+});
+$("d-body").addEventListener("change", (e) => {
+  const chk = e.target.closest(".dash-row-chk"); if (!chk) return;
+  const k = chk.dataset.key;
+  if (chk.checked) { const it = rowItem(k); if (it) dashSelectedKeys.set(k, it); } else dashSelectedKeys.delete(k);
+  if (S) renderDash(S);
+});
+$("d-body").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-del]"); if (!b) return;
+  const it = rowItem(b.dataset.del); if (!it) return;
+  if (await deleteItems([it], `${it.strike} ${it.type} ${it.expiry}`)) dashSelectedKeys.delete(b.dataset.del);
+});
+$("dash-del-selected").addEventListener("click", async () => {
+  const items = [...dashSelectedKeys.values()];
+  const uniq = [...new Map(items.map((it) => [`${it.strike}|${it.type}|${it.expiry}`, it])).values()];
+  if (await deleteItems(uniq, `${uniq.length} selected strike(s)`)) { dashSelectedKeys.clear(); if (S) renderDash(S); }
+});
+$("dash-sel-clear").addEventListener("click", () => { dashSelectedKeys.clear(); if (S) renderDash(S); });
+async function restoreStrike(key, all) {
+  const r = await api("/api/strikes/restore", all ? {all: true} : {key});
+  if (r.ok === false) toast(r.error || "Restore failed", true); else toast("↺ " + (r.message || "Restored"));
+  poll(); if (!$("m-plan").hidden) loadPlan();
+}
+document.addEventListener("click", async (e) => {
+  const rs = e.target.closest("[data-restore]");
+  if (rs) return restoreStrike(rs.dataset.restore, false);
+  if (e.target.closest("[data-restore-all]")) {
+    if (await confirmBox("Restore all", "Bring back every deleted strike?", "Restore all")) restoreStrike("", true);
+  }
+});
 
 function renderTools(s) {
   if (!held("source") && document.activeElement !== $("t-source")) setSelect($("t-source"), s.level_sources || [], s.level_source || "");
@@ -290,7 +440,7 @@ function renderNotes(s) {
 function render(s) {
   S = s;
   renderHeader(s); renderControls(s.controls); renderUnderlying(s); renderOrders(s.orders);
-  renderPivots(s.pivots); renderFilters(s); renderDash(s); renderDashBar(s); renderTools(s); renderNotes(s);
+  renderPivots(s.pivots); renderFilters(s); renderDash(s); renderTools(s); renderNotes(s);
 }
 
 let failures = 0;
@@ -374,15 +524,29 @@ async function loadPlan(refresh = false) {
     `Index 15M pivots: ${p(r.piv15)}<br>Index 1H pivots: ${p(r.piv1h)}` +
     ((r.focus_ce || []).length || (r.focus_pe || []).length ? `<br>Plan focus: CE ${esc((r.focus_ce || []).join(", "))} | PE ${esc((r.focus_pe || []).join(", "))}` : "");
   $("mp-modes").innerHTML = r.modes.map((m) => `<button class="chip${m.key === r.mode ? " a" : ""}" data-m="${m.key}">${esc(m.label)}</button>`).join("");
-  $("mp-head").innerHTML = "<tr>" + r.columns.map((c, i) => `<th class="${i < 3 ? "l" : ""}">${esc(c)}</th>`).join("") + "</tr>";
-  $("mp-body").innerHTML = r.rows.length ? r.rows.map((row) => `<tr class="${row.type === "PE" ? "pe" : "ce"}">` +
+  $("mp-head").innerHTML = "<tr><th></th>" + r.columns.map((c, i) => `<th class="${i < 3 ? "l" : ""}">${esc(c)}</th>`).join("") + "</tr>";
+  $("mp-body").innerHTML = r.rows.length ? r.rows.map((row) => `<tr class="${row.type === "PE" ? "pe" : "ce"}"><td><button class="del" title="Delete this strike" data-plan-del="${esc(strikeNum(row.v.Strike))}|${esc(row.type)}|${esc(row.v.Expiry || "")}">🗑</button></td>` +
     r.columns.map((c, i) => `<td class="${i < 3 ? "l" : ""}">${esc(row.v[c])}</td>`).join("") + "</tr>").join("")
-    : `<tr class="empty"><td colspan="${r.columns.length}">No rows for this view yet</td></tr>`;
+    : `<tr class="empty"><td colspan="${r.columns.length + 1}">No rows for this view yet</td></tr>`;
+  const del = r.deleted_strikes || [];
+  $("mp-deleted").innerHTML = del.length ? `🗑 ${del.length} deleted strike(s) hidden: ` +
+    del.map((d) => `<button class="chip" data-restore="${esc(`${d.symbol}|${d.strike}|${d.type}|${d.expiry}`)}" title="Bring this strike back">${esc(d.strike)} ${esc(d.type)} ${esc(d.expiry)} ↺</button>`).join(" ") : "";
 }
 $("b-plan").addEventListener("click", () => { openModal("m-plan"); loadPlan(); });
 $("mp-modes").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { planMode = b.dataset.m; loadPlan(); } });
 $("mp-s3").addEventListener("change", () => loadPlan());
 $("mp-refresh").addEventListener("click", () => loadPlan(true));
+$("mp-body").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-plan-del]"); if (!b) return;
+  const [strike, type, expiry] = b.dataset.planDel.split("|");
+  if (await deleteItems([{strike, type, expiry}], `${strike} ${type} ${expiry}`)) loadPlan();
+});
+$("mp-regen").addEventListener("click", async () => {
+  if (!(await confirmBox("Regenerate", "Bring back every deleted strike and rebuild today's strike levels?", "Regenerate"))) return;
+  const r = await api("/api/strikes/regenerate", {});
+  if (r.ok === false) toast(r.error || "Regenerate failed", true); else toast("↻ " + (r.message || "Regenerated"));
+  poll(); loadPlan();
+});
 
 // ── settings ─────────────────────────────────────────────
 let SET = null, setBroker = "", todayTimer = null;
@@ -500,126 +664,6 @@ $("s-tabs").addEventListener("click", (e) => {
   if (b.dataset.tab === "strikes" && SET) preview();
 });
 $("b-settings").addEventListener("click", openSettings);
-
-// ── Dashboard Strike Delete Bar — event wiring ───────────
-
-// Expiry pills (ALL / CURRENT / NEXT)
-document.getElementById("dash-exp-pills").addEventListener("click", (e) => {
-  const b = e.target.closest("[data-exp]");
-  if (!b) return;
-  dashCurrentExpiry = b.dataset.exp;
-  document.querySelectorAll("#dash-exp-pills .chip").forEach((c) => c.classList.toggle("a", c === b));
-  // Sync the dropdown to "ALL" when pill is active
-  const sel = $("dash-exp-select");
-  if (dashCurrentExpiry === "ALL" || dashCurrentExpiry === "CURRENT" || dashCurrentExpiry === "NEXT") {
-    sel.value = "ALL";
-  }
-  dashSelectedKeys.clear();
-  if (S) { renderDash(S); renderDashBar(S); }
-});
-
-// Expiry dropdown
-document.getElementById("dash-exp-select").addEventListener("change", (e) => {
-  dashCurrentExpiry = e.target.value;
-  // Deactivate all pills when dropdown picks a specific expiry
-  document.querySelectorAll("#dash-exp-pills .chip").forEach((c) => c.classList.remove("a"));
-  if (dashCurrentExpiry === "ALL") {
-    const allPill = document.querySelector("#dash-exp-pills [data-exp='ALL']");
-    if (allPill) allPill.classList.add("a");
-  }
-  dashSelectedKeys.clear();
-  if (S) { renderDash(S); renderDashBar(S); }
-});
-
-// Select-all header checkbox (delegated via click on d-head)
-document.getElementById("d-head").addEventListener("change", (e) => {
-  const chk = e.target.closest("#dash-chk-all");
-  if (!chk || !S) return;
-  const rows = S.rows || [];
-  const visibleRows = dashCurrentExpiry === "ALL" ? rows : rows.filter((r) => {
-    if (dashCurrentExpiry === "CURRENT") return r.v.Expiry === (S.controls?.expiry || "");
-    if (dashCurrentExpiry === "NEXT")    return r.v.Expiry === (S.controls?.next_expiry || "");
-    return String(r.v.Expiry || "").toUpperCase() === dashCurrentExpiry;
-  });
-  if (chk.checked) visibleRows.forEach((r) => dashSelectedKeys.add(dashRowKey(r.v)));
-  else visibleRows.forEach((r) => dashSelectedKeys.delete(dashRowKey(r.v)));
-  renderDash(S); renderDashBar(S);
-});
-
-// Row checkbox change (delegated from d-body)
-document.getElementById("d-body").addEventListener("change", (e) => {
-  const chk = e.target.closest(".dash-row-chk");
-  if (!chk) return;
-  if (chk.checked) dashSelectedKeys.add(chk.dataset.key);
-  else dashSelectedKeys.delete(chk.dataset.key);
-  if (S) renderDashBar(S);
-});
-
-// Row-level single delete (🗑️)
-document.getElementById("d-body").addEventListener("click", async (e) => {
-  const btn = e.target.closest(".dash-del-row");
-  if (!btn) return;
-  const { sym, strike, type, expiry } = btn.dataset;
-  const label = `${sym} ${strike} ${type}${expiry ? " (" + expiry + ")" : ""}`;
-  if (!(await confirmBox("Exclude Strike?", `Delete "${label}"?\n\nIt is hidden from the dashboard and gets no new entries (saved, also after a restart). Open trades are not touched. Use ↺ Restore to bring it back.`, "Exclude"))) return;
-  const r = await api("/api/strikes/delete", { symbol: sym, strike: parseFloat(strike), opt_type: type, expiry: expiry || "" });
-  if (r.ok === false) { toast(r.error || "Failed to exclude strike", true); return; }
-  dashSelectedKeys.delete(btn.dataset.key);
-  toast(`🗑️ ${label} excluded`);
-  poll();
-});
-
-// Row-level restore (↺)
-document.getElementById("d-body").addEventListener("click", async (e) => {
-  const btn = e.target.closest(".dash-restore-row");
-  if (!btn) return;
-  const { sym, strike, type, expiry } = btn.dataset;
-  const label = `${sym} ${strike} ${type}${expiry ? " (" + expiry + ")" : ""}`;
-  const r = await api("/api/strikes/restore", { symbol: sym, strike: parseFloat(strike), opt_type: type, expiry: expiry || "" });
-  if (r.ok === false) { toast(r.error || "Failed to restore", true); return; }
-  toast(`↺ ${label} restored`);
-  poll();
-});
-
-// Delete Selected button
-document.getElementById("dash-del-selected").addEventListener("click", async () => {
-  const count = dashSelectedKeys.size;
-  if (count === 0) return;
-  if (!(await confirmBox("Exclude Selected Strikes?", `Delete ${count} selected strike(s)?\n\nThey are hidden from the dashboard and get no new entries (saved, also after a restart). Open trades are not touched. Use ↺ Restore to bring them back.`, `Exclude (${count})`))) return;
-  // Convert keys to strike objects
-  const strikes = [...dashSelectedKeys].map((k) => {
-    const [symbol, strike, opt_type, expiry] = k.split("|");
-    return { symbol, strike: parseFloat(strike), opt_type, expiry: expiry || "" };
-  });
-  const r = await api("/api/strikes/delete-multiple", { strikes });
-  if (r.ok === false) { toast(r.error || "Failed to exclude strikes", true); return; }
-  toast(`🗑️ ${count} strikes excluded`);
-  dashSelectedKeys.clear();
-  poll();
-});
-
-// Delete All for Expiry button
-document.getElementById("dash-del-expiry").addEventListener("click", async () => {
-  const exp = dashCurrentExpiry;
-  const label = exp === "ALL" ? "ALL EXPIRIES" : exp;
-  if (!(await confirmBox("Exclude All Strikes for Expiry?", `Exclude all visible strikes for "${label}" from the dashboard?\n\nUse ↺ Restore to bring them back.`, "Exclude All"))) return;
-  const symbol = S?.spot?.symbol || S?.controls?.symbol || "NIFTY";
-  const r = await api("/api/strikes/delete-expiry", { expiry: exp, symbol });
-  if (r.ok === false) { toast(r.error || "Failed to exclude expiry strikes", true); return; }
-  toast(`🗑️ All strikes for ${label} excluded`);
-  dashSelectedKeys.clear();
-  poll();
-});
-
-// Restore All Deleted button
-document.getElementById("dash-restore-btn").addEventListener("click", async () => {
-  if (!(await confirmBox("Restore All Excluded Strikes?", "Bring back all excluded strikes to the live dashboard?", "Restore All"))) return;
-  const r = await api("/api/strikes/restore", { all: true });
-  if (r.ok === false) { toast(r.error || "Restore failed", true); return; }
-  toast("↺ All strikes restored");
-  dashSelectedKeys.clear();
-  poll();
-});
 
 // ── mapped strikes & radar ───────────────────────────────
 let mappedConfig = null;

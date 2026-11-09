@@ -116,7 +116,7 @@ p = eng.positions["T1"]
 check(p["qty"] == 150 and p["state"] == "OPENING", f"qty lots×lot, pending {p['qty']} {p['state']}")
 check(b.calls[0][:5] == ("place", "BUY", 150, "LIMIT", 100.5), f"limit +0.5% {b.calls[0]}")
 time.sleep(1.5); settle(eng)
-check(any(c[0] == "modify" and c[2] == "MARKET" for c in b.calls), "chased to MARKET")
+check(any(c[0] == "modify" and c[2] == "MARKET" for c in b.calls), "no newer quote: chased to MARKET")
 check(p["state"] == "OPEN" and p["entry_px"] == 101.0, f"filled {p['state']} {p['entry_px']}")
 settle(eng)
 check(p["sl_oid"] and p["sl_trigger"] == 80.0, f"SL at broker {p['sl_oid']} {p['sl_trigger']}")
@@ -136,6 +136,31 @@ check(abs(eng.realized_rs - (130 - 101) * 150) < 0.01, f"pnl {eng.realized_rs}")
 check(eng.pop_forced_close("T1") is None, "no forced close for app exit")
 check(b.positions() == {}, "flat at broker")
 print("1 ok")
+
+# ── 1b. SMART_LIMIT entry still unfilled after the step → second chase goes to MARKET ──
+check(eng.settings["entry_type"] == "SMART_LIMIT", "SMART_LIMIT is the default entry type")
+b.ltp["121"] = 50.0
+eng.enter(trade("T1B", px=50.0, sl=40.0), inst("121"))
+b.ltp["121"] = 60.0                       # runs away before the order is placed: limit 50.25 sits unfilled
+settle(eng, 0.2)
+pb = eng.positions["T1B"]
+check(pb["state"] == "OPENING", f"T1B pending {pb['state']}")
+eng.on_tick(trade("T1B", px=50.0, sl=40.0), 60.0, bid=59.9, ask=60.1)   # live quote reaches the engine
+b.ltp["121"] = 70.0                       # keeps running past the stepped limit too
+time.sleep(1.6); settle(eng)
+oid_b = pb["entry_oid"]
+check(any(c[0] == "modify" and c[1] == oid_b and c[2] == "LIMIT" and c[3] == 60.1 for c in b.calls), f"first chase steps the limit to the ask {b.calls}")
+check(pb["state"] == "OPENING", f"stepped limit still unfilled {pb['state']}")
+time.sleep(1.6); settle(eng)
+check(any(c[0] == "modify" and c[1] == oid_b and c[2] == "MARKET" for c in b.calls), "second chase goes to MARKET")
+check(pb["state"] == "OPEN" and pb["entry_px"] == 70.0, f"T1B filled at market {pb['state']} {pb['entry_px']}")
+n_chase = sum(1 for c in b.calls if c[0] == "modify" and c[1] == oid_b)
+time.sleep(1.6); settle(eng)
+check(sum(1 for c in b.calls if c[0] == "modify" and c[1] == oid_b) == n_chase, "no third chase")
+settle(eng); b.ltp["121"] = 75.0
+eng.exit(trade("T1B"), "Target 1 Hit", 75.0); settle(eng); settle(eng)
+check(pb["state"] == "CLOSED", f"T1B closed {pb['state']}")
+print("1b ok")
 
 # ── 2. broker SL fills by itself → forced close for the tracker ──
 b.ltp["222"] = 50
@@ -166,6 +191,11 @@ check(sum(1 for o in b.book.values() if o["iid"] == "444" and o["side"] == "BUY"
 print("4 ok")
 
 # ── 5. limits: SELL skip, timeframe, same contract, max trades ──
+check(eng.settings["option_buying_only"] is True, "option buying only by default")
+eng.enter(trade("T5O", action="SELL"), inst("555")); settle(eng)
+check("T5O" not in eng.positions and "Option buying only" in eng.order_status_for("T5O"), "SELL never shorted by default")
+check(any(r["status"] == "NO ORDER" and "short selling disabled" in r["remark"] for r in eng.recent), "buy-only skip written to the order log")
+eng.settings["option_buying_only"] = False
 check(eng.settings["take_sell_setups"] is True, "SELL setups on by default")
 eng.settings["take_sell_setups"] = False
 eng.enter(trade("T5", action="SELL"), inst("555")); settle(eng)
@@ -173,16 +203,17 @@ check("T5" not in eng.positions and "SELL" in eng.order_status_for("T5"), "SELL 
 check(eng.order_ref("T5").startswith("No order: SELL"), "skip reason shown in Order_ID")
 check(any(r["status"] == "NO ORDER" and "SELL setups are off" in r["remark"] for r in eng.recent), "skip written to the order log")
 eng.settings["take_sell_setups"] = True
+eng.settings["option_buying_only"] = True
 eng.save_settings({"trade_1h": False})
 eng.enter(trade("T6", tf="1H Structure"), inst("666")); settle(eng)
 check("T6" not in eng.positions, "1H disabled")
 eng.enter(trade("T7", px=10), inst("444")); settle(eng)
 check("T7" not in eng.positions and "already holding" in eng.order_status_for("T7"), "same contract blocked")
-eng.save_settings({"max_trades": 4})       # T1,T2,T4 count (T3 failed)
+eng.save_settings({"max_trades": 5})       # T1,T1B,T2,T4 count (T3 failed)
 b.ltp["777"] = 5; eng.enter(trade("T8", px=5, sl=4), inst("777")); settle(eng); settle(eng)
-check("T8" in eng.positions, "4th allowed")
+check("T8" in eng.positions, "5th allowed")
 b.ltp["888"] = 5; eng.enter(trade("T9", px=5, sl=4), inst("888")); settle(eng)
-check("T9" not in eng.positions and "max 4" in eng.order_status_for("T9"), "max trades")
+check("T9" not in eng.positions and "max 5" in eng.order_status_for("T9"), "max trades")
 print("5 ok")
 
 # ── 6. kill switch ──

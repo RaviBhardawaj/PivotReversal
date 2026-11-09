@@ -1,15 +1,16 @@
 #!/bin/bash
 # One-step update for the Pivot Reversal app on the Mac.
-#   curl -fsSL https://raw.githubusercontent.com/RaviBhardawaj/PivotReversal/claude/project-thread-3chp93/mac_install/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/RaviBhardawaj/PivotReversal/main/mac_install/install.sh | bash
 # Installs: advanced strategy removed (fixes the startup crash), faster dashboards,
 # current-expiry orders only, strike deletes that stick until Restore, and the redesigned
-# glass dashboard (live trades panel, current-expiry watchlist).
+# glass dashboard (live trades panel, current-expiry watchlist), and unfilled smart-limit
+# entries chased (step to the ask, then MARKET).
 # Every replaced file is backed up first; advanced_strategy* files are moved to the backup.
 set -e
 APP="${APP:-$HOME/Downloads/Pivot Reversal Strategy}"
-BRANCH="${BRANCH:-claude/project-thread-3chp93}"
+BRANCH="${BRANCH:-main}"
 BASE="https://raw.githubusercontent.com/RaviBhardawaj/PivotReversal/$BRANCH"
-FILES="Options-angel_live-ok.py backfill_missed_entries.py deleted_strikes.py glass_dashboard.py web_server.py web/app.js glass_web/glass.js glass_web/glass.css glass_web/index.html tests/test_backfill_expiries.py tests/test_eod_plan_expiries.py tests/test_feed_failover.py tests/test_next_day_levels.py tests/test_next_expiry_gate.py tests/test_glass_current_expiry.py"
+FILES="Options-angel_live-ok.py brokers/engine.py brokers/smart_execution.py backfill_missed_entries.py deleted_strikes.py glass_dashboard.py web_server.py web/app.js glass_web/glass.js glass_web/glass.css glass_web/index.html tests/test_backfill_expiries.py tests/test_eod_plan_expiries.py tests/test_next_day_levels.py tests/test_next_expiry_gate.py tests/test_glass_current_expiry.py tests/test_engine.py tests/test_adapters.py"
 
 cd "$APP" || { echo "Folder not found: $APP"; exit 1; }
 echo "Updating: $APP"
@@ -33,7 +34,8 @@ for f in $FILES; do
   if [ -e "$f" ]; then mkdir -p "$BK/$(dirname "$f")"; cp -p "$f" "$BK/$f"; fi
   mkdir -p "$(dirname "$f")"; cp "$TMP/$f" "$f"
 done
-for f in advanced_strategy advanced_strategy_* tests/test_advanced_strategy.py; do
+# tests/test_feed_failover.py tested a Dhan backup feed that is not in this app: it can only fail.
+for f in advanced_strategy advanced_strategy_* tests/test_advanced_strategy.py tests/test_feed_failover.py; do
   [ -e "$f" ] && mv "$f" "$BK/" && echo "Moved $f to $BK/"
 done
 rm -rf "$TMP"

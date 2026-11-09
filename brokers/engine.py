@@ -2,7 +2,8 @@
 Order engine: turns the strategy's forward-test entries and exits into real broker orders.
 
 Flow for one trade
-  enter()   → checks → LIMIT entry (LTP + buffer) → after N s unfilled, modified to MARKET
+  enter()   → checks → LIMIT entry (smart bid/ask price) → after N s unfilled, limit stepped to the
+            ask → after another N s still unfilled, modified to MARKET
   filled    → stop-loss order placed at the broker (SL-limit at the trade's SL)
   on_tick() → trade's trailed SL changed → broker SL order modified
   exit()    → SL order cancelled → marketable LIMIT exit → after N s unfilled, MARKET
@@ -442,7 +443,7 @@ class OrderEngine:
                 "bid": float(trade.get("Bid") or inst.get("bid") or 0.0),
                 "ask": float(trade.get("Ask") or inst.get("ask") or 0.0),
                 "state": "OPENING", "entry_oid": "", "entry_tag": self._tag("E"), "entry_px": 0.0,
-                "filled": 0, "placed_at": time.time(), "chased": False,
+                "filled": 0, "placed_at": time.time(), "chased": False, "chase_steps": 0, "chased_at": 0.0,
                 "sl_oid": "", "sl_tag": "", "sl_trigger": 0.0,
                 "exit_oid": "", "exit_tag": "", "exit_px": 0.0, "exit_reason": "", "exit_tries": 0,
                 "exit_placed_at": 0.0, "exit_chased": False, "note": "",
@@ -800,8 +801,9 @@ class OrderEngine:
             ltp = pos.get("last_ltp", pos["signal_px"])
             new_px, rationale = smart_execution.compute_chase_modification(side, curr_px, bid=bid, ask=ask, ltp=ltp)
             try:
-                # Step limit price towards market quote first for guaranteed option fill
-                if new_px > 0 and abs(new_px - curr_px) >= 0.05:
+                # Step limit price towards market quote first for guaranteed option fill;
+                # if that step is still unfilled at the next chase, go to MARKET.
+                if int(pos.get("chase_steps", 1)) <= 1 and new_px > 0 and abs(new_px - curr_px) >= 0.05:
                     self.broker.modify(oid, pos["inst"], side, qty, "LIMIT", price=new_px, product=self.settings["product"], tag=tag)
                     pos["entry_order_px"] = new_px
                     self._record(pos, side, qty, new_px, oid, "MODIFIED", f"Chase: {rationale}")
@@ -861,9 +863,14 @@ class OrderEngine:
                     st = book.get(pos["entry_oid"])
                     if st:
                         self._apply_entry_status(pos, st)
-                    if pos["state"] == "OPENING" and not pos["chased"] and self.settings["entry_type"] == "LIMIT" \
-                            and now - pos["placed_at"] >= float(self.settings["chase_after_s"]):
-                        pos["chased"] = True
+                    # Unfilled LIMIT / SMART_LIMIT entry: first chase steps the limit to the ask,
+                    # a second one (another chase_after_s later) converts it to MARKET.
+                    steps = int(pos.get("chase_steps", 1 if pos.get("chased") else 0))
+                    last = pos.get("chased_at") or pos["placed_at"]
+                    if pos["state"] == "OPENING" and steps < 2 \
+                            and self.settings["entry_type"] in ("LIMIT", "SMART_LIMIT") \
+                            and now - last >= float(self.settings["chase_after_s"]):
+                        pos["chased"], pos["chase_steps"], pos["chased_at"] = True, steps + 1, now
                         self._jobs.put(("chase", pos["trade_id"]))
                 elif pos["state"] == "OPEN" and pos["sl_oid"]:
                     st = book.get(pos["sl_oid"])

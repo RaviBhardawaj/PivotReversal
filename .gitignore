@@ -42,3 +42,7 @@ advanced_strategy_open.json
 advanced_strategy_open.json.tmp
 token.pickle.*
 service_account.json
+fno_orders.json
+fno_orders.json.tmp
+.fno_auto_*
+deleted_strikes.json

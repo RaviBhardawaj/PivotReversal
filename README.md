@@ -11,6 +11,7 @@ placement through Angel One, Dhan or Jainam XTS.
 | `Options-angel_live-ok.py` | Main app: Angel One feed, pivot levels, setups, forward test, Tk dashboard, order bar |
 | `brokers/` | Order engine and broker adapters (`angel.py`, `dhan.py`, `xts.py`) |
 | `eod_planner.py` | End-of-day planner that builds the next day's pivot plan |
+| `fno_planner.py` | Daily current-expiry orders for the other F&O symbols ("F&O Orders" sheet tab) |
 | `web_server.py`, `web/` | Local web dashboard (bound to localhost; it never places orders) |
 | `glass_server.py`, `glass_dashboard.py`, `headless_tk.py`, `glass_web/`, `run_glass_dashboard.command` | Glass dashboard: the project's own web dashboard on http://127.0.0.1:8780, run on its own |
 | `run_option_chain.command`, `run.sh`, `run_web.sh` | Launchers (macOS / shell) |
@@ -42,6 +43,20 @@ and can send one 1-lot NIFTY BUY LIMIT 20% below LTP that it modifies and cancel
 
 Secrets (`.env`, `credentials.json`, `token.pickle`, `config.json`, Dhan files) are listed in
 `.gitignore` and must never be committed.
+
+## Daily F&O orders (symbols other than NIFTY)
+
+At 3:45 PM the app also builds the next session's 15M/1H reversal orders for the F&O indices
+(BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, BANKEX), **current expiry only**. Each contract's entry,
+targets and SL come from its own official daily candle, the same maths as the Other Symbols tab.
+
+- They are kept apart from NIFTY: `fno_orders.json` and the **F&O Orders** tab of the Google Sheet
+  (one batched append per run, retried if the connection drops).
+- Dashboard → Other Symbols tab → **Daily F&O Orders**: filter by symbol, side, timeframe, CE/PE,
+  expiry and date; add or remove symbols of the daily list; **⚡ GENERATE ALL F&O** with NEXT
+  EXPIRY picked when you want next-expiry orders.
+- The list is saved as `fno_plan_symbols` in `data_settings.json` (`"ALL"` = every F&O symbol).
+- Test: `python3 tests/test_fno_orders.py`
 
 ## Option strike levels (match TradingView)
 
@@ -79,3 +94,8 @@ and does not open or need the Tk launcher window.
   `web_server.py` (port 8055) and anything on port 8765 are not affected.
 - `GLASS_DASHBOARD_PORT=8790` picks another port; `GLASS_NO_BROWSER=1` stops it opening the browser.
 - Try it without the market: `python3 tests/run_glass_demo.py` (made-up NIFTY data, no login, no orders).
+- **Delete a strike**: 🗑 on a dashboard row or a next-day plan row hides that contract (strike + CE/PE +
+  expiry) and the strategy takes no new entry on it, live or in the backfill. Open trades are not touched.
+  Deletes are saved in `deleted_strikes.json`, so they survive a refresh and a restart, until you press
+  **↻ Regenerate** (brings every deleted strike back and rebuilds the strike levels) or ↺ on one strike.
+  A delete applies to one session: today in market hours, the next trading day after 15:30.

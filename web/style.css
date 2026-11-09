@@ -2160,3 +2160,70 @@ input:checked + .slider:before {
   border-color: #60a5fa;
 }
 
+
+/* ── Daily F&O orders panel (Other Symbols tab) ── */
+.fno-daily-panel {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-prominent);
+}
+.fno-plan-info {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.fno-filter-bar { justify-content: flex-start; }
+.fno-symbol-chips { flex-wrap: wrap; row-gap: 4px; }
+.fno-add-input { width: 170px; }
+.fno-list-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 4px 3px 8px;
+  border-radius: var(--radius-xs);
+}
+.fno-del {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 3px;
+}
+.fno-del:hover { color: var(--red, #ef4444); }
+
+/* ── Delete / regenerate generated orders ── */
+.btn-order-del {
+  background: transparent;
+  border: 1px solid rgba(239, 68, 68, 0.55);
+  color: #f87171;
+  padding: 2px 6px;
+  margin-left: 4px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.2;
+}
+.btn-order-del:hover {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: #ef4444;
+}
+.btn.btn-danger {
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.6);
+  color: #fca5a5;
+}
+.btn.btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.28);
+  color: #ffffff;
+}
+.btn.btn-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

@@ -13,7 +13,7 @@ import csv
 import asyncio
 import threading
 from datetime import datetime, timedelta, time as dt_time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -49,6 +49,7 @@ get_symbol_step = engine.get_symbol_step
 get_symbol_lot_size = engine.get_symbol_lot_size
 EXCHANGE_CONFIG = engine.EXCHANGE_CONFIG
 _safe_float = engine._safe_float
+import fno_planner
 advanced_engine = getattr(engine, "advanced_engine", None)
 if not advanced_engine:
     from advanced_strategy import advanced_engine
@@ -128,7 +129,11 @@ class ManualCloseRequest(BaseModel):
 
 class OtherSymbolsRequest(BaseModel):
     symbol: str = "BANKNIFTY"
-    expiry: str = "ALL"
+    expiry: str = "CURRENT"   # current expiry only unless NEXT / ALL is picked
+
+class FnoOrdersRequest(BaseModel):
+    symbols: List[str] = []    # empty: the configured daily list
+    expiry: str = "CURRENT"    # CURRENT (default), NEXT or ALL
 
 # ── Continuous Next-Day Plan Storage & Date Functions ───────────
 PLANS_FILE = os.path.join(BASE_DIR, "next_day_plans.json")
@@ -161,12 +166,20 @@ def get_current_trading_date():
     return d.strftime("%Y-%m-%d")
 
 def load_all_plans() -> dict:
+    """All stored plans, with the setups of expiries that have passed removed. When anything
+    was removed the file is saved again, so expired orders are purged from the cache."""
     if os.path.exists(PLANS_FILE):
         try:
             with open(PLANS_FILE, "r") as f:
-                return json.load(f)
+                plans = json.load(f)
         except Exception:
             return {}
+        changed = False
+        for p in plans.values():
+            changed = engine.prune_plan_expired(p) or changed
+        if changed:
+            save_all_plans(plans)
+        return plans
     return {}
 
 def save_all_plans(plans_dict: dict):
@@ -198,13 +211,67 @@ def store_next_day_plan(plan_data: dict):
     save_all_plans(plans)
     return plan_data
 
+def delete_plan_setups(symbol: str, setup_ids: list = None, expiry: str = "", plan_id: str = "") -> dict:
+    """Remove generated setups (orders) from a stored next-day plan in next_day_plans.json.
+    setup_ids: those setups; otherwise every setup of the plan (narrowed to `expiry` if given).
+    Only the plan is changed: open trades and broker orders are not touched. When the plan ends
+    up empty it is marked user_cleared so it isn't silently regenerated; REGENERATE rebuilds it."""
+    sym = (symbol or "NIFTY").strip().upper()
+    plans = load_all_plans()
+    key = plan_id if plan_id in plans else None
+    if key is None:
+        cands = [k for k, p in plans.items() if p.get("symbol") == sym]
+        if not cands:
+            return {"success": False, "error": f"No stored plan for {sym}", "deleted": 0}
+        key = max(cands, key=lambda k: plans[k].get("target_trading_date", ""))
+    plan = plans[key]
+    ids = {str(i) for i in (setup_ids or []) if i}
+    if setup_ids is not None and not ids:
+        return {"success": False, "error": "No order selected", "deleted": 0}
+    exp = (expiry or "").strip().upper()
+    exp = "" if exp in ("ALL", "") else exp
+
+    def _hit(s):
+        if ids:
+            return str(s.get("setup_id", "")) in ids
+        return not exp or str(s.get("expiry", "")).upper() == exp
+
+    before = plan.get("setups", []) or []
+    kept = [s for s in before if not _hit(s)]
+    n = len(before) - len(kept)
+    if n:
+        plan["setups"] = kept
+        plan["user_cleared"] = not kept
+        plan["edited_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        save_all_plans(plans)
+    return {"success": True, "symbol": sym, "plan_id": key, "deleted": n, "remaining": len(kept),
+            "target_trading_date": plan.get("target_trading_date", "")}
+
+
+def next_expiry_disabled() -> bool:
+    """True when the Next Expiry 'Enable' box is unticked (only current-expiry orders)."""
+    return bool(getattr(feed.forward_tracker, "allowed_expiries", None))
+
+
+def plan_expiries(sym: str, target_date: str) -> list:
+    """Expiries the plan for target_date trades: the current one (nearest still open that day)
+    and the next one, the next only while the Next Expiry box is ticked. [] when unknown."""
+    try:
+        day = datetime.strptime(target_date, "%Y-%m-%d").date()
+        exps = list(feed.upcoming_expiries(sym, 2, from_day=day) or [])
+    except Exception:
+        exps = []
+    return exps[:1] if (exps and next_expiry_disabled()) else exps
+
+
 def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = False) -> dict:
     sym = (sym or "NIFTY").strip().upper()
     target_date = get_next_trading_date()
 
     if not force_refresh:
         existing = get_stored_plan(sym, target_date)
-        if existing and existing.get("setups"):
+        # A plan the user emptied on purpose stays empty until they regenerate it.
+        if existing and (existing.get("setups") or existing.get("user_cleared")):
             return existing
 
     exch = get_symbol_exchange(sym)
@@ -242,22 +309,33 @@ def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = F
     c_exp = "06OCT2026"
     n_exp = "13OCT2026"
 
-    try:
-        payload_curr = get_dashboard_payload(requested_sym=sym, requested_exp="CURRENT", bypass_stored_plan=True)
-        dash_watch.extend(payload_curr.get("watch_items", []))
-        spot = payload_curr.get("spot", 0.0)
-        c_exp = payload_curr.get("active_expiry") or payload_curr.get("current_expiry") or c_exp
-        n_exp = payload_curr.get("next_expiry") or n_exp
-    except Exception as e_curr:
-        print(f"[NEXT-DAY PLAN] current expiry fetch notice: {e_curr}")
-
-    try:
-        payload_next = get_dashboard_payload(requested_sym=sym, requested_exp="NEXT", bypass_stored_plan=True)
-        dash_watch.extend(payload_next.get("watch_items", []))
-        if spot <= 0:
-            spot = payload_next.get("spot", 0.0)
-    except Exception as e_next:
-        print(f"[NEXT-DAY PLAN] next expiry fetch notice: {e_next}")
+    # The expiries still open on the plan's session: on an expiry day today's contracts are
+    # gone tomorrow, so "current" is the nearest expiry open on target_date, not today's.
+    p_exps = plan_expiries(sym, target_date)
+    if p_exps:
+        c_exp = p_exps[0]
+        n_exp = p_exps[1] if len(p_exps) > 1 else c_exp
+    requests_ = p_exps or (["CURRENT"] if next_expiry_disabled() else ["CURRENT", "NEXT"])
+    for req in requests_:
+        try:
+            pl = get_dashboard_payload(requested_sym=sym, requested_exp=req, bypass_stored_plan=True)
+            dash_watch.extend(pl.get("watch_items", []))
+            if spot <= 0:
+                spot = pl.get("spot", 0.0)
+            if not p_exps and req == "CURRENT":
+                c_exp = pl.get("active_expiry") or pl.get("current_expiry") or c_exp
+                n_exp = pl.get("next_expiry") or n_exp
+        except Exception as e_req:
+            print(f"[NEXT-DAY PLAN] {req} expiry fetch notice: {e_req}")
+    try:   # contracts that expire before the plan's session are never planned
+        dash_watch = engine.drop_expired(dash_watch, datetime.strptime(target_date, "%Y-%m-%d").date())
+    except ValueError:
+        pass
+    if p_exps:
+        _ok = {e.upper() for e in p_exps}
+        dash_watch = [w for w in dash_watch if str(w.get("expiry") or c_exp).upper() in _ok]
+    elif next_expiry_disabled():
+        dash_watch = [w for w in dash_watch if str(w.get("expiry") or c_exp).upper() == str(c_exp).upper()]
 
     setups = []
     seen_setups = set()
@@ -485,6 +563,18 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
                 _cj = json.load(cf)
                 # only levels built for the session TradingView shows now
                 c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+                c_json = engine.drop_expired(c_json)   # never an expired contract's levels
+                # After the close the next session's levels (strike_pivot_cache_next.json, built
+                # at 15:45 for the current AND the next expiry) are this session's levels too:
+                # use them for any contract the session cache does not have yet.
+                try:
+                    with open(os.path.join(BASE_DIR, "strike_pivot_cache_next.json"), "r") as nf:
+                        _nj = json.load(nf)
+                    if (_nj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:next"
+                            and _nj.get("symbol") == current_sym):
+                        c_json = {**(_nj.get("strikes") or {}), **c_json}
+                except Exception:
+                    pass
                 for t_id, s_info in c_json.items():
                     ot_k = s_info.get("opt_type", "CE")
                     stk_k = int(s_info.get("strike", 0))
@@ -1078,7 +1168,9 @@ def background_eod_scheduler():
                     if mtf:
                         with feed.lock:
                             feed.mtf_pivots = mtf
-                        feed.fetch_and_map_all_strikes(sym, None, force_fetch=True, mode="next")
+                        # next-session levels for the current AND the next expiry
+                        for _exp in (plan_expiries(sym, get_next_trading_date()) or [None]):
+                            feed.fetch_and_map_all_strikes(sym, _exp, force_fetch=True, mode="next")
                     feed.sync_multi_symbol_sheet()
                     print(f"[WEB EOD 3:45PM] ✅ Next-day levels cached & synced to Google Sheets.")
                     
@@ -1087,6 +1179,12 @@ def background_eod_scheduler():
                     print(f"[WEB EOD 3:45PM] ⏰ Next-Day Plan generated & stored for target date: {plan_data.get('target_trading_date')}\n")
                 except Exception as nd_err:
                     print(f"[WEB EOD 3:45PM] next-day level calc error: {nd_err}")
+                # Current-expiry orders of the other F&O symbols ("F&O Orders" tab), in the background
+                try:
+                    if fno_planner.start_daily_run(engine):
+                        print("[WEB EOD 3:45PM] F&O symbols: current-expiry orders started in the background")
+                except Exception as fno_err:
+                    print(f"[WEB EOD 3:45PM] F&O orders start error: {fno_err}")
 
         except Exception as e:
             print(f"[EOD SCHEDULER] error: {e}")
@@ -1345,7 +1443,7 @@ async def get_planner_deck(symbol: str = "NIFTY", force_refresh: bool = False):
     sym = (symbol or "NIFTY").strip().upper()
     try:
         plan = get_stored_plan(sym)
-        if not plan or force_refresh or not plan.get("setups"):
+        if not plan or force_refresh or not (plan.get("setups") or plan.get("user_cleared")):
             plan = generate_and_store_next_day_plan(sym, force_refresh=force_refresh)
 
         # Enrich each setup with latest live LTP from snapshot
@@ -1398,6 +1496,9 @@ async def apply_planner_to_live_scanner(req: dict = None):
         if req and isinstance(req, dict):
             sym = req.get("symbol", "NIFTY").strip().upper()
         plan = get_stored_plan(sym)
+        if plan and plan.get("user_cleared") and not plan.get("setups"):
+            return {"success": False, "symbol": sym,
+                    "error": f"All {sym} orders were deleted. Click REGENERATE to build them again."}
         if not plan or not plan.get("setups"):
             plan = generate_and_store_next_day_plan(sym, force_refresh=True)
         return {
@@ -1407,6 +1508,22 @@ async def apply_planner_to_live_scanner(req: dict = None):
             "setups_count": len(plan.get("setups", [])),
             "message": f"Next-Day Plan for {sym} ({plan.get('target_trading_date')}) active in Live Scanner"
         }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+class DeleteOrdersRequest(BaseModel):
+    symbol: str = ""       # planner: NIFTY when empty; F&O: ALL when empty
+    setup_ids: Optional[List[str]] = None   # these orders; omitted = every order (of `expiry`)
+    expiry: str = ""
+    plan_id: str = ""      # NIFTY plan key, e.g. NIFTY_2026-11-05 (latest plan by default)
+    date: str = ""         # F&O plan date (latest by default)
+
+@app.post("/api/planner/delete")
+async def delete_planner_orders(req: DeleteOrdersRequest):
+    """Deletes generated next-day plan orders (one, several, or all of an expiry). Trades
+    already open and orders already sent to the broker are not touched."""
+    try:
+        return delete_plan_setups(req.symbol, req.setup_ids, req.expiry, req.plan_id)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1442,7 +1559,7 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
       - Targets T1-T4, SL blank until confirmed, Live CMP, R:R
     """
     sym = (req.symbol or "BANKNIFTY").strip().upper()
-    req_exp = (req.expiry or "ALL").strip().upper()
+    req_exp = (req.expiry or "CURRENT").strip().upper()
     exch = get_symbol_exchange(sym)
     step = get_symbol_step(sym, exch)
     lot = get_symbol_lot_size(sym, exch)
@@ -1502,28 +1619,14 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
                 _cj = json.load(cf)
                 # only levels built for the session TradingView shows now
                 c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+                c_json = engine.drop_expired(c_json)   # never an expired contract's levels
                 for t_id, s_info in c_json.items():
                     opt_piv_cache[(s_info.get("opt_type", "CE"), int(s_info.get("strike", 0)), s_info.get("expiry", ""))] = s_info
         except Exception:
             pass
 
     for exp_item in target_expiries:
-        combos = [
-            ("15M", "PE", f15.get("pe_strikes", [])[:2], "BUY", "★ BUY (S2/S1 Reclaim)"),
-            ("15M", "CE", f15.get("ce_strikes", [])[:2], "BUY", "★ BUY (S2/S1 Reclaim)"),
-            ("15M", "CE", f15.get("ce_strikes", [])[:2], "SELL", "▼ SELL (R2/R1 Reject)"),
-            ("15M", "PE", f15.get("pe_strikes", [])[:2], "SELL", "▼ SELL (R2/R1 Reject)"),
-            ("1H", "PE", f1h.get("pe_strikes", [])[:2], "BUY", "★ BUY (S2/S1 Reclaim)"),
-            ("1H", "CE", f1h.get("ce_strikes", [])[:2], "BUY", "★ BUY (S2/S1 Reclaim)"),
-            ("1H", "CE", f1h.get("ce_strikes", [])[:2], "SELL", "▼ SELL (R2/R1 Reject)"),
-            ("1H", "PE", f1h.get("pe_strikes", [])[:2], "SELL", "▼ SELL (R2/R1 Reject)"),
-        ]
-        # Pivot (P) strike: traded on both CE and PE for 15M and 1H
-        for _tf, _fo in (("15M", f15), ("1H", f1h)):
-            _ps = list(_fo.get("p_strikes") or ([_fo["P_STRIKE"]] if _fo.get("P_STRIKE") else []))
-            for _ot in ("CE", "PE"):
-                combos.append((_tf, _ot, _ps, "BUY", "★ BUY (S2/S1 Reclaim)"))
-                combos.append((_tf, _ot, _ps, "SELL", "▼ SELL (R2/R1 Reject)"))
+        combos = fno_planner.focus_combos(f15, f1h)
 
         seen = set()
         for tf, ot, stk_list, side, setup_name in combos:
@@ -1561,45 +1664,13 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
                 # Option contract Fibonacci pivots
                 c_info = opt_piv_cache.get((ot, stk, exp_item)) or {}
                 opt_p = _safe_float(c_info.get("P", 0))
-                opt_s1 = _safe_float(c_info.get("S1", 0))
-                opt_s2 = _safe_float(c_info.get("S2", 0))
-                opt_s3 = _safe_float(c_info.get("S3", 0))
-                opt_r1 = _safe_float(c_info.get("R1", 0))
-                opt_r2 = _safe_float(c_info.get("R2", 0))
-                opt_r3 = _safe_float(c_info.get("R3", 0))
 
                 if opt_p <= 0:
                     continue   # no official-candle levels for this contract yet; never estimate them
 
-                is_buy = (side == "BUY")
-                if is_buy:
-                    planned_ep = opt_s2 if opt_s2 > 0.05 else opt_s1
-                    if planned_ep <= 0.05: planned_ep = round(ltp * 0.95, 2)
-                    tgt1 = opt_s1 if (opt_s1 > planned_ep) else opt_p
-                    if tgt1 <= planned_ep: tgt1 = round(planned_ep * 1.25, 2)
-                    tgt2 = opt_p if (opt_p > tgt1) else opt_r1
-                    if tgt2 <= tgt1: tgt2 = round(tgt1 * 1.20, 2)
-                    tgt3 = opt_r1 if (opt_r1 > tgt2) else opt_r2
-                    if tgt3 <= tgt2: tgt3 = round(tgt2 * 1.20, 2)
-                    tgt4 = opt_r2 if (opt_r2 > tgt3) else opt_r3
-                    if tgt4 <= tgt3: tgt4 = round(tgt3 * 1.20, 2)
-                    sl_val = opt_s3 if opt_s3 > 0.05 else round(planned_ep * 0.88, 2)
-                    rr = f"{((tgt1 - planned_ep) / max(planned_ep - sl_val, 0.5)):.1f}:1" if (planned_ep > sl_val) else "1:2.0"
-                    sig = f"Reversal BUY @ S2:{planned_ep:.2f} | Reclaim S2 | T1:{tgt1:.2f} T2:{tgt2:.2f}"
-                else:
-                    planned_ep = opt_r2 if opt_r2 > 0.05 else opt_r1
-                    if planned_ep <= 0.05: planned_ep = round(ltp * 1.05, 2)
-                    tgt1 = opt_r1 if (opt_r1 < planned_ep and opt_r1 > 0) else opt_p
-                    if tgt1 >= planned_ep: tgt1 = round(planned_ep * 0.80, 2)
-                    tgt2 = opt_p if (opt_p < tgt1 and opt_p > 0) else opt_s1
-                    if tgt2 >= tgt1: tgt2 = round(tgt1 * 0.80, 2)
-                    tgt3 = opt_s1 if (opt_s1 < tgt2 and opt_s1 > 0) else opt_s2
-                    if tgt3 >= tgt2: tgt3 = round(tgt2 * 0.80, 2)
-                    tgt4 = opt_s2 if (opt_s2 < tgt3 and opt_s2 > 0) else opt_s3
-                    if tgt4 >= tgt3: tgt4 = round(tgt3 * 0.80, 2)
-                    sl_val = opt_r3 if opt_r3 > 0.05 else round(planned_ep * 1.12, 2)
-                    rr = f"{((planned_ep - tgt1) / max(sl_val - planned_ep, 0.5)):.1f}:1" if (sl_val > planned_ep) else "1:2.0"
-                    sig = f"Reversal SELL @ R2:{planned_ep:.2f} | Rejection R2 | T1:{tgt1:.2f} T2:{tgt2:.2f}"
+                o = fno_planner.order_from_levels(c_info, side, ltp)
+                planned_ep, sl_val, rr, sig = o["entry_price"], o["sl"], o["rr"], o["signal"]
+                tgt1, tgt2, tgt3, tgt4 = o["target_1"], o["target_2"], o["target_3"], o["target_4"]
 
                 rows.append({
                     "timeframe": tf,
@@ -1642,6 +1713,68 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
         },
         "setups": rows
     }
+
+# ── Daily F&O orders (symbols other than NIFTY) ──────────────────
+@app.get("/api/fno-orders")
+async def get_fno_orders(date: str = "", symbol: str = "ALL"):
+    """Stored daily orders of the other F&O symbols (latest plan date by default), with the
+    run's progress while one is going."""
+    try:
+        out = fno_planner.flat_orders(date or None, symbol)
+        snap = dict(feed.live_data)
+        for s in out["setups"]:
+            tick = snap.get(str(s.get("token", ""))) or {}
+            s["live_cmp"] = round(_safe_float(tick.get("ltp", 0)), 2)
+        out["configured"] = fno_planner.configured_symbols(Session.scrip_df)
+        out["status"] = dict(fno_planner.status)
+        out["success"] = True
+        return out
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+class FnoSymbolRequest(BaseModel):
+    action: str = "add"        # add, remove or reset
+    symbol: str = ""
+
+@app.post("/api/fno-orders/symbols")
+async def edit_fno_symbols(req: FnoSymbolRequest):
+    """Add / remove a symbol of the daily F&O orders list (reset: back to the indices)."""
+    try:
+        return fno_planner.edit_symbols(req.action, req.symbol, Session.scrip_df)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/fno-orders/generate")
+async def generate_fno_orders(req: FnoOrdersRequest):
+    """Starts a run in the background: current expiry by default, NEXT / ALL only when asked."""
+    if fno_planner.status.get("running"):
+        return {"success": False, "error": "A run is already in progress", "status": dict(fno_planner.status)}
+    if Session.scrip_df is None:
+        return {"success": False, "error": "Instrument list not loaded yet (Angel One login pending)"}
+    exp = (req.expiry or "CURRENT").strip().upper()
+    syms = [s for s in (req.symbols or []) if s and s.strip()] or None
+    threading.Thread(target=fno_planner.generate, args=(engine,),
+                     kwargs={"symbols": syms, "expiry_mode": exp}, daemon=True, name="fno-orders").start()
+    return {"success": True, "message": f"Generating {exp.lower()} expiry orders", "expiry": exp}
+
+@app.post("/api/fno-orders/delete")
+async def delete_fno_orders(req: DeleteOrdersRequest):
+    """Deletes generated F&O orders: the given setup_ids, or every order of the plan date
+    narrowed to symbol / expiry. Removes them from fno_orders.json now and from the
+    "F&O Orders" sheet tab in the background. Trades and broker orders are not touched."""
+    if fno_planner.status.get("running"):
+        return {"success": False, "error": "A generate run is in progress; delete after it finishes"}
+    try:
+        out = fno_planner.delete_orders(req.date or None, req.setup_ids,
+                                        None if req.setup_ids else req.symbol, req.expiry)
+        keys = out.pop("keys", [])
+        if keys:
+            threading.Thread(target=lambda: print(f"[F&O ORDERS] {fno_planner.remove_from_sheet(engine, keys)}"),
+                             daemon=True, name="fno-sheet-delete").start()
+            out["sheet"] = "removing from the sheet in the background"
+        return out
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 @app.post("/api/other-symbols/load-plan")
 async def load_other_symbols_to_plan(req: OtherSymbolsRequest):

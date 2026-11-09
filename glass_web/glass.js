@@ -525,6 +525,13 @@ $("b-plan").addEventListener("click", () => { openModal("m-plan"); loadPlan(); }
 $("mp-modes").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { planMode = b.dataset.m; loadPlan(); } });
 $("mp-s3").addEventListener("change", () => loadPlan());
 $("mp-refresh").addEventListener("click", () => loadPlan(true));
+$("mp-regen").addEventListener("click", async () => {
+  // Rebuild every strike's levels (the plan and orders come from them); deleted strikes stay removed.
+  const r = await api("/api/map-levels", {});
+  if (r.ok === false) { toast(r.error || "Regenerate failed", true); return; }
+  toast("↻ Regenerating strike levels and plan (the status line shows progress)");
+  loadPlan(true);
+});
 $("mp-body").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-plan-del]"); if (!b) return;
   const [strike, type, expiry] = b.dataset.planDel.split("|");

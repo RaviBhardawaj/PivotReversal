@@ -142,7 +142,8 @@
   <div class="small mt muted">Trading logic: BUY on S2 reclaim (T1:S1 → T2:P → T3:R1 → T4:R2 | SL = LL of day) · SELL on R2 rejection (T1:R1 → T2:P → T3:S1 → T4:S2 | SL = HH of day)</div>
   <div class="filters mt" id="mp-modes"></div>
   <div class="row"><label class="toggle"><input type="checkbox" id="mp-s3" checked> Include S3 / R3 (max 6 strikes)</label>
-    <span class="grow"></span><button class="btn" id="mp-refresh">🔄 Refresh focus levels</button></div>
+    <span class="grow"></span><button class="btn" id="mp-refresh">🔄 Refresh focus levels</button>
+    <button class="btn go" id="mp-regen" title="Rebuild today's strike levels and plan. Deleted strikes stay removed.">↻ Regenerate</button></div>
   <div class="tablewrap mt"><table class="mono dash"><thead id="mp-head"></thead><tbody id="mp-body"></tbody></table></div>
 </div></div>
 

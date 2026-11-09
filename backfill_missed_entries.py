@@ -12,8 +12,8 @@ then start the app again. Without --apply it works on a scratch copy and changes
 
     python3 backfill_missed_entries.py 2026-10-19 PE 23100 23050 23000            # dry run
     python3 backfill_missed_entries.py 2026-10-19 PE 23100 23050 23000 --apply    # write for real
-    python3 backfill_missed_entries.py 2026-11-09 auto            # every 15M/1H strike, CE+PE, every expiry in
-    python3 backfill_missed_entries.py 2026-11-09 auto --apply    # strike_pivot_cache.json (dry run / for real)
+    python3 backfill_missed_entries.py 2026-11-09 auto            # every 15M/1H strike, CE+PE, current expiry
+    python3 backfill_missed_entries.py 2026-11-09 auto --apply    # (add --next for the next expiry too)
 """
 import importlib.util, json, os, shutil, sys, tempfile
 from datetime import datetime as _real_dt
@@ -89,9 +89,21 @@ def tf_of(stk):
     if stk in f1h: return "1H Structure"
     return ""
 
+def _exp_date(e):
+    try:
+        return _real_dt.strptime(str(e).upper(), "%d%b%Y").date()
+    except Exception:
+        return None
+
 if AUTO:
+    # current expiry only; the next one too with --next (AJ, 9 Nov: no trades on far expiries)
+    _day = _real_dt.strptime(DAY, "%Y-%m-%d").date()
+    _exps = sorted({s.get("expiry") for s in cache.values()
+                    if _exp_date(s.get("expiry")) and _exp_date(s.get("expiry")) >= _day}, key=_exp_date)
+    _keep = set(_exps[:2] if "--next" in sys.argv else _exps[:1])
+    print("Expiries replayed:", ", ".join(sorted(_keep, key=_exp_date)) or "none")
     jobs = sorted({(s.get("opt_type"), int(s["strike"]), s.get("expiry")) for s in cache.values()
-                   if s.get("opt_type") in ("CE", "PE") and tf_of(int(s["strike"]))})
+                   if s.get("opt_type") in ("CE", "PE") and tf_of(int(s["strike"])) and s.get("expiry") in _keep})
 else:
     jobs = [(OPT, stk, EXPIRY) for stk in STRIKES]
 print(f"{len(jobs)} contracts to replay")
@@ -130,7 +142,7 @@ for OPT, stk, EXPIRY in jobs:
             entry_i = i
             break
     if entry_i is None:
-        print(f"{stk} {OPT}: rule never fired on {DAY} - no entry")
+        print(f"{EXPIRY} {stk} {OPT}: rule never fired on {DAY} - no entry")
         continue
 
     t_entry = bars[entry_i][0].replace(tzinfo=None)

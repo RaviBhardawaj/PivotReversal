@@ -620,6 +620,8 @@ class StrategyStrikeState:
         self.entry_time    = ""
         self.targets       = []
         self.signal        = f"★ {self.opt_type} BUY not recorded — still watching the break above {self.conf_high:.2f}"
+        print(f"[S2 SKIP] {self.opt_type} {self.strike} {self.expiry}: confirmed BUY was not recorded "
+              f"(not a 15M/1H strike, outside the zone, or the tracker refused it) — watching again")
 
     def seed_from_closed(self, trade: dict, sl_hits: int = 0, entries: int = 1):
         """After an app restart: show the strike's last trade of the day (entry, SL, exit) as it
@@ -918,10 +920,16 @@ class StrategyStrikeState:
                 elif start_favor and not buy_entry_ok(ltp, _ep0, self.ll, _t1 if _levels_up else 0.0):
                     # price has run away from the entry: no chasing; wait for it to come back
                     self.signal = f"★ {self.opt_type} {active_lvl} Broke confirmation high — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
+                    if not getattr(self, "_chase_logged", False):
+                        self._chase_logged = True
+                        print(f"[S2 SKIP] {self.opt_type} {self.strike} {self.expiry} {now.strftime('%H:%M:%S')}: "
+                              f"broke confirmation high {_ep0:.2f} but LTP {ltp:.2f} is past the chase room "
+                              f"(LL {self.ll:.2f}, T1 {_t1:.2f}) — waiting for a pull-back")
                     start_favor = False
                 elif not start_favor and self.conf_high > 0:
                     self.signal = f"★ {self.opt_type} {active_lvl} Retested — Buy Above Confirmation High {self.conf_high:.2f}"
                 if start_favor:
+                    self._chase_logged = False
                     # Step 5: ENTRY IS CONFIRMED!
                     self.state         = "CONFIRMED_BUY"
                     self.trigger_level = active_lvl

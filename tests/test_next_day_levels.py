@@ -1,5 +1,5 @@
-"""Next-session levels after the close: built from TODAY's candle for the current AND the next
-expiry, and eod_planner.py takes its plan from them.
+"""Next-session levels after the close: built from TODAY's candle for the CURRENT expiry only
+(daily orders are current-expiry only), and eod_planner.py takes its plan from them.
 Run: python3 tests/test_next_day_levels.py"""
 import sys, os, json, tempfile, importlib.util
 # tkinter is stubbed so the app module loads without a display
@@ -88,15 +88,15 @@ from datetime import date
 assert f.upcoming_expiries("NIFTY",2,from_day=date(2026,10,14))==["20OCT2026"]
 print("A expiries for the next session: current and next: OK")
 
-# B) 15:45: next-day levels for BOTH expiries, from today's (12 Oct) candle, then the planner
+# B) 15:45: next-day levels for the current expiry only, from today's (12 Oct) candle, then the planner
 f.build_next_day_levels("NIFTY")
 d=json.load(open(app.STRIKE_PIVOT_NEXT_CACHE))
 import collections
 by=collections.Counter(v["expiry"] for v in d["strikes"].values())
-assert d["basis_key"]=="2026-10-13:next" and set(by)=={"13OCT2026","20OCT2026"} and min(by.values())>0, (d["basis_key"],by)
+assert d["basis_key"]=="2026-10-13:next" and set(by)=={"13OCT2026"} and min(by.values())>0, (d["basis_key"],by)
 for t,s in d["strikes"].items(): check(s,t,"2026-10-12")
 assert len(launched)==1 and launched[0][-1].endswith("eod_planner.py"), launched
-print("B next-day levels for 13OCT and 20OCT from the 12 Oct candle, planner started once:", dict(by), ": OK")
+print("B next-day levels for 13OCT only (no next/far expiry) from the 12 Oct candle, planner started once:", dict(by), ": OK")
 # C) the second 15:45 timer the same day does nothing
 f.build_next_day_levels("NIFTY"); assert len(launched)==1
 print("C runs once a day: OK")
@@ -119,8 +119,8 @@ plan=pl.generate_plan("NIFTY")
 assert plan["for_date"]=="2026-10-13" and plan["prev_ohlc"]["close"]==22363.35, plan["prev_ohlc"]
 assert plan["pivots"]==pl.calc_fib_pivots(22651.1,22304.45,22363.35)
 exps=collections.Counter(v["expiry"] for v in plan["strike_levels"].values())
-assert set(exps)=={"13OCT2026","20OCT2026"}, exps
-print("D plan for 13 Oct from the 12 Oct candle, %d strike levels from the app (both expiries): OK"%len(plan["strike_levels"]))
+assert set(exps)=={"13OCT2026"}, exps
+print("D plan for 13 Oct from the 12 Oct candle, %d strike levels from the app (current expiry): OK"%len(plan["strike_levels"]))
 # E) before the close the plan still uses the last completed day
 FakeDT.v=datetime(2026,10,12,14,0)
 plan=pl.generate_plan("NIFTY")

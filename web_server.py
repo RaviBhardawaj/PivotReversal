@@ -49,9 +49,6 @@ get_symbol_step = engine.get_symbol_step
 get_symbol_lot_size = engine.get_symbol_lot_size
 EXCHANGE_CONFIG = engine.EXCHANGE_CONFIG
 _safe_float = engine._safe_float
-advanced_engine = getattr(engine, "advanced_engine", None)
-if not advanced_engine:
-    from advanced_strategy import advanced_engine
 
 try:
     from mapped_strikes_manager import mapped_strikes_mgr
@@ -111,7 +108,47 @@ class ConnectionManager:
         for dc in dead_connections:
             self.disconnect(dc)
 
+    async def broadcast_text(self, text: str):
+        dead_connections = []
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(text)
+            except Exception:
+                dead_connections.append(connection)
+        for dc in dead_connections:
+            self.disconnect(dc)
+
 manager = ConnectionManager()
+
+
+# ── Read-once file cache ───────────────────────────────────────
+# The dashboard payload is rebuilt for every broadcast; re-reading and re-parsing the same files
+# each time cost far more than building the payload. A file is read again only when it changes.
+_FILE_CACHE: Dict[str, Any] = {}
+
+
+def _cached_file(path: str, parse):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _FILE_CACHE.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    val = parse(path)
+    _FILE_CACHE[path] = (key, val)
+    return val
+
+
+def _read_json(path):
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def _read_csv_rows(path):
+    with open(path, "r", newline="") as f:
+        return list(csv.DictReader(f))
 
 # ── Pydantic Request Models ────────────────────────────────────
 class StartFeedRequest(BaseModel):
@@ -161,12 +198,20 @@ def get_current_trading_date():
     return d.strftime("%Y-%m-%d")
 
 def load_all_plans() -> dict:
+    """All stored plans, with the setups of expiries that have passed removed. When anything
+    was removed the file is saved again, so expired orders are purged from the cache."""
     if os.path.exists(PLANS_FILE):
         try:
             with open(PLANS_FILE, "r") as f:
-                return json.load(f)
+                plans = json.load(f)
         except Exception:
             return {}
+        changed = False
+        for p in plans.values():
+            changed = engine.prune_plan_expired(p) or changed
+        if changed:
+            save_all_plans(plans)
+        return plans
     return {}
 
 def save_all_plans(plans_dict: dict):
@@ -198,7 +243,21 @@ def store_next_day_plan(plan_data: dict):
     save_all_plans(plans)
     return plan_data
 
-def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = False) -> dict:
+def plan_expiries(sym: str, target_date: str, include_next: bool = False) -> list:
+    """Expiries the plan for target_date trades: the current one (nearest still open that day),
+    plus the next one only when asked for (include_next). Never a far expiry. [] when unknown."""
+    try:
+        day = datetime.strptime(target_date, "%Y-%m-%d").date()
+        exps = list(feed.upcoming_expiries(sym, 2, from_day=day) or [])
+    except Exception:
+        exps = []
+    return exps if include_next else exps[:1]
+
+
+def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = False,
+                                     include_next: bool = False) -> dict:
+    """Next-day plan for sym. Current-expiry orders only; include_next=True (asked for from the
+    planner with the NEXT expiry selected) adds the next expiry. Never a far expiry."""
     sym = (sym or "NIFTY").strip().upper()
     target_date = get_next_trading_date()
 
@@ -242,22 +301,33 @@ def generate_and_store_next_day_plan(sym: str = "NIFTY", force_refresh: bool = F
     c_exp = "06OCT2026"
     n_exp = "13OCT2026"
 
-    try:
-        payload_curr = get_dashboard_payload(requested_sym=sym, requested_exp="CURRENT", bypass_stored_plan=True)
-        dash_watch.extend(payload_curr.get("watch_items", []))
-        spot = payload_curr.get("spot", 0.0)
-        c_exp = payload_curr.get("active_expiry") or payload_curr.get("current_expiry") or c_exp
-        n_exp = payload_curr.get("next_expiry") or n_exp
-    except Exception as e_curr:
-        print(f"[NEXT-DAY PLAN] current expiry fetch notice: {e_curr}")
-
-    try:
-        payload_next = get_dashboard_payload(requested_sym=sym, requested_exp="NEXT", bypass_stored_plan=True)
-        dash_watch.extend(payload_next.get("watch_items", []))
-        if spot <= 0:
-            spot = payload_next.get("spot", 0.0)
-    except Exception as e_next:
-        print(f"[NEXT-DAY PLAN] next expiry fetch notice: {e_next}")
+    # The expiries still open on the plan's session: on an expiry day today's contracts are
+    # gone tomorrow, so "current" is the nearest expiry open on target_date, not today's.
+    p_exps = plan_expiries(sym, target_date, include_next)
+    if p_exps:
+        c_exp = p_exps[0]
+        n_exp = p_exps[1] if len(p_exps) > 1 else c_exp
+    requests_ = p_exps or (["CURRENT", "NEXT"] if include_next else ["CURRENT"])
+    for req in requests_:
+        try:
+            pl = get_dashboard_payload(requested_sym=sym, requested_exp=req, bypass_stored_plan=True)
+            dash_watch.extend(pl.get("watch_items", []))
+            if spot <= 0:
+                spot = pl.get("spot", 0.0)
+            if not p_exps and req == "CURRENT":
+                c_exp = pl.get("active_expiry") or pl.get("current_expiry") or c_exp
+                n_exp = pl.get("next_expiry") or n_exp
+        except Exception as e_req:
+            print(f"[NEXT-DAY PLAN] {req} expiry fetch notice: {e_req}")
+    try:   # contracts that expire before the plan's session are never planned
+        dash_watch = engine.drop_expired(dash_watch, datetime.strptime(target_date, "%Y-%m-%d").date())
+    except ValueError:
+        pass
+    if p_exps:
+        _ok = {e.upper() for e in p_exps}
+        dash_watch = [w for w in dash_watch if str(w.get("expiry") or c_exp).upper() in _ok]
+    elif not include_next:
+        dash_watch = [w for w in dash_watch if str(w.get("expiry") or c_exp).upper() == str(c_exp).upper()]
 
     setups = []
     seen_setups = set()
@@ -481,17 +551,27 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
     opt_piv_cache = {}
     if os.path.exists(cache_file):
         try:
-            with open(cache_file, "r") as cf:
-                _cj = json.load(cf)
-                # only levels built for the session TradingView shows now
-                c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
-                for t_id, s_info in c_json.items():
-                    ot_k = s_info.get("opt_type", "CE")
-                    stk_k = int(s_info.get("strike", 0))
-                    exp_k = s_info.get("expiry", "")
-                    opt_piv_cache[(ot_k, stk_k, exp_k)] = s_info
-                    if exp_k == curr_exp:
-                        opt_piv_cache[(ot_k, stk_k)] = s_info
+            _cj = _cached_file(cache_file, _read_json) or {}
+            # only levels built for the session TradingView shows now
+            c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+            c_json = engine.drop_expired(c_json)   # never an expired contract's levels
+            # After the close the next session's levels (strike_pivot_cache_next.json, built
+            # at 15:45) are this session's levels too: use them for any contract the session
+            # cache does not have yet.
+            try:
+                _nj = _cached_file(os.path.join(BASE_DIR, "strike_pivot_cache_next.json"), _read_json) or {}
+                if (_nj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:next"
+                        and _nj.get("symbol") == current_sym):
+                    c_json = {**engine.drop_expired(_nj.get("strikes") or {}), **c_json}
+            except Exception:
+                pass
+            for t_id, s_info in c_json.items():
+                ot_k = s_info.get("opt_type", "CE")
+                stk_k = int(s_info.get("strike", 0))
+                exp_k = s_info.get("expiry", "")
+                opt_piv_cache[(ot_k, stk_k, exp_k)] = s_info
+                if exp_k == curr_exp:
+                    opt_piv_cache[(ot_k, stk_k)] = s_info
         except Exception:
             pass
 
@@ -500,12 +580,10 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
     closed_trades_raw = []
     if os.path.exists(FORWARD_TEST_FILE):
         try:
-            with open(FORWARD_TEST_FILE, "r", newline="") as f:
-                reader = csv.DictReader(f)
-                for r in reader:
-                    if r.get("Status", "").strip() == "CLOSED":
-                        if r.get("Date", "").strip() == today_date:
-                            closed_trades_raw.append(r)
+            for r in _cached_file(FORWARD_TEST_FILE, _read_csv_rows) or []:
+                if r.get("Status", "").strip() == "CLOSED":
+                    if r.get("Date", "").strip() == today_date:
+                        closed_trades_raw.append(dict(r))
         except Exception as _fe:
             print(f"[CSV READ ERROR] {_fe}")
 
@@ -1026,25 +1104,30 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
         "expiries": expiries_list,
         "active_trades": active_trades,
         "closed_trades": list(reversed(closed_with_cum)),
-        "advanced_strategy": advanced_engine.get_summary_stats() if advanced_engine else {},
-        "advanced_active_trades": advanced_engine.get_active_trades() if advanced_engine else [],
-        "advanced_closed_trades": advanced_engine.get_closed_trades() if advanced_engine else [],
-        "advanced_rejections": advanced_engine.get_rejections(25) if advanced_engine else [],
         "mapped_strikes_config": mapped_strikes_mgr.get_config() if mapped_strikes_mgr else {}
     }
 
 # ── Background Broadcast Worker ────────────────────────────────
+BROADCAST_INTERVAL_S = float(os.getenv("WEB_BROADCAST_INTERVAL", "1.0"))
+
+
 async def broadcast_loop():
-    """Broadcasts 100-200ms real-time state to connected WebSocket clients."""
+    """Sends the dashboard state to connected WebSocket clients once a second.
+
+    It used to rebuild and send the full payload every 100 ms on the event loop, which kept a CPU
+    core busy and made the browser redraw every table ten times a second. The payload is now built
+    in a worker thread (so API calls stay responsive), serialised once, and shared by all clients.
+    """
     while True:
+        started = time.monotonic()
         try:
             if manager.active_connections:
                 req_sym = getattr(feed, 'symbol', 'NIFTY')
-                payload = get_dashboard_payload(requested_sym=req_sym, requested_exp="ALL")
-                await manager.broadcast(payload)
+                payload = await asyncio.to_thread(get_dashboard_payload, requested_sym=req_sym, requested_exp="ALL")
+                await manager.broadcast_text(json.dumps(payload, default=str))
         except Exception as e:
             print(f"[WS BROADCAST] error: {e}")
-        await asyncio.sleep(0.1)   # 100ms ultra-fast real-time tick interval
+        await asyncio.sleep(max(0.1, BROADCAST_INTERVAL_S - (time.monotonic() - started)))
 
 # ── Background EOD Scheduler (3:00 PM Square-off & 3:45 PM Next-Day) ──
 def background_eod_scheduler():
@@ -1078,7 +1161,9 @@ def background_eod_scheduler():
                     if mtf:
                         with feed.lock:
                             feed.mtf_pivots = mtf
-                        feed.fetch_and_map_all_strikes(sym, None, force_fetch=True, mode="next")
+                        # daily: next-session levels for the CURRENT expiry only
+                        for _exp in (plan_expiries(sym, get_next_trading_date()) or [None]):
+                            feed.fetch_and_map_all_strikes(sym, _exp, force_fetch=True, mode="next")
                     feed.sync_multi_symbol_sheet()
                     print(f"[WEB EOD 3:45PM] ✅ Next-day levels cached & synced to Google Sheets.")
                     
@@ -1207,7 +1292,7 @@ async def start_feed(req: StartFeedRequest):
 
     if not req_exp or req_exp in ["CURRENT", ""]:
         target_exp = curr_exp
-        exp_list = [curr_exp, next_exp] if (next_exp and next_exp != curr_exp) else [curr_exp]
+        exp_list = [curr_exp]   # current expiry only: next is opened manually (NEXT / ALL)
     elif req_exp == "NEXT":
         target_exp = next_exp
         exp_list = [next_exp, curr_exp] if (curr_exp and curr_exp != next_exp) else [next_exp]
@@ -1219,11 +1304,14 @@ async def start_feed(req: StartFeedRequest):
         exp_list = [req_exp]
     else:
         target_exp = curr_exp
-        exp_list = [curr_exp, next_exp] if (next_exp and next_exp != curr_exp) else [curr_exp]
+        exp_list = [curr_exp]
 
     feed.symbol = sym
     feed.expiry = curr_exp
     feed.target_expiry = target_exp
+    # Orders: current expiry only; the next expiry too only when the feed is started for NEXT.
+    feed.forward_tracker.set_allowed_expiries(
+        engine.allowed_entry_expiries(curr_exp, next_exp, req_exp == "NEXT"))
     if next_exp:
         feed.next_expiry = next_exp
 
@@ -1263,7 +1351,7 @@ async def start_feed(req: StartFeedRequest):
 
                 try:
                     feed.fetch_and_map_all_strikes(symbol=sym, expiry=curr_exp, force_fetch=True)
-                    if next_exp and next_exp != curr_exp:
+                    if next_exp and next_exp != curr_exp and next_exp in exp_list:   # only when opened
                         feed.fetch_and_map_all_strikes(symbol=sym, expiry=next_exp, force_fetch=True)
                 except Exception as map_err:
                     print(f"[WEB FEED] strike map notice: {map_err}")
@@ -1369,10 +1457,12 @@ async def get_planner_deck(symbol: str = "NIFTY", force_refresh: bool = False):
 async def trigger_eod_planner(req: dict = None):
     """Force re-computes and stores next-day plan for the target trading session."""
     try:
-        sym = "NIFTY"
+        sym, include_next = "NIFTY", False
         if req and isinstance(req, dict):
             sym = req.get("symbol", "NIFTY")
-        plan = generate_and_store_next_day_plan(sym, force_refresh=True)
+            # next-expiry orders only when asked for (planner set to the NEXT expiry)
+            include_next = bool(req.get("include_next")) or str(req.get("expiry", "")).upper() == "NEXT"
+        plan = generate_and_store_next_day_plan(sym, force_refresh=True, include_next=include_next)
 
         snap = dict(feed.live_data)
         for s in plan.get("setups", []):
@@ -1498,12 +1588,12 @@ async def calculate_other_symbols(req: OtherSymbolsRequest):
     opt_piv_cache = {}
     if os.path.exists(cache_file):
         try:
-            with open(cache_file, "r") as cf:
-                _cj = json.load(cf)
-                # only levels built for the session TradingView shows now
-                c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
-                for t_id, s_info in c_json.items():
-                    opt_piv_cache[(s_info.get("opt_type", "CE"), int(s_info.get("strike", 0)), s_info.get("expiry", ""))] = s_info
+            _cj = _cached_file(cache_file, _read_json) or {}
+            # only levels built for the session TradingView shows now
+            c_json = _cj.get("strikes", {}) if _cj.get("basis_key") == f"{engine.pivot_session_date().isoformat()}:session" else {}
+            c_json = engine.drop_expired(c_json)   # never an expired contract's levels
+            for t_id, s_info in c_json.items():
+                opt_piv_cache[(s_info.get("opt_type", "CE"), int(s_info.get("strike", 0)), s_info.get("expiry", ""))] = s_info
         except Exception:
             pass
 
@@ -1659,60 +1749,6 @@ async def load_other_symbols_to_plan(req: OtherSymbolsRequest):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# ── Advanced Strategy REST Endpoints ─────────────────────────
-@app.get("/api/advanced-strategy/summary")
-async def get_advanced_strategy_summary():
-    """Returns overall performance and status for the Advanced Version strategy."""
-    if not advanced_engine:
-        return {"error": "Advanced Strategy Engine not initialized"}
-    return advanced_engine.get_summary_stats()
-
-@app.get("/api/advanced-strategy/trades")
-async def get_advanced_strategy_trades():
-    """Returns active and closed trades for the Advanced Version."""
-    if not advanced_engine:
-        return {"active": [], "closed": [], "summary": {}}
-    return {
-        "active": advanced_engine.get_active_trades(),
-        "closed": advanced_engine.get_closed_trades(),
-        "summary": advanced_engine.get_summary_stats()
-    }
-
-@app.get("/api/advanced-strategy/rejections")
-async def get_advanced_strategy_rejections(limit: int = 50):
-    """Returns recent candidate rejections and evaluation reasons."""
-    if not advanced_engine:
-        return {"rejections": []}
-    return {
-        "rejections": advanced_engine.get_rejections(limit)
-    }
-
-@app.get("/api/advanced-strategy/plan")
-async def get_advanced_strategy_plan():
-    """Returns Advance Next-Day Plan setups enriched with live LTP."""
-    if not advanced_engine:
-        return {"setups": []}
-    plan = advanced_engine.get_next_day_plan()
-    if not plan or not plan.get("setups"):
-        plan = advanced_engine.build_next_day_plan()
-    setups = plan.get("setups", [])
-    enriched = []
-    for s in setups:
-        s_dict = dict(s)
-        ot = s.get("type", "CE")
-        stk = int(float(s.get("strike", 0)))
-        if hasattr(feed, "get_strike_ltp"):
-            live_v = feed.get_strike_ltp(ot, stk, s.get("expiry"))
-            if live_v > 0:
-                s_dict["ltp"] = round(live_v, 2)
-        enriched.append(s_dict)
-    return {
-        "plan_id": plan.get("strategy_id", "ADVANCED_PIVOT_REVERSAL"),
-        "target_session_date": plan.get("target_session_date", ""),
-        "setups": enriched
-    }
-
-
 # ── Mapped Strikes & Custom Lots API ───────────────────────────
 class MappedStrikeItem(BaseModel):
     symbol: str
@@ -1792,11 +1828,11 @@ async def add_mapped_strike(item: MappedStrikeItem):
 
 @app.post("/api/mapped-strikes/delete")
 async def delete_mapped_strike(payload: Dict[str, str]):
-    item_id = payload.get("id", "")
+    item_id = payload.get("id") or payload.get("strike_id") or ""
     if not mapped_strikes_mgr:
         raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
     ok = mapped_strikes_mgr.delete_strike(item_id)
-    return {"status": "ok" if ok else "not_found", "config": mapped_strikes_mgr.get_config()}
+    return {"status": "success" if ok else "not_found", "config": mapped_strikes_mgr.get_config()}
 
 
 @app.post("/api/mapped-strikes/import-focus")

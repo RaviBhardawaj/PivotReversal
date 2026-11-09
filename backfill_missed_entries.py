@@ -12,6 +12,8 @@ then start the app again. Without --apply it works on a scratch copy and changes
 
     python3 backfill_missed_entries.py 2026-10-19 PE 23100 23050 23000            # dry run
     python3 backfill_missed_entries.py 2026-10-19 PE 23100 23050 23000 --apply    # write for real
+    python3 backfill_missed_entries.py 2026-11-09 auto            # every 15M/1H strike, CE+PE, every expiry in
+    python3 backfill_missed_entries.py 2026-11-09 auto --apply    # strike_pivot_cache.json (dry run / for real)
 """
 import importlib.util, json, os, shutil, sys, tempfile
 from datetime import datetime as _real_dt
@@ -22,9 +24,11 @@ sys.path.insert(0, HERE)
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 APPLY = "--apply" in sys.argv
-if len(args) < 3:
+AUTO = len(args) == 2 and args[1].lower() == "auto"
+if len(args) < 3 and not AUTO:
     sys.exit(__doc__)
-DAY, OPT, STRIKES = args[0], args[1].upper(), [int(x) for x in args[2:]]
+DAY, OPT = args[0], args[1].upper()
+STRIKES = [] if AUTO else [int(x) for x in args[2:]]
 SYMBOL = os.getenv("BACKFILL_SYMBOL", "NIFTY")
 EXPIRY = os.getenv("BACKFILL_EXPIRY", "19OCT2026")
 
@@ -64,10 +68,40 @@ with open(csv_path, newline="") as f:
     for r in _csv.DictReader(f):
         existing.add((r.get("Date"), r.get("Symbol"), r.get("Type"), str(r.get("Strike")), r.get("Expiry"), r.get("Action")))
 
-for stk in STRIKES:
+# trade ids already in the CSV / open snapshot: SYMBOL_TYPE_STRIKE_EXPIRY_YYYYMMDD_...
+existing_ids = set()
+with open(csv_path, newline="") as f:
+    for r in _csv.DictReader(f):
+        existing_ids.add(str(r.get("Trade_ID", "")))
+for t in list(getattr(ft, "active_trades", {}).values()):
+    existing_ids.add(str(t.get("Trade_ID", "")))
+
+def tf_of(stk):
+    f15 = f1h = set()
+    try:
+        foc = json.load(open("multi_symbol_levels.json"))[SYMBOL]["focus"]
+        f15 = set(foc.get("15M", {}).get("all_4", []) + foc.get("15M", {}).get("all_6", []))
+        f1h = set(foc.get("1H", {}).get("all_4", []) + foc.get("1H", {}).get("all_6", []))
+    except Exception:
+        pass
+    if stk in f15 and stk in f1h: return "15M / 1H"
+    if stk in f15: return "15M Intraday"
+    if stk in f1h: return "1H Structure"
+    return ""
+
+if AUTO:
+    jobs = sorted({(s.get("opt_type"), int(s["strike"]), s.get("expiry")) for s in cache.values()
+                   if s.get("opt_type") in ("CE", "PE") and tf_of(int(s["strike"]))})
+else:
+    jobs = [(OPT, stk, EXPIRY) for stk in STRIKES]
+print(f"{len(jobs)} contracts to replay")
+
+for OPT, stk, EXPIRY in jobs:
+    TF = tf_of(stk) or "15M Intraday"
     key = (DAY, SYMBOL, OPT, str(stk), EXPIRY, "BUY")
-    if key in existing:
-        print(f"{stk} {OPT}: a BUY trade already exists for {DAY} - skipped")
+    id_prefix = f"{SYMBOL}_{OPT}_{stk}_{EXPIRY}_{DAY.replace('-', '')}"
+    if key in existing or any(i.startswith(id_prefix) for i in existing_ids):
+        print(f"{EXPIRY} {stk} {OPT}: a trade already exists for {DAY} - skipped")
         continue
     piv = next((s for s in cache.values()
                 if s.get("opt_type") == OPT and int(s["strike"]) == stk and s.get("expiry") == EXPIRY), None)
@@ -82,12 +116,14 @@ for stk in STRIKES:
     st = m.StrategyStrikeState(OPT, stk, expiry=EXPIRY, mode="BUY")
     dh = dl = 0.0
     entry_i = None
+    entry_px = 0.0
     for i, (t, o, h, l, c) in enumerate(bars):
         tt = t.replace(tzinfo=None)
         dh = max(dh, h)
         dl = l if not dl else min(dl, l)
-        for px in (o, l, h, c):
+        for px in ((o, l, h, c) if c >= o else (o, h, l, c)):
             st.update_tick(px, piv, tt, opt_high=dh, opt_low=dl)
+            entry_px = px
             if st.state == "CONFIRMED_BUY":
                 break
         if st.state == "CONFIRMED_BUY":
@@ -99,8 +135,9 @@ for stk in STRIKES:
 
     t_entry = bars[entry_i][0].replace(tzinfo=None)
     FakeClock._now = t_entry
-    tr = ft.log_entry(SYMBOL, OPT, stk, "BUY", st.entry_price, st.entry_sl,
-                      *st.targets[:5], opt_piv=piv, timeframe="15M Intraday",
+    # same as the live app: recorded at the price that traded when the rule fired
+    tr = ft.log_entry(SYMBOL, OPT, stk, "BUY", round(entry_px, 2), st.entry_sl,
+                      *st.targets[:5], opt_piv=piv, timeframe=TF,
                       token=str(next((k for k, s in cache.items() if s is piv), "")), exchange="NFO",
                       expiry=EXPIRY)
     if not tr:
@@ -108,11 +145,11 @@ for stk in STRIKES:
         continue
     tr["Order_ID"] = "BACKFILLED: rule replay of the day's 1-min candles"
     ft._save_snapshot()
-    print(f"{stk} {OPT}: BACKFILLED BUY @ {st.entry_price} at {t_entry:%H:%M} | SL {st.entry_sl} | T {st.targets}")
+    print(f"{EXPIRY} {stk} {OPT} [{TF}]: BACKFILLED BUY @ {round(entry_px, 2)} (conf high {st.entry_price}) at {t_entry:%H:%M} | SL {st.entry_sl} | T {st.targets}")
 
     for (t, o, h, l, c) in bars[entry_i + 1:]:
         FakeClock._now = t.replace(tzinfo=None)
-        for px in (o, l, h, c):
+        for px in ((o, l, h, c) if c >= o else (o, h, l, c)):
             ft.update_tick(OPT, stk, px, EXPIRY, SYMBOL)
         if tr.get("Status") != "ACTIVE":
             break

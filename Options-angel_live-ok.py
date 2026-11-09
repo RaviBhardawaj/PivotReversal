@@ -239,12 +239,13 @@ BUY_CHASE_RISK_FRAC = 0.30
 
 def buy_entry_ok(ltp: float, entry_px: float, ll: float = 0.0, t1: float = 0.0) -> bool:
     """True when a BUY may be taken at this LTP: inside the 1% entry band, or above it by at
-    most BUY_CHASE_RISK_FRAC of the risk (entry - LL) and still below T1."""
+    most BUY_CHASE_RISK_FRAC of the risk (entry - LL) and still below T1. Never at or above T1:
+    a fill there has no room to the first target (25550 PE 23NOV, 9 Nov: entry 723.05, T1 718.25)."""
+    if t1 > 0 and ltp >= t1:
+        return False
     if at_entry_price(ltp, entry_px, "BUY"):
         return True
     if ltp <= 0 or entry_px <= 0 or ltp < entry_px or ll <= 0 or ll >= entry_px:
-        return False
-    if t1 > 0 and ltp >= t1:
         return False
     return ltp <= entry_px + BUY_CHASE_RISK_FRAC * (entry_px - ll)
 

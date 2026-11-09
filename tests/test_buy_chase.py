@@ -10,6 +10,7 @@ assert app.buy_entry_ok(102.9, 100, ll=90, t1=120)          # 2.9 <= 0.3*10
 assert not app.buy_entry_ok(103.2, 100, ll=90, t1=120)      # more than 30% of the risk
 assert not app.buy_entry_ok(102.0, 100, ll=90, t1=101.5)    # at/above T1
 assert not app.buy_entry_ok(99.0, 100, ll=90, t1=120)       # below the entry
+assert not app.buy_entry_ok(723.05, 716.2, ll=712.7, t1=718.25)  # inside 1% band but past T1 (25550 PE, 9 Nov)
 print("buy_entry_ok: OK")
 
 # Sweep below S2, 09:30 candle closes green above S2 (its wick is the retest), then the next

@@ -139,9 +139,9 @@ const LV = ["S3", "S2", "S1", "P", "R1", "R2", "R3"], PLAN = ["Plan S2", "Plan P
 let localFilters = null;
 const pref = (k, d) => { try { const v = localStorage.getItem("glass." + k); return v === null ? d : v; } catch (e) { return d; } };
 const setPref = (k, v) => { try { localStorage.setItem("glass." + k, v); } catch (e) {} };
-let wSort = pref("sort", "strike"), wFull = pref("full", "0") === "1";
+let wSort = pref("sort2", "entry"), wFull = pref("full", "0") === "1";
 $("w-sort").value = wSort; $("w-full").checked = wFull;
-$("w-sort").addEventListener("change", (e) => { wSort = e.target.value; setPref("sort", wSort); if (S) renderDash(S); });
+$("w-sort").addEventListener("change", (e) => { wSort = e.target.value; setPref("sort2", wSort); if (S) renderDash(S); });
 $("w-full").addEventListener("change", (e) => { wFull = e.target.checked; setPref("full", wFull ? "1" : "0"); if (S) renderDash(S); });
 
 function filterState(s) {
@@ -316,7 +316,9 @@ function renderDash(s) {
   if ($("d-head").dataset.k !== head) { $("d-head").dataset.k = head; $("d-head").innerHTML = head; }
 
   let list = infos.slice();
-  if (wSort === "setup") {
+  if (wSort === "entry") {
+    list = GlassSort.entryFirst(list);
+  } else if (wSort === "setup") {
     const rank = (i) => (i.trade && !i.closed ? 0 : i.setup ? 1 : i.trade ? 3 : 2);
     list.sort((a, b) => rank(a) - rank(b));
   } else if (wSort === "near") {
@@ -329,7 +331,7 @@ function renderDash(s) {
   const items = list.map((i) => {
     const v = i.v, k = i.r.k;
     const lv = ["S2", "S1", "P", "R1", "R2"].map((c) => { const x = fnum(v[c]); return x > 0 ? x.toFixed(1) : "-"; }).join(" · ");
-    const gapTxt = i.gap === null || i.trade ? "" : `<span class="sub">${signed(i.gap, 1)}% vs entry</span>`;
+    const gapTxt = i.gap === null || i.trade ? "" : `<span class="sub${GlassSort.isNear(i) ? " near" : ""}">${signed(i.gap, 1)}% vs entry</span>`;
     const cells = [
       {h: `<input type="checkbox" class="dash-row-chk" data-key="${esc(k)}"${dashSelectedKeys.has(k) ? " checked" : ""}> <button class="del" title="Delete this strike: hidden and no new entries until restored" data-del="${esc(k)}">🗑</button>`, c: "c"},
       {h: contractCell(i, false), c: "l"},

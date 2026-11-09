@@ -147,7 +147,7 @@ $("w-full").addEventListener("change", (e) => { wFull = e.target.checked; setPre
 function filterState(s) {
   if (localFilters && held("filters")) return localFilters;
   localFilters = null;
-  return {filters: s.filters || {}, show_plan: !!s.show_plan};
+  return {filters: s.filters || {}, show_plan: !!s.show_plan, expiry_view: s.expiry_view || "CURRENT"};
 }
 
 function renderFilters(s) {
@@ -159,6 +159,11 @@ function renderFilters(s) {
     h += `<span class="fg"><span class="g">${esc(g.group)}</span>` +
       g.options.map((o) => chip(`data-g="${esc(g.group)}" data-k="${esc(o.key)}"`, o.label, ticked.has(o.key), o.key === "P" ? " p" : "")).join("") + "</span>";
   }
+  const ev = f.expiry_view || "CURRENT";
+  h += `<span class="fg"><span class="g">Expiry</span>` +
+    chip('data-ev="CURRENT"', `Current${s.current_expiry ? " · " + s.current_expiry : ""}`, ev === "CURRENT") +
+    chip('data-ev="NEXT"', `Next${s.next_expiry ? " · " + s.next_expiry : ""}`, ev === "NEXT") +
+    chip('data-ev="ALL"', "All expiries", ev === "ALL") + "</span>";
   h += chip('data-x="show_plan"', "📅 Plan columns", f.show_plan) + '<button class="chip" data-clear>✖ Clear filters</button>';
   const el = $("d-filters");
   if (el.dataset.k !== h) { el.dataset.k = h; el.innerHTML = h; }
@@ -169,14 +174,15 @@ $("d-filters").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b || !S) return;
   const f = JSON.parse(JSON.stringify(filterState(S)));
   if (b.hasAttribute("data-clear")) {
-    localFilters = {filters: {}, show_plan: false}; holdFor("filters");
+    localFilters = {filters: {}, show_plan: false, expiry_view: filterState(S).expiry_view}; holdFor("filters");
     renderFilters(S); renderDash(S); act("/api/filters", {clear: true}); return;
   }
   if (b.dataset.g) {
     const set = new Set(f.filters[b.dataset.g] || []);
     set.has(b.dataset.k) ? set.delete(b.dataset.k) : set.add(b.dataset.k);
     f.filters[b.dataset.g] = [...set];
-  } else if (b.dataset.x) f[b.dataset.x] = !f[b.dataset.x];
+  } else if (b.dataset.ev) f.expiry_view = b.dataset.ev;
+  else if (b.dataset.x) f[b.dataset.x] = !f[b.dataset.x];
   localFilters = f; holdFor("filters");
   renderFilters(S); renderDash(S);
   api("/api/filters", f).then((r) => { if (r.ok === false) toast(r.error || "Filter not applied", true); });
@@ -210,7 +216,8 @@ function contractCell(i, withSide) {
   const v = i.v;
   return `<span class="stk">${esc(strikeNum(v.Strike))}</span><span class="tag ${v.Type === "PE" ? "pe" : "ce"}">${esc(v.Type)}</span>` +
     (withSide ? ` <span class="tag ${i.buy ? "buy" : "sell"}">${i.buy ? "BUY" : "SELL"}</span>` : "") +
-    (i.isP ? `<span class="tag p">P</span>` : "") + (i.is15 ? `<span class="tag tf">15M</span>` : "") + (i.is1h ? `<span class="tag tf">1H</span>` : "");
+    (i.isP ? `<span class="tag p">P</span>` : "") + (i.is15 ? `<span class="tag tf">15M</span>` : "") + (i.is1h ? `<span class="tag tf">1H</span>` : "") +
+    (withSide && v.Expiry ? `<span class="sub">${esc(v.Expiry)}</span>` : "");
 }
 function statusPill(i) {
   const s = esc(String(i.status).replace(/^[^\w]+/u, "") || "Pending");
@@ -301,11 +308,12 @@ function renderDash(s) {
   const showPlan = filterState(s).show_plan;
   const infos = (s.rows || []).map((r) => Object.assign(rowInfo(r), {r}));
   renderLive(s, infos);
-  $("w-exp").textContent = s.current_expiry ? `${s.current_expiry} expiry` : "current expiry";
+  const ev = filterState(s).expiry_view;
+  $("w-exp").textContent = ev === "ALL" ? "all expiries" : ev === "NEXT" ? `${s.next_expiry || "next"} expiry` : `${s.current_expiry || "current"} expiry`;
 
   // Compact columns by default; "All columns" adds the rest of the launcher's columns.
   const base = [
-    ["☑", "c"], ["Strike", "l"], ["Side", "l"], ["LTP", ""], ["Setup", "l"], ["Entry", ""], ["SL", ""],
+    ["☑", "c"], ["Strike", "l"], ["Expiry", "l"], ["Side", "l"], ["LTP", ""], ["Setup", "l"], ["Entry", ""], ["SL", ""],
     ["T1", ""], ["T2", ""], ["T3", ""], ["Levels S2 · S1 · P · R1 · R2", ""], ["Order", "l"], ["Signal", "l"],
   ];
   const extra = wFull ? ["Status", "OI", "Vol", "LL", "HH", "S3", "R3", "T4", "T5", "Trading Zone"].filter((c) => cols.includes(c)) : [];
@@ -333,8 +341,9 @@ function renderDash(s) {
     const lv = ["S2", "S1", "P", "R1", "R2"].map((c) => { const x = fnum(v[c]); return x > 0 ? x.toFixed(1) : "-"; }).join(" · ");
     const gapTxt = i.gap === null || i.trade ? "" : `<span class="sub${GlassSort.isNear(i) ? " near" : ""}">${signed(i.gap, 1)}% vs entry</span>`;
     const cells = [
-      {h: `<input type="checkbox" class="dash-row-chk" data-key="${esc(k)}"${dashSelectedKeys.has(k) ? " checked" : ""}> <button class="del" title="Delete this strike: hidden and no new entries until restored" data-del="${esc(k)}">🗑</button>`, c: "c"},
+      {h: `<input type="checkbox" class="dash-row-chk" data-key="${esc(k)}"${dashSelectedKeys.has(k) ? " checked" : ""}> <button class="del" title="Delete this strike: removed, no new entries today" data-del="${esc(k)}">🗑</button>`, c: "c"},
       {h: contractCell(i, false), c: "l"},
+      {h: esc(v.Expiry || "-"), c: "l small"},
       {h: `<span class="tag ${i.buy ? "buy" : "sell"}">${i.buy ? "BUY" : "SELL"}</span>`, c: "l"},
       {h: `<b>${f2(i.ltp)}</b>${gapTxt}`, tick: i.ltp},
       {h: statusPill(i), c: "l"},
@@ -364,12 +373,6 @@ function renderBulk(s) {
   $("bulk").hidden = n === 0;
   $("dash-del-num").textContent = n;
   $("dash-sel-count").textContent = `${n} selected`;
-  const del = (s && s.deleted_strikes) || [];
-  const dh = del.length ? `<span class="small">🗑 ${del.length} deleted (hidden, no new entries):</span>` +
-    del.map((d) => `<button class="chip" data-restore="${esc(`${d.symbol}|${d.strike}|${d.type}|${d.expiry}`)}" title="Bring this strike back">${esc(d.strike)} ${esc(d.type)} ${esc(d.expiry)} ↺</button>`).join("") +
-    `<button class="chip" data-restore-all>↺ Restore all</button>` : "";
-  const el = $("d-deleted");
-  if (el.dataset.k !== dh) { el.dataset.k = dh; el.innerHTML = dh; el.hidden = !del.length; }
 }
 
 function rowItem(k) {
@@ -379,7 +382,7 @@ function rowItem(k) {
 async function deleteItems(items, label) {
   if (!items.length) return false;
   const ok = await confirmBox("Delete strike" + (items.length > 1 ? "s" : ""),
-    `Delete ${label}?\n\nIt is hidden from the dashboard and the strategy takes no new entry on it (saved, also after a restart). A trade that is already open is not touched. Use ↺ to bring it back.`, "Delete");
+    `Delete ${label}?\n\nIt is removed from the dashboard and the strategy takes no new entry on it today (saved, also after a restart). A trade that is already open is not touched.`, "Delete");
   if (!ok) return false;
   const r = await api("/api/strikes/delete-multiple", {strikes: items.map((it) => ({strike: it.strike, opt_type: it.type, expiry: it.expiry}))});
   if (r.ok === false) { toast(r.error || "Delete failed", true); return false; }
@@ -412,19 +415,6 @@ $("dash-del-selected").addEventListener("click", async () => {
   if (await deleteItems(uniq, `${uniq.length} selected strike(s)`)) { dashSelectedKeys.clear(); if (S) renderDash(S); }
 });
 $("dash-sel-clear").addEventListener("click", () => { dashSelectedKeys.clear(); if (S) renderDash(S); });
-async function restoreStrike(key, all) {
-  const r = await api("/api/strikes/restore", all ? {all: true} : {key});
-  if (r.ok === false) toast(r.error || "Restore failed", true); else toast("↺ " + (r.message || "Restored"));
-  poll(); if (!$("m-plan").hidden) loadPlan();
-}
-document.addEventListener("click", async (e) => {
-  const rs = e.target.closest("[data-restore]");
-  if (rs) return restoreStrike(rs.dataset.restore, false);
-  if (e.target.closest("[data-restore-all]")) {
-    if (await confirmBox("Restore all", "Bring back every deleted strike?", "Restore all")) restoreStrike("", true);
-  }
-});
-
 function renderTools(s) {
   if (!held("source") && document.activeElement !== $("t-source")) setSelect($("t-source"), s.level_sources || [], s.level_source || "");
   $("b-sheet").href = s.sheet_url || "#";
@@ -530,9 +520,6 @@ async function loadPlan(refresh = false) {
   $("mp-body").innerHTML = r.rows.length ? r.rows.map((row) => `<tr class="${row.type === "PE" ? "pe" : "ce"}"><td><button class="del" title="Delete this strike" data-plan-del="${esc(strikeNum(row.v.Strike))}|${esc(row.type)}|${esc(row.v.Expiry || "")}">🗑</button></td>` +
     r.columns.map((c, i) => `<td class="${i < 3 ? "l" : ""}">${esc(row.v[c])}</td>`).join("") + "</tr>").join("")
     : `<tr class="empty"><td colspan="${r.columns.length + 1}">No rows for this view yet</td></tr>`;
-  const del = r.deleted_strikes || [];
-  $("mp-deleted").innerHTML = del.length ? `🗑 ${del.length} deleted strike(s) hidden: ` +
-    del.map((d) => `<button class="chip" data-restore="${esc(`${d.symbol}|${d.strike}|${d.type}|${d.expiry}`)}" title="Bring this strike back">${esc(d.strike)} ${esc(d.type)} ${esc(d.expiry)} ↺</button>`).join(" ") : "";
 }
 $("b-plan").addEventListener("click", () => { openModal("m-plan"); loadPlan(); });
 $("mp-modes").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { planMode = b.dataset.m; loadPlan(); } });
@@ -542,12 +529,6 @@ $("mp-body").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-plan-del]"); if (!b) return;
   const [strike, type, expiry] = b.dataset.planDel.split("|");
   if (await deleteItems([{strike, type, expiry}], `${strike} ${type} ${expiry}`)) loadPlan();
-});
-$("mp-regen").addEventListener("click", async () => {
-  if (!(await confirmBox("Regenerate", "Bring back every deleted strike and rebuild today's strike levels?", "Regenerate"))) return;
-  const r = await api("/api/strikes/regenerate", {});
-  if (r.ok === false) toast(r.error || "Regenerate failed", true); else toast("↻ " + (r.message || "Regenerated"));
-  poll(); loadPlan();
 });
 
 // ── settings ─────────────────────────────────────────────

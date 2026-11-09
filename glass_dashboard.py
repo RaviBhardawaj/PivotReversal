@@ -126,14 +126,18 @@ class GlassDashboard:
                 self.app._tk_after(500, tick)
         self.app._tk_after(500, tick)
 
+    EXPIRY_VIEWS = ("CURRENT", "NEXT", "ALL")
+
     def _current_expiry_only(self):
-        """The dashboard lists the current expiry only: keep the launcher's expiry ticks on
-        'Current', so next / far expiry rows are never listed. Runs on the Tk thread."""
+        """Keep the launcher's expiry ticks on the page's expiry filter (Current by default,
+        so next / far expiry rows are not listed unless asked for). Runs on the Tk thread."""
         a = self.app
+        view = getattr(self, "expiry_view", "CURRENT")
+        want = {"CURRENT": (True, False), "NEXT": (False, True), "ALL": (False, False)}[view]
         try:
-            if a.exp_next_var.get() or not a.exp_cur_var.get():
-                a.exp_cur_var.set(True)
-                a.exp_next_var.set(False)
+            if (bool(a.exp_cur_var.get()), bool(a.exp_next_var.get())) != want:
+                a.exp_cur_var.set(want[0])
+                a.exp_next_var.set(want[1])
                 a._on_dash_filter_changed()
         except Exception:
             pass
@@ -235,18 +239,23 @@ class GlassDashboard:
         # Current expiry only (no next / far expiry rows); deleted strikes stay hidden. Each row
         # carries its contract key "k" so the page can update rows in place.
         cur_exp = str((snap.get("controls") or {}).get("expiry") or "").strip().upper()
+        nxt_exp = str((snap.get("controls") or {}).get("next_expiry") or "").strip().upper()
+        view = getattr(self, "expiry_view", "CURRENT")
+        only = cur_exp if view == "CURRENT" else (nxt_exp if view == "NEXT" else "")
         dkeys = deleted_strikes.active_keys()
         rows = []
         for r in snap.get("rows") or []:
             v = r.get("v") or {}
             r_exp = str(v.get("Expiry") or "").strip().upper()
-            if cur_exp and r_exp not in ("", "-", cur_exp):
+            if only and r_exp not in ("", "-", only):
                 continue
             k = deleted_strikes.key(sym, v.get("Expiry"), v.get("Strike"), v.get("Type"))
             if k not in dkeys:
                 rows.append({**r, "k": f"{k}|{v.get('Side', '')}"})
         snap["rows"] = rows
         snap["current_expiry"] = cur_exp
+        snap["next_expiry"] = nxt_exp
+        snap["expiry_view"] = view
         snap.update({
             "now": datetime.now().strftime("%H:%M:%S"),
             "market_open": bool(m.is_live_market_open()),
@@ -328,8 +337,9 @@ class GlassDashboard:
                 for (grp, key), var in a.dash_filter_vars.items():
                     if grp == g:
                         var.set(key in ticked)
-            a.exp_cur_var.set(True)      # current expiry only
-            a.exp_next_var.set(False)
+            if str(body.get("expiry_view", "")).upper() in self.EXPIRY_VIEWS:
+                self.expiry_view = str(body["expiry_view"]).upper()
+            self._current_expiry_only()
             if "show_plan" in body:
                 a.show_plan_cols_var.set(bool(body["show_plan"]))
             a._on_dash_filter_changed()

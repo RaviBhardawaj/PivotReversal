@@ -230,6 +230,26 @@ def at_entry_price(ltp: float, entry_px: float, side: str) -> bool:
     return entry_px - 0.05 <= ltp <= entry_px + band
 
 
+# BUY chase room (AJ, 9 Nov): when price breaks the confirmation high in one jump (a fast
+# reclaim, or a slow feed), the 1% band alone missed the trade for good. A BUY may still be
+# taken while the LTP is no more than this fraction of the risk (entry - LL) above the
+# entry, and still below T1. The trade is recorded at the real LTP.
+BUY_CHASE_RISK_FRAC = 0.30
+
+
+def buy_entry_ok(ltp: float, entry_px: float, ll: float = 0.0, t1: float = 0.0) -> bool:
+    """True when a BUY may be taken at this LTP: inside the 1% entry band, or above it by at
+    most BUY_CHASE_RISK_FRAC of the risk (entry - LL) and still below T1. Never at or above T1:
+    a fill there has no room to the first target (25550 PE 23NOV, 9 Nov: entry 723.05, T1 718.25)."""
+    if t1 > 0 and ltp >= t1:
+        return False
+    if at_entry_price(ltp, entry_px, "BUY"):
+        return True
+    if ltp <= 0 or entry_px <= 0 or ltp < entry_px or ll <= 0 or ll >= entry_px:
+        return False
+    return ltp <= entry_px + BUY_CHASE_RISK_FRAC * (entry_px - ll)
+
+
 def traded_today_tick(message: dict, ltp: float, prev_ltp: float = 0.0, now: datetime = None) -> bool:
     """True when this feed tick is a real trade from today's session (09:15 IST onwards).
     Before the day's first trade the feed repeats yesterday's close and high/low."""
@@ -591,6 +611,19 @@ class StrategyStrikeState:
         hit_tag = f" — Target {hit} Hit" if hit > 0 else ""
         self.signal = f"♻️ {side} {self.opt_type} restored after restart{hit_tag} | Entry:{self.entry_price:.2f} | SL:{self.sl:.2f}"
 
+    def unconfirm_buy(self):
+        """Undo a BUY confirmation that was never recorded as a trade: keep the setup (LL,
+        confirmation high, retest) and wait for the next break / return to the entry."""
+        self.state         = "TRADING_IN_FAVOR_BUY"
+        self.trade_status  = "Waiting"
+        self.entry_count   = max(0, self.entry_count - 1)
+        self.entry_price   = self.sl = self.entry_sl = 0.0
+        self.entry_time    = ""
+        self.targets       = []
+        self.signal        = f"★ {self.opt_type} BUY not recorded — still watching the break above {self.conf_high:.2f}"
+        print(f"[S2 SKIP] {self.opt_type} {self.strike} {self.expiry}: confirmed BUY was not recorded "
+              f"(not a 15M/1H strike, outside the zone, or the tracker refused it) — watching again")
+
     def seed_from_closed(self, trade: dict, sl_hits: int = 0, entries: int = 1):
         """After an app restart: show the strike's last trade of the day (entry, SL, exit) as it
         was shown before the restart. The strike waits for a fresh sweep for any new entry."""
@@ -885,13 +918,19 @@ class StrategyStrikeState:
                 if start_favor and not _levels_up:
                     self.signal = f"★ {self.opt_type} {active_lvl} Confirmation high {_ep0:.2f} is above every target level — no room, no trade"
                     start_favor = False
-                elif start_favor and not at_entry_price(ltp, _ep0, "BUY"):
+                elif start_favor and not buy_entry_ok(ltp, _ep0, self.ll, _t1 if _levels_up else 0.0):
                     # price has run away from the entry: no chasing; wait for it to come back
                     self.signal = f"★ {self.opt_type} {active_lvl} Broke confirmation high — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
+                    if not getattr(self, "_chase_logged", False):
+                        self._chase_logged = True
+                        print(f"[S2 SKIP] {self.opt_type} {self.strike} {self.expiry} {now.strftime('%H:%M:%S')}: "
+                              f"broke confirmation high {_ep0:.2f} but LTP {ltp:.2f} is past the chase room "
+                              f"(LL {self.ll:.2f}, T1 {_t1:.2f}) — waiting for a pull-back")
                     start_favor = False
                 elif not start_favor and self.conf_high > 0:
                     self.signal = f"★ {self.opt_type} {active_lvl} Retested — Buy Above Confirmation High {self.conf_high:.2f}"
                 if start_favor:
+                    self._chase_logged = False
                     # Step 5: ENTRY IS CONFIRMED!
                     self.state         = "CONFIRMED_BUY"
                     self.trigger_level = active_lvl
@@ -5973,6 +6012,8 @@ class FeedEngine:
                     # first trade, or the saved candle) must never look like a sweep.
                     live_tick = bool(token in snapshot and d.get("s_live")
                                      and d.get("s_date") == now_tick.strftime("%Y-%m-%d"))
+                    _buy_was_waiting = (st_buy.trade_status == "Waiting")
+                    _buy_recorded = False
                     if live_tick:
                         sm_high = d.get("s_high", 0) or ltp
                         sm_low  = d.get("s_low", 0) or ltp
@@ -6116,7 +6157,8 @@ class FeedEngine:
                     # ── Evaluate BUY Entry ──
                     fp_buy = getattr(st_buy, "frozen_pivots", None) or opt_piv
                     if (buy_entry["entry"] and mkt_open and is_focus_strike and live_tick
-                            and at_entry_price(ltp, st_buy.entry_price, "BUY")):
+                            and buy_entry_ok(ltp, st_buy.entry_price, st_buy.sl,
+                                             st_buy.targets[0] if st_buy.targets else 0.0)):
                         in_buy_zone = (fp_buy["S2"] * 0.95 <= ltp <= fp_buy["R2"] * 1.05)
                         if in_buy_zone:
                             lvl = st_buy.trigger_level
@@ -6145,6 +6187,7 @@ class FeedEngine:
                                 expiry=exp, levels=strike_levels_tf(strike, f15_focus, f1h_focus),
                                 bid=_b_val, ask=_a_val
                             )
+                            _buy_recorded = bool(_new_trade)
                             if _new_trade:   # alert only when a trade was actually recorded
                                 self.alert_mgr.send_alert_once(
                                     symbol, opt_type, strike, sig_act, ltp,
@@ -6192,6 +6235,12 @@ class FeedEngine:
                                 )
                             except Exception as _adv_buy_err:
                                 print(f"[ADV STRATEGY] buy eval error: {_adv_buy_err}")
+
+                    # A BUY the state machine confirmed on this tick but that was not recorded (strike
+                    # not traded, price outside the zone, or the tracker refused it) must not leave the
+                    # strike stuck as "Active" with no trade: go back to watching the break.
+                    if _buy_was_waiting and st_buy.trade_status == "Active" and not _buy_recorded:
+                        st_buy.unconfirm_buy()
 
                     # ── Advance Strategy Dedicated Evaluation (Monthly Expiry & 1H Structure Only) ──
                     if mkt_open and live_tick and is_monthly_exp and is_1h_structure:

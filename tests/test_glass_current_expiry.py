@@ -91,6 +91,18 @@ class CurrentExpiryOnly(unittest.TestCase):
         self.assertEqual([r["v"]["Expiry"] for r in s["rows"]], ["17NOV2026", "17NOV2026"])
         self.assertEqual(s["rows"][1]["k"], "NIFTY|17NOV2026|24000|CE|🟢 BUY")
 
+    def test_expiry_filter_next_and_all(self):
+        self.dash.expiry_view = "NEXT"
+        self.dash.snap = self.dash._take_snapshot()
+        self.assertEqual((self.app.exp_cur_var.get(), self.app.exp_next_var.get()), (False, True))
+        s = self.dash.live_state()
+        self.assertEqual([r["v"]["Expiry"] for r in s["rows"]], ["24NOV2026"])
+        self.assertEqual((s["expiry_view"], s["next_expiry"]), ("NEXT", "24NOV2026"))
+        self.dash.expiry_view = "ALL"
+        self.dash.snap = self.dash._take_snapshot()
+        self.assertEqual((self.app.exp_cur_var.get(), self.app.exp_next_var.get()), (False, False))
+        self.assertEqual(len(self.dash.live_state()["rows"]), 4)
+
     def test_deleted_strike_is_hidden(self):
         deleted_strikes.delete([{"symbol": "NIFTY", "strike": "23500", "type": "PE", "expiry": "17NOV2026"}])
         s = self.dash.live_state()

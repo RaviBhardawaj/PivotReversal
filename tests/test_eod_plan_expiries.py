@@ -18,6 +18,8 @@ _spec=importlib.util.spec_from_file_location("web_server",os.path.join(_root,"we
 web=importlib.util.module_from_spec(_spec); _spec.loader.exec_module(web)
 
 W=tempfile.mkdtemp()
+# never touch the app's real trade log: the gate below removes open next/far-expiry trades
+web.feed.forward_tracker=web.engine.ForwardTestTracker(os.path.join(W,"fwd.csv"))
 web.PLANS_FILE=os.path.join(W,"next_day_plans.json")
 web.get_tv_multi_timeframe_pivots=lambda sym,force_refresh=False: {}
 web.get_next_trading_date=lambda *a,**k: "2026-10-14"

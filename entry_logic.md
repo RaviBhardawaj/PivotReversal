@@ -37,7 +37,8 @@ The buy level is S2, or S1 when S2 ≤ 0.05.
 
 When the entry is confirmed:
 - **Entry price** is the confirmation candle's high. The forward test records the live LTP at that moment.
-- **No chasing.** The live price must be at most 1% (min 0.50) above the confirmation high. If it has run further, the app waits for price to come back.
+- **No chasing, with a little room (AJ, 9 Nov).** The live price must be at most 1% (min 0.50) above the confirmation high, or, when the break jumps past that band, at most 30% of the risk (entry − LL) above it and still below T1. Further than that, the app waits for price to come back.
+- **Never stuck.** If a confirmed BUY can't be recorded (strike not traded, outside the zone, or the tracker refuses it), the strike goes back to waiting for the break, not to a phantom "Active".
 - **No room, no trade.** If the confirmation high is already at or above T1, the setup is skipped.
 - **SL** is LL. Fallbacks, in order: the day low, then S3 (or S2 for an S1 entry), then entry minus 10%.
 - **Targets:**

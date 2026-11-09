@@ -1,13 +1,13 @@
 #!/bin/bash
 # One-step update for the Pivot Reversal app on the Mac.
-#   curl -fsSL https://raw.githubusercontent.com/RaviBhardawaj/PivotReversal/claude/project-thread-eykdqc/mac_install/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/RaviBhardawaj/PivotReversal/claude/project-thread-3chp93/mac_install/install.sh | bash
 # Installs: advanced strategy removed (fixes the startup crash), faster dashboards,
 # current-expiry orders only, strike deletes that stick until Restore, and the redesigned
 # glass dashboard (live trades panel, current-expiry watchlist).
 # Every replaced file is backed up first; advanced_strategy* files are moved to the backup.
 set -e
 APP="${APP:-$HOME/Downloads/Pivot Reversal Strategy}"
-BRANCH="${BRANCH:-claude/project-thread-eykdqc}"
+BRANCH="${BRANCH:-claude/project-thread-3chp93}"
 BASE="https://raw.githubusercontent.com/RaviBhardawaj/PivotReversal/$BRANCH"
 FILES="Options-angel_live-ok.py backfill_missed_entries.py deleted_strikes.py glass_dashboard.py web_server.py web/app.js glass_web/glass.js glass_web/glass.css glass_web/index.html tests/test_backfill_expiries.py tests/test_eod_plan_expiries.py tests/test_feed_failover.py tests/test_next_day_levels.py tests/test_next_expiry_gate.py tests/test_glass_current_expiry.py"
 

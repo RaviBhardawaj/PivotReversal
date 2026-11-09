@@ -12,8 +12,9 @@ then start the app again. Without --apply it works on a scratch copy and changes
 
     python3 backfill_missed_entries.py 2026-10-19 PE 23100 23050 23000            # dry run
     python3 backfill_missed_entries.py 2026-10-19 PE 23100 23050 23000 --apply    # write for real
-    python3 backfill_missed_entries.py 2026-11-09 auto            # every 15M/1H strike, CE+PE, every expiry in
-    python3 backfill_missed_entries.py 2026-11-09 auto --apply    # strike_pivot_cache.json (dry run / for real)
+    python3 backfill_missed_entries.py 2026-11-09 auto            # every 15M/1H strike, CE+PE, CURRENT expiry
+    python3 backfill_missed_entries.py 2026-11-09 auto --apply    # only (dry run / for real)
+    python3 backfill_missed_entries.py 2026-11-09 auto --next     # also the next expiry (only when asked)
 """
 import importlib.util, json, os, shutil, sys, tempfile
 from datetime import datetime as _real_dt
@@ -24,6 +25,7 @@ sys.path.insert(0, HERE)
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 APPLY = "--apply" in sys.argv
+WITH_NEXT = "--next" in sys.argv          # next-expiry trades only when asked for; far expiries never
 AUTO = len(args) == 2 and args[1].lower() == "auto"
 if len(args) < 3 and not AUTO:
     sys.exit(__doc__)
@@ -89,9 +91,25 @@ def tf_of(stk):
     if stk in f1h: return "1H Structure"
     return ""
 
+def day_expiries(day, expiries, with_next=False):
+    """The current expiry on `day` (nearest one not yet expired), plus the next one if asked."""
+    d = _real_dt.strptime(day, "%Y-%m-%d").date()
+    def _dt(e):
+        try:
+            return _real_dt.strptime(str(e).upper(), "%d%b%Y").date()
+        except ValueError:
+            return None
+    open_ = sorted({e for e in expiries if _dt(e) and _dt(e) >= d}, key=_dt)
+    return open_[:2] if with_next else open_[:1]
+
 if AUTO:
+    ALLOWED = day_expiries(DAY, [s.get("expiry") for s in cache.values()], WITH_NEXT)
+    print(f"Expiries replayed: {', '.join(ALLOWED) or 'none'}"
+          + ("" if WITH_NEXT else "  (current only; add --next for the next expiry)"))
+    ft.set_allowed_expiries(ALLOWED or None)
     jobs = sorted({(s.get("opt_type"), int(s["strike"]), s.get("expiry")) for s in cache.values()
-                   if s.get("opt_type") in ("CE", "PE") and tf_of(int(s["strike"]))})
+                   if s.get("opt_type") in ("CE", "PE") and tf_of(int(s["strike"]))
+                   and s.get("expiry") in ALLOWED})
 else:
     jobs = [(OPT, stk, EXPIRY) for stk in STRIKES]
 print(f"{len(jobs)} contracts to replay")

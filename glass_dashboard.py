@@ -255,7 +255,7 @@ class GlassDashboard:
                 a._on_next_expiry_selected()
             if "use_next" in body:
                 a.use_next_exp.set(bool(body["use_next"]))
-                a._refresh_display()
+                a._on_use_next_exp_toggled()   # updates which expiries may get orders
             if "strikes" in body:
                 n = max(3, min(50, int(body["strikes"])))
                 a.strikes_var.set(n)

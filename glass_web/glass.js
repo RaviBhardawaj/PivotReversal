@@ -54,8 +54,8 @@ async function act(path, body, okMsg) {
 // ── rendering ────────────────────────────────────────────
 function setSelect(el, values, cur) {
   const want = values.join("\u0001") + "\u0002" + cur;
-  if (el.dataset.k === want) return;
-  el.dataset.k = want;
+  if (el._k === want) return;
+  el._k = want;
   const vals = values.slice();
   if (cur && !vals.includes(cur)) vals.unshift(cur);
   el.innerHTML = (vals.length ? "" : '<option value="">--</option>') + vals.map((v) => `<option${v === cur ? " selected" : ""}>${esc(v)}</option>`).join("");
@@ -68,7 +68,7 @@ function renderControls(c) {
   if (!held("exchange") && !busy($("c-exchange"))) setSelect($("c-exchange"), c.exchanges || [], c.exchange);
   if (!held("symbol") && !busy($("c-symbol"))) $("c-symbol").value = c.symbol || "";
   const dl = $("c-symbols"), k = (c.symbols || []).join(",");
-  if (dl.dataset.k !== k) { dl.dataset.k = k; dl.innerHTML = (c.symbols || []).map((s) => `<option value="${esc(s)}">`).join(""); }
+  if (dl._k !== k) { dl._k = k; dl.innerHTML = (c.symbols || []).map((s) => `<option value="${esc(s)}">`).join(""); }
   if (!held("expiry") && !busy($("c-expiry"))) setSelect($("c-expiry"), c.expiries || [], c.expiry);
   if (!held("next") && !busy($("c-next"))) setSelect($("c-next"), [""].concat(c.expiries || []), c.next_expiry || "");
   if (!held("usenext")) $("c-usenext").checked = !!c.use_next;
@@ -131,7 +131,7 @@ function renderPivots(p) {
   const cell = (v, cls) => `<td class="${cls}">${v ? num(v) : "--"}</td>`;
   const html = (p || []).map((r) => `<tr><td class="l" style="color:${col[r.tf]}">${esc(r.tf)}</td><td class="l">${esc(r.zone)}</td>` +
     cell(r.S3, "lvl-s") + cell(r.S2, "lvl-s") + cell(r.S1, "lvl-s") + cell(r.P, "lvl-p") + cell(r.R1, "lvl-r") + cell(r.R2, "lvl-r") + cell(r.R3, "lvl-r") + "</tr>").join("");
-  if ($("mtf-body").dataset.k !== html) { $("mtf-body").dataset.k = html; $("mtf-body").innerHTML = html; }
+  if ($("mtf-body")._k !== html) { $("mtf-body")._k = html; $("mtf-body").innerHTML = html; }
 }
 
 // reversal dashboard
@@ -157,7 +157,7 @@ function renderFilters(s) {
   h += `<span class="fg"><span class="g">📅 Expiry</span>${chip('data-x="exp_cur"', "⚡ Current", f.exp_cur)}${chip('data-x="exp_next"', "⏭ Next", f.exp_next)}</span>`;
   h += chip('data-x="show_plan"', "📅 Show plan columns", f.show_plan) + '<button class="chip" data-clear>✖ Clear filters</button>';
   const el = $("d-filters");
-  if (el.dataset.k !== h) { el.dataset.k = h; el.innerHTML = h; }
+  if (el._k !== h) { el._k = h; el.innerHTML = h; }
   $("d-info").textContent = s.filter_info || "";
 }
 
@@ -170,7 +170,7 @@ $("d-filters").addEventListener("click", (e) => {
   }
   if (b.dataset.g) {
     const set = new Set(f.filters[b.dataset.g] || []);
-    set.has(b.dataset.k) ? set.delete(b.dataset.k) : set.add(b.dataset.k);
+    set.has(b._k) ? set.delete(b._k) : set.add(b._k);
     f.filters[b.dataset.g] = [...set];
   } else if (b.dataset.x) f[b.dataset.x] = !f[b.dataset.x];
   localFilters = f; holdFor("filters");
@@ -189,11 +189,11 @@ function renderDash(s) {
   const showPlan = filterState(s).show_plan;
   const disp = cols.filter((c) => !LV.includes(c) && !PLAN.includes(c)).concat(LV.filter((c) => cols.includes(c)), showPlan ? PLAN.filter((c) => cols.includes(c)) : []);
   const head = "<tr>" + disp.map((c) => `<th class="${LEFT.has(c) ? "l" : ""}">${esc(c)}</th>`).join("") + "</tr>";
-  if ($("d-head").dataset.k !== head) { $("d-head").dataset.k = head; $("d-head").innerHTML = head; }
+  if ($("d-head")._k !== head) { $("d-head")._k = head; $("d-head").innerHTML = head; }
   const rows = s.rows || [];
   const body = rows.length ? rows.map((r) => `<tr class="${esc(r.tag)}">` + disp.map((c) => `<td class="${LEFT.has(c) ? "l" : ""}">${cellHTML(c, r.v[c] ?? "")}</td>`).join("") + "</tr>").join("")
     : `<tr class="empty"><td colspan="${disp.length || 1}">${s.feed_running ? "No rows match the filters" : "Start the live scanner to fill the dashboard"}</td></tr>`;
-  if ($("d-body").dataset.k !== body) { $("d-body").dataset.k = body; $("d-body").innerHTML = body; }
+  if ($("d-body")._k !== body) { $("d-body")._k = body; $("d-body").innerHTML = body; }
   $("d-maxoi").textContent = s.max_oi || "";
 }
 
@@ -203,7 +203,7 @@ function renderTools(s) {
   const opts = [["ALL", "ALL"], ["15M Intraday", "15M"], ["1H Structure", "1H"]];
   const cur = held("ft") ? hold.ftv : s.ft_filter;
   const h = opts.map(([v, t]) => `<button class="chip${v === cur ? " a" : ""}" data-v="${esc(v)}">${t}</button>`).join("");
-  if ($("t-ft").dataset.k !== h) { $("t-ft").dataset.k = h; $("t-ft").innerHTML = h; }
+  if ($("t-ft")._k !== h) { $("t-ft")._k = h; $("t-ft").innerHTML = h; }
 }
 
 let lastNote = 0;
@@ -231,8 +231,16 @@ async function poll() {
     }
   }
 }
-setInterval(poll, 1000);
-poll();
+// One request at a time (a slow reply no longer stacks up more requests behind it), and no
+// polling while the tab is hidden; it refreshes at once when you come back to it.
+let pollTimer = null;
+async function pollLoop() {
+  clearTimeout(pollTimer);
+  if (!document.hidden) await poll();
+  pollTimer = setTimeout(pollLoop, 1000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pollLoop(); });
+pollLoop();
 
 // ── controls ─────────────────────────────────────────────
 const sendCtl = (key, body) => { holdFor(key, 4000); return act("/api/controls", body); };

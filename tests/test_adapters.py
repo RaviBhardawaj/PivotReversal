@@ -171,6 +171,12 @@ holder = {"obj": StaleObj(), "logins": 0}
 def relogin():
     holder["logins"] += 1; holder["obj"] = FakeObj()
 a3 = AngelAdapter({"_session_getter": lambda: holder["obj"], "_session_relogin": relogin, "ANGEL_CLIENT_ID": "C1"}, log=lambda *a: None)
+# the app has just logged in when the adapter is created: no second login in the first 5 minutes
+try:
+    a3.login(); check(False, "no double login at startup")
+except BrokerError:
+    check(holder["logins"] == 0, "no double login right after startup")
+a3._relogin_at = 0.0                                  # 5 minutes after startup
 check(a3.login() == "C1" and holder["logins"] == 1, "angel logs in again after AG8004")
 holder["obj"] = StaleObj(); a3._relogin_at = 0.0     # 5 minutes later
 check(a3.place(r, "BUY", 75, "LIMIT", price=100) == "A1" and holder["logins"] == 2

@@ -7330,21 +7330,6 @@ class ControlPanel:
     def _switch_main_tab(self, tab_name: str):
         pass
 
-    def _switch_adv_subview(self, subview_name: str):
-        pass
-
-    def _build_advance_tab_ui(self, r):
-        pass
-
-    def _refresh_advance_display(self):
-        pass
-
-    def _populate_advance_plan_tree(self):
-        pass
-
-    def _on_map_advance_levels_click(self):
-        pass
-
     def _on_exchange_change(self):
         exch=self.exchange_var.get()
         syms=list(EXCHANGE_CONFIG.get(exch, {}).get("symbols", []))

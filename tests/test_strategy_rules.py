@@ -99,17 +99,17 @@ st=run(PIV,pre,"BUY")
 assert st.trade_status=="Waiting" and st.conf_high==0 and st.state=="RECLAIM_S2", (st.state, st.conf_high)
 print("8 green candle before the sweep: ignored: OK")
 
-# 9. confirmation candle closed well above S2 (no wick retest): a break of its high BEFORE the retest
-#    does not enter; after price comes back to S2 and holds, the break above the high enters
+# 9. confirmation candle closed well above S2 and price runs through its high BEFORE any retest:
+#    a continuation move -> setup dropped (AJ, 4 Nov). A later pull-back to S2 and break of the old
+#    high does NOT enter on the old setup; only a fresh sweep of S2 starts a new one.
 nr=[(at(9,25),S2*1.05),(at(9,29,58),S2*0.97),(at(9,30,10),S2*1.03),(at(9,33),S2*1.06),(at(9,34),S2*1.07),
-    (at(9,35),S2*1.075)]           # sweep in the 09:25 candle; 09:30 candle low S2*1.03 (no retest); 09:35 tick is above its high
+    (at(9,35),S2*1.075)]           # sweep in the 09:25 candle; the 09:30 candle closes above S2 (high 1.07); 09:35 runs above it
 st=run(PIV,nr,"BUY")
-assert st.state=="RETEST_S2" and st.trade_status=="Waiting", (st.state, st.signal)
-CH9=st.conf_high; assert CH9==round(S2*1.07,2), CH9
-nr2=nr+[(at(9,36),S2*1.01),(at(9,37),S2*1.05),(at(9,38),CH9+0.2)]
+assert st.state=="WAITING" and st.trade_status=="Waiting" and "continuation" in st.signal, (st.state, st.signal)
+nr2=nr+[(at(9,36),S2*1.01),(at(9,37),S2*1.05),(at(9,38),S2*1.08)]
 st=run(PIV,nr2,"BUY")
-assert st.trade_status=="Active" and st.entry_price==CH9, (st.state, st.signal)
-print("9 no entry before the retest; after the retest, entry above confirmation high %.2f: OK"%CH9)
+assert st.trade_status=="Waiting", (st.state, st.signal)   # the 09:36 near-touch starts a NEW setup; no entry yet
+print("9 continuation through the confirmation high before a retest: ignored, no entry later: OK")
 # 10. SL = the LL of the whole sweep. Price dipping under the level again while the
 #     confirmation candle forms does NOT tighten the SL to that shallower dip (AJ, 12 Oct:
 #     CE 22400 re-entry got SL 79.25 instead of the sweep LL and was stopped out in a minute)
@@ -128,10 +128,18 @@ print("10b SELL mirror keeps the sweep HH %.2f: OK"%st.sl)
 #     The feed gave no day high, as in that trade.
 near=[(at(9,28),R2*0.985),(at(9,29),R2*0.991),(at(9,29,30),R2*0.9905),               # near-sweep, green candle, HH so far R2*0.991
       (at(9,30,5),R2*0.998),(at(9,31),R2*0.9995),(at(9,34),R2*0.996),               # red candle, high R2*0.9995
-      (at(9,35,5),R2*0.9958),(at(9,35,30),R2*0.9955)]                               # candle closed; break of its low
-st=app.StrategyStrikeState("PE",22850,expiry="19OCT2026",mode="SELL")
-for ts,px in near:
-    FakeDT.v=ts; st.update_tick(px,PIV,ts,opt_high=px,opt_low=px)
+      (at(9,35,5),R2*0.9975),(at(9,35,30),R2*0.9955)]                               # candle closed; retest; break of its low
+def run_near():
+    st=app.StrategyStrikeState("PE",22850,expiry="19OCT2026",mode="SELL")
+    for ts,px in near:
+        FakeDT.v=ts; st.update_tick(px,PIV,ts,opt_high=px,opt_low=px)
+    return st
+# near-touch counts as a sweep (AJ, 4 Nov); with the old red-candle-only rule the SL is still the sweep HH, never R3
+app.CONF_ANY_COLOUR=False
+try:
+    st=run_near()
+finally:
+    app.CONF_ANY_COLOUR=True
 assert st.trade_status=="Active" and st.sl==round(R2*0.9995,2) and st.sl!=R3, (st.state, st.sl, st.signal)
 se=app.check_option_sell_entry(R2*0.9955,PIV,"PE",hh=st.hh,state=st.state,level=st.trigger_level,opt_high=R2*0.9955)
 assert se["SL"]==st.sl, (se["SL"], st.sl)

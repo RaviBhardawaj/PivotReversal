@@ -1,18 +1,6 @@
 {
   "restrict_to_selected_only": false,
   "default_lots": 1,
-  "strikes": [
-    {
-      "id": "NIFTY_23000_PE",
-      "symbol": "NIFTY",
-      "strike": 23000.0,
-      "opt_type": "PE",
-      "lots": 1,
-      "enabled": true,
-      "source": "Manual",
-      "notes": "Mapped NIFTY 23000 PE",
-      "added_at": "2026-10-20 01:23:29"
-    }
-  ],
-  "updated_at": "2026-10-20T01:23:29.062081"
+  "strikes": [],
+  "updated_at": "2026-11-05T22:46:28.366591"
 }

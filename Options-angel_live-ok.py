@@ -1,4 +1,3 @@
-#!/Library/Frameworks/Python.framework/Versions/3.12/bin/python3
 """
 Angel One - Live Option Chain with Greeks
 Control Panel + Google Sheets Feed
@@ -49,7 +48,6 @@ if BASE_DIR not in sys.path:
 from brokers import (OrderEngine, ADAPTERS, BROKER_LABELS, ALL_LEVELS, LEVEL_LABELS,   # live orders
                      TIMEFRAMES, tf_levels, strike_selection_reason)
 from advanced_strategy import advanced_engine
-import tsl_study   # data-only record of targets reached / target-then-SL for the TSL study
 
 # ── Exchange config ───────────────────────────────────────
 EXCHANGE_CONFIG = {
@@ -232,6 +230,26 @@ def at_entry_price(ltp: float, entry_px: float, side: str) -> bool:
     return entry_px - 0.05 <= ltp <= entry_px + band
 
 
+# BUY chase room (AJ, 9 Nov): when price breaks the confirmation high in one jump (a fast
+# reclaim, or a slow feed), the 1% band alone missed the trade for good. A BUY may still be
+# taken while the LTP is no more than this fraction of the risk (entry - LL) above the
+# entry, and still below T1. The trade is recorded at the real LTP.
+BUY_CHASE_RISK_FRAC = 0.30
+
+
+def buy_entry_ok(ltp: float, entry_px: float, ll: float = 0.0, t1: float = 0.0) -> bool:
+    """True when a BUY may be taken at this LTP: inside the 1% entry band, or above it by at
+    most BUY_CHASE_RISK_FRAC of the risk (entry - LL) and still below T1. Never at or above T1:
+    a fill there has no room to the first target (25550 PE 23NOV, 9 Nov: entry 723.05, T1 718.25)."""
+    if t1 > 0 and ltp >= t1:
+        return False
+    if at_entry_price(ltp, entry_px, "BUY"):
+        return True
+    if ltp <= 0 or entry_px <= 0 or ltp < entry_px or ll <= 0 or ll >= entry_px:
+        return False
+    return ltp <= entry_px + BUY_CHASE_RISK_FRAC * (entry_px - ll)
+
+
 def traded_today_tick(message: dict, ltp: float, prev_ltp: float = 0.0, now: datetime = None) -> bool:
     """True when this feed tick is a real trade from today's session (09:15 IST onwards).
     Before the day's first trade the feed repeats yesterday's close and high/low."""
@@ -250,39 +268,6 @@ def traded_today_tick(message: dict, ltp: float, prev_ltp: float = 0.0, now: dat
         return datetime.fromtimestamp(ltt) >= start
     # no trade time in this feed mode: only a price that moved during market hours counts
     return prev_ltp > 0 and abs(ltp - prev_ltp) > 1e-9
-
-
-def dhan_quote_to_tick(token: str, q: dict) -> dict:
-    """One row of Dhan's /marketfeed/quote in the shape of an Angel WebSocket tick (prices in
-    paise), so the Dhan backup prices go through exactly the same tick handling."""
-    def paise(v):
-        try:
-            return round(float(v or 0) * 100)
-        except (TypeError, ValueError):
-            return 0
-    ohlc  = q.get("ohlc") or {}
-    depth = q.get("depth") or {}
-    try:
-        ltt = datetime.strptime(str(q.get("last_trade_time", "")), "%d/%m/%Y %H:%M:%S").timestamp()
-    except ValueError:
-        ltt = 0
-    tick = {
-        "token": str(token),
-        "last_traded_price":        paise(q.get("last_price")),
-        "open_interest":            int(q.get("oi") or 0),
-        "volume_trade_for_the_day": int(q.get("volume") or 0),
-        "closed_price":             paise(ohlc.get("close")),
-        "high_price_of_the_day":    paise(ohlc.get("high")),
-        "low_price_of_the_day":     paise(ohlc.get("low")),
-        "open_price_of_the_day":    paise(ohlc.get("open")),
-        "last_traded_timestamp":    ltt,
-        "source":                   "DHAN",
-    }
-    for side, key in (("buy", "best_5_buy_data"), ("sell", "best_5_sell_data")):
-        lvls = [d for d in (depth.get(side) or []) if isinstance(d, dict) and d.get("price")]
-        if lvls:
-            tick[key] = [{"price": paise(d["price"]), "quantity": d.get("quantity", 0)} for d in lvls]
-    return tick
 
 
 def is_live_market_open(dt: datetime = None) -> bool:
@@ -626,6 +611,19 @@ class StrategyStrikeState:
         hit_tag = f" — Target {hit} Hit" if hit > 0 else ""
         self.signal = f"♻️ {side} {self.opt_type} restored after restart{hit_tag} | Entry:{self.entry_price:.2f} | SL:{self.sl:.2f}"
 
+    def unconfirm_buy(self):
+        """Undo a BUY confirmation that was never recorded as a trade: keep the setup (LL,
+        confirmation high, retest) and wait for the next break / return to the entry."""
+        self.state         = "TRADING_IN_FAVOR_BUY"
+        self.trade_status  = "Waiting"
+        self.entry_count   = max(0, self.entry_count - 1)
+        self.entry_price   = self.sl = self.entry_sl = 0.0
+        self.entry_time    = ""
+        self.targets       = []
+        self.signal        = f"★ {self.opt_type} BUY not recorded — still watching the break above {self.conf_high:.2f}"
+        print(f"[S2 SKIP] {self.opt_type} {self.strike} {self.expiry}: confirmed BUY was not recorded "
+              f"(not a 15M/1H strike, outside the zone, or the tracker refused it) — watching again")
+
     def seed_from_closed(self, trade: dict, sl_hits: int = 0, entries: int = 1):
         """After an app restart: show the strike's last trade of the day (entry, SL, exit) as it
         was shown before the restart. The strike waits for a fresh sweep for any new entry."""
@@ -920,13 +918,19 @@ class StrategyStrikeState:
                 if start_favor and not _levels_up:
                     self.signal = f"★ {self.opt_type} {active_lvl} Confirmation high {_ep0:.2f} is above every target level — no room, no trade"
                     start_favor = False
-                elif start_favor and not at_entry_price(ltp, _ep0, "BUY"):
+                elif start_favor and not buy_entry_ok(ltp, _ep0, self.ll, _t1 if _levels_up else 0.0):
                     # price has run away from the entry: no chasing; wait for it to come back
                     self.signal = f"★ {self.opt_type} {active_lvl} Broke confirmation high — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
+                    if not getattr(self, "_chase_logged", False):
+                        self._chase_logged = True
+                        print(f"[S2 SKIP] {self.opt_type} {self.strike} {self.expiry} {now.strftime('%H:%M:%S')}: "
+                              f"broke confirmation high {_ep0:.2f} but LTP {ltp:.2f} is past the chase room "
+                              f"(LL {self.ll:.2f}, T1 {_t1:.2f}) — waiting for a pull-back")
                     start_favor = False
                 elif not start_favor and self.conf_high > 0:
                     self.signal = f"★ {self.opt_type} {active_lvl} Retested — Buy Above Confirmation High {self.conf_high:.2f}"
                 if start_favor:
+                    self._chase_logged = False
                     # Step 5: ENTRY IS CONFIRMED!
                     self.state         = "CONFIRMED_BUY"
                     self.trigger_level = active_lvl
@@ -1755,6 +1759,25 @@ class LiveOrderManager:
             return "No order: auto-trading off"
         inst = self.instrument_for(trade)
         inst["levels"] = sorted(levels or [])
+
+        # ── CURRENT EXPIRY RESTRICTION FOR AUTO-TRADING ──
+        # Automatic orders are strictly restricted to CURRENT EXPIRY ONLY.
+        # Other expiry orders can only be generated manually.
+        is_manual = bool(trade.get("manual") or trade.get("is_manual"))
+        if not is_manual:
+            curr_exp = ""
+            if hasattr(feed, "current_expiry") and feed.current_expiry:
+                curr_exp = str(feed.current_expiry).strip().upper()
+            elif hasattr(feed, "_prep_args") and feed._prep_args and len(feed._prep_args) > 2:
+                exps = feed._prep_args[2]
+                if exps and isinstance(exps, list):
+                    curr_exp = str(exps[0]).strip().upper()
+            inst_exp = str(inst.get("expiry") or trade.get("Expiry") or "").strip().upper()
+            if curr_exp and inst_exp and inst_exp != curr_exp:
+                msg = f"Auto-order skipped: strike expiry {inst_exp} != current expiry {curr_exp} (auto-trade restricted to current expiry only; other expiries must be generated manually)"
+                print(f"[ORDERS] ℹ️ {msg}")
+                return msg
+
         if bid:
             inst["bid"] = float(bid)
             trade["Bid"] = float(bid)
@@ -2008,7 +2031,6 @@ def replay_trade_bars(trade, bars, eod=EOD_SQUARE_OFF_TIME):
             trade['Trade_High'] = round(max(trade['Trade_High'], px), 2)
             trade['Trade_Low'] = round(min(trade['Trade_Low'], px) if trade['Trade_Low'] else px, 2)
             sl_before, t5 = trade['SL'], trade.get('Target_5', 0)
-            tsl_study.note_tick(trade, px, tn, source=tsl_study.REPLAY_DATA, fill_at_stop=i > 0)
             closed, reason, _ = fwd_exit_check(trade, px)
             if closed:
                 fill = px
@@ -2177,13 +2199,6 @@ class ForwardTestTracker:
                     ])
             except Exception as e:
                 print(f"Forward test init error: {e}")
-        # TSL study: closed trades from before it was added get a row from the trade log
-        try:
-            _n = tsl_study.TslJournal(tsl_study.journal_path(self.filepath)).backfill(self.filepath)
-            if _n:
-                print(f"🧪 [TSL STUDY] {_n} earlier closed trade(s) added from the trade log")
-        except Exception as e:
-            print(f"[TSL STUDY] backfill note: {e}")
 
     def log_entry(self, symbol: str, opt_type: str, strike: int, action: str,
                   entry_price: float, sl: float, t1: float, t2: float,
@@ -2356,8 +2371,6 @@ class ForwardTestTracker:
         trade['Current_Price'] = round(ltp, 2)
         closed = False
 
-        tsl_study.note_tick(trade, ltp, datetime.now())   # TSL study: targets reached, peak, shadow exits (data only)
-
         # ── Exit checks — cascade through targets T1 → T2 → T3 → T4 → T5 ──
         target_hit = trade.get('Target_Hit', 0)   # how many targets already hit
         if _forced:
@@ -2433,42 +2446,6 @@ class ForwardTestTracker:
                   f"| {exit_reason} | PnL:{exit_pnl:+.2f} pts | {hl_label} (Max:{trade['Max_Pts']:+.2f} pts)")
             return trade
         return None
-
-    def record_unlogged(self, st, symbol, expiry, exit_px, exit_time="15:00:00",
-                        reason="EOD 3PM Square-off @ CMP (shown on dashboard, entry not recorded live)"):
-        """A trade the strategy confirmed (shown live on the dashboard) that never reached the
-        trade log: written as a CLOSED row at exit_px so the sheet always matches the dashboard.
-        Bookkeeping only, never sends an order. Returns the row, or None if already recorded."""
-        side = "BUY" if st.mode == "BUY" else "SELL"
-        ep = _safe_float(st.entry_price)
-        exit_px = _safe_float(exit_px)
-        if ep <= 0 or exit_px <= 0 or not st.entry_time:
-            return None
-        same = lambda t: (t.get('Action') == side and t.get('Type') == st.opt_type
-                          and int(_safe_float(t.get('Strike', 0))) == int(st.strike)
-                          and (t.get('Expiry', '') or '') == (expiry or ''))
-        if any(same(t) for t in list(self.get_active_trades()) + list(self._today_closed())):
-            return None
-        now = datetime.now()
-        tg = (list(st.targets) + [0.0] * 5)[:5]
-        sl = _safe_float(getattr(st, 'entry_sl', 0)) or _safe_float(st.sl)
-        pnl = round((ep - exit_px) if side == "SELL" else (exit_px - ep), 2)
-        hhmmss = str(st.entry_time).replace(':', '')
-        trade = {
-            'Trade_ID': f"{symbol}_{st.opt_type}_{st.strike}{'_' + expiry if expiry else ''}_{now:%Y%m%d}_{hhmmss}",
-            'Date': now.strftime('%Y-%m-%d'), 'Entry_Time': st.entry_time, 'Timeframe': '15M Intraday',
-            'Symbol': symbol, 'Type': st.opt_type, 'Strike': st.strike, 'Expiry': expiry, 'Action': side,
-            'Entry_Price': round(ep, 2), 'SL': round(sl, 2), 'Initial_SL': round(sl, 2),
-            'Target_1': tg[0], 'Target_2': tg[1], 'Target_3': tg[2], 'Target_4': tg[3], 'Target_5': tg[4],
-            'Trade_High': round(max(ep, exit_px), 2), 'Trade_Low': round(min(ep, exit_px), 2),
-            'Max_Pts': max(pnl, 0.0), 'Exit_Price': round(exit_px, 2), 'Exit_Time': exit_time,
-            'Exit_Reason': reason, 'PnL_Pts': pnl, 'Status': 'CLOSED',
-        }
-        self._append_row(trade)
-        self._closed_today.append(trade)
-        print(f"📝 [FWD TEST] Recorded dashboard-only {side} {st.opt_type} {st.strike} {expiry} "
-              f"@ {ep:.2f} → {exit_px:.2f} | PnL {pnl:+.2f} pts")
-        return trade
 
     def _today_closed(self):
         """Today's closed trades: the trade log plus this session's closes (by Trade_ID)."""
@@ -2752,8 +2729,6 @@ class ForwardTestTracker:
                 writer.writerows(rows)
         except Exception as e:
             print(f"Forward test update error: {e}")
-        if str(updated_trade.get('Status', '')).strip() == 'CLOSED':
-            tsl_study.TslJournal(tsl_study.journal_path(self.filepath)).record(updated_trade)
 
 
 
@@ -3242,18 +3217,7 @@ def check_option_entry(ltp: float, pivots: dict, opt_type: str = "CE",
     # BUY target ladder always goes UP through pivot levels:
     # Entry near S2 → T1:S1 → T2:P → T3:R1 → T4:R2 → T5:R3
     # Entry near S1 → T1:P  → T2:R1 → T3:R2 → T4:R3 → T5:R3*ext
-    if level == "S3":
-        # S3 reclaim (S2 was swept): the trade starts down near S3 and climbs the whole ladder
-        if ltp < s3:
-            return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
-        zone = "S3 Reclaim"
-        levels_up = [l for l in [s2, s1, p, r1, r2] if l > ltp]
-        t1 = levels_up[0] if len(levels_up) > 0 else s2
-        t2 = levels_up[1] if len(levels_up) > 1 else s1
-        t3 = levels_up[2] if len(levels_up) > 2 else p
-        t4 = levels_up[3] if len(levels_up) > 3 else r1
-        t5 = levels_up[4] if len(levels_up) > 4 else r2
-    elif level == "S1":
+    if level == "S1":
         if ltp < s1:
             return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
         zone = "S1 Reclaim"
@@ -3326,18 +3290,7 @@ def check_option_sell_entry(ltp: float, pivots: dict, opt_type: str = "PE",
     # SELL target ladder always goes DOWN through pivot levels:
     # Entry near R2 → T1:R1 → T2:P → T3:S1 → T4:S2 → T5:S3
     # Entry near R1 → T1:P  → T2:S1 → T3:S2 → T4:S3 → T5:S3*ext
-    if level == "R3":
-        # R3 rejection (R2 was swept): the trade starts up near R3 and falls the whole ladder
-        if ltp > r3:
-            return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
-        zone = "R3 Rejection"
-        levels_dn = [l for l in [r2, r1, p, s1, s2] if l < ltp]
-        t1 = levels_dn[0] if len(levels_dn) > 0 else r2
-        t2 = levels_dn[1] if len(levels_dn) > 1 else r1
-        t3 = levels_dn[2] if len(levels_dn) > 2 else p
-        t4 = levels_dn[3] if len(levels_dn) > 3 else s1
-        t5 = levels_dn[4] if len(levels_dn) > 4 else s2
-    elif level == "R1":
+    if level == "R1":
         if ltp > r1:
             return {"entry": False, "zone": "", "detail": "", "T1": 0, "T2": 0, "T3": 0, "T4": 0, "T5": 0, "SL": 0}
         zone = "R1 Rejection"
@@ -3439,125 +3392,28 @@ def get_gspread_client():
     gc = gspread.authorize(creds)
     # A Sheets call without a timeout can hang the feed loop forever — cap every request
     try:
-        gc.set_timeout(SHEETS_TIMEOUT)
+        gc.set_timeout(20)
     except Exception:
-        pass
-    _make_sheets_session_resilient(gc, creds)
+        try:
+            gc.session.request = functools.partial(gc.session.request, timeout=20)
+        except Exception:
+            pass
     return gc
-
-
-SHEETS_TIMEOUT   = 20     # seconds per Google Sheets request
-SHEETS_RETRIES   = 3      # extra tries after an SSL / connection failure
-SHEETS_IDLE_SECS = 45     # a connection idle longer than this is replaced before use
-SHEETS_HEALTH = {"err": "", "at": 0.0}   # last Sheets write that failed even after retries (dashboard alert)
-_SHEETS_LOCK = threading.Lock()          # one Sheets request on the wire at a time, app-wide
-
-
-def _make_sheets_session_resilient(gc, creds):
-    """Make every Google Sheets request safe from 'SSLV3_ALERT_BAD_RECORD_MAC' and dropped connections.
-    The feed loop, forward-test sync, Orders Log and formatting threads all write through gspread's
-    one requests session at the same time, and a requests session is not thread-safe. Google
-    answers garbled TLS records with 'bad record mac'. Three things stop that:
-      1. one lock: only one Sheets request is on the wire at a time, so no two threads ever share
-         a TLS connection (Sheets allows 60 writes/min anyway, so nothing is lost by queuing);
-      2. a connection that sat idle (Mac sleep, Wi-Fi change, Google closing it) is replaced
-         before it is used, instead of failing on the first write after a pause;
-      3. if a connection still breaks, it is thrown away and the call retried on a brand-new one.
-    Appends are not retried: Google may already have added the rows, and a retry would write
-    them twice (the Orders Log re-queues them itself)."""
-    owner = getattr(gc, "http_client", gc)            # gspread 6 keeps it on http_client, 5 on the client
-    shared = getattr(owner, "session", None)
-    if shared is None or not hasattr(shared, "request") or getattr(shared, "_loc_retry", False):
-        return
-    auth = getattr(owner, "auth", None) or creds
-    try:
-        from google.auth.transport.requests import AuthorizedSession
-    except Exception:
-        return
-    flaky = (requests.exceptions.SSLError, requests.exceptions.ConnectionError,
-             requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError)
-    box = {"s": None, "used": 0.0}
-
-    def _fresh():
-        old, box["s"] = box["s"], AuthorizedSession(auth)
-        if old is not None:
-            try:
-                old.close()
-            except Exception:
-                pass
-
-    def request(method, url, *args, **kwargs):
-        if kwargs.get("timeout") is None:
-            kwargs["timeout"] = SHEETS_TIMEOUT
-        tries = 1 if ":append" in str(url) else SHEETS_RETRIES + 1
-        for attempt in range(tries):
-            try:
-                with _SHEETS_LOCK:
-                    if box["s"] is None or time.time() - box["used"] > SHEETS_IDLE_SECS:
-                        _fresh()
-                    try:
-                        r = box["s"].request(method, url, *args, **kwargs)
-                    finally:
-                        box["used"] = time.time()
-                SHEETS_HEALTH["err"] = ""
-                return r
-            except flaky as e:
-                with _SHEETS_LOCK:
-                    dead, box["s"] = box["s"], None
-                if dead is not None:
-                    try:
-                        dead.close()
-                    except Exception:
-                        pass
-                if attempt >= tries - 1:
-                    SHEETS_HEALTH["err"], SHEETS_HEALTH["at"] = f"{type(e).__name__}: {str(e)[:100]}", time.time()
-                    raise
-                wait = 0.5 * (2 ** attempt)
-                print(f"[SHEET] connection to Google dropped ({type(e).__name__}); "
-                      f"retrying on a fresh connection in {wait:.1f}s ({attempt + 1}/{tries - 1})")
-                time.sleep(wait)
-
-    shared.request = request
-    shared._loc_retry = True
 
 # ═══════════════════════════════════════════════════════════
 # SESSION
 # ═══════════════════════════════════════════════════════════
 class Session:
     obj=auth_token=feed_token=scrip_df=None
-    last_error = ""      # why the last Angel login failed ("" after a good login); shown on the dashboard
 
     @classmethod
     def login(cls):
-        try:
-            totp=pyotp.TOTP(TOTP_SECRET).now()
-            cls.obj=SmartConnect(api_key=API_KEY)
-            s=cls.obj.generateSession(CLIENT_ID,MPIN,totp)
-            if not s["status"]: raise Exception(s["message"])
-            cls.auth_token=s["data"]["jwtToken"]
-            cls.feed_token=cls.obj.getfeedToken()
-        except Exception as e:
-            msg = str(e)
-            if "NameResolution" in msg or "Failed to resolve" in msg:
-                msg = "Angel One server unreachable (internet/DNS problem)"
-            elif "Max retries" in msg or "timed out" in msg.lower():
-                msg = "Angel One server not responding"
-            cls.last_error = msg[:160]
-            raise
-        cls.last_error = ""
-
-    @classmethod
-    def login_in_background(cls, every=60):
-        """Keep trying the Angel login until it works (the app runs on Dhan prices meanwhile)."""
-        def _loop():
-            while not cls.auth_token:
-                time.sleep(every)
-                try:
-                    cls.login()
-                    print("[ANGEL] ✅ Login succeeded")
-                except Exception as e:
-                    print(f"[ANGEL] Login still failing: {cls.last_error or e}")
-        threading.Thread(target=_loop, daemon=True).start()
+        totp=pyotp.TOTP(TOTP_SECRET).now()
+        cls.obj=SmartConnect(api_key=API_KEY)
+        s=cls.obj.generateSession(CLIENT_ID,MPIN,totp)
+        if not s["status"]: raise Exception(s["message"])
+        cls.auth_token=s["data"]["jwtToken"]
+        cls.feed_token=cls.obj.getfeedToken()
 
     @classmethod
     def load_scrip(cls):
@@ -4024,10 +3880,110 @@ class FeedEngine:
         self._ws_watchdog_thread = None            # background health monitor thread
         self._last_reconnect_time = 0.0            # rate-limit reconnects
         self._ws_reconnect_lock = threading.Lock() # lock for clean reconnects
-        self._last_angel_tick   = time.time()      # last tick from Angel's WebSocket itself (not the Dhan backup)
-        self.data_source        = "ANGEL"          # where live prices come from now: ANGEL, DHAN (backup) or NONE
-        self.feed_alert         = ""               # loud dashboard message while prices are not from Angel
-        self._dhan_backup_thread = None
+        self.excluded_strikes   = set()            # set of normalized excluded strike keys (e.g. NIFTY|24050|CE|09NOV2026)
+        self._load_excluded_strikes()
+
+    def _normalize_strike_key(self, key):
+        k = str(key or "").strip()
+        if "|" in k:
+            parts = k.split("|")
+        elif "_" in k:
+            parts = k.split("_")
+        else:
+            return k
+        if len(parts) >= 4:
+            sym = parts[0].strip().upper()
+            stk = re.sub(r"[^\d.]", "", parts[1])
+            try:
+                stk = f"{float(stk):g}" if stk else "0"
+            except Exception:
+                pass
+            ot = parts[2].strip().upper()
+            exp = parts[3].strip().upper()
+            return f"{sym}|{stk}|{ot}|{exp}"
+        elif len(parts) == 3:
+            sym = parts[0].strip().upper()
+            stk = re.sub(r"[^\d.]", "", parts[1])
+            ot = parts[2].strip().upper()
+            return f"{sym}|{stk}|{ot}|"
+        return k
+
+    def _load_excluded_strikes(self):
+        excl_file = os.path.join(BASE_DIR, "excluded_strikes.json")
+        try:
+            if os.path.exists(excl_file):
+                with open(excl_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self.excluded_strikes = {self._normalize_strike_key(k) for k in data if k}
+                    else:
+                        self.excluded_strikes = set()
+            else:
+                self.excluded_strikes = set()
+        except Exception as e:
+            print(f"[FEED] Error loading excluded strikes: {e}")
+            self.excluded_strikes = set()
+
+    def save_excluded_strikes(self):
+        excl_file = os.path.join(BASE_DIR, "excluded_strikes.json")
+        try:
+            with open(excl_file, "w", encoding="utf-8") as f:
+                json.dump(sorted(list(self.excluded_strikes)), f, indent=2)
+        except Exception as e:
+            print(f"[FEED] Error saving excluded strikes: {e}")
+
+    def is_strike_excluded(self, symbol, strike, opt_type, expiry=""):
+        if not self.excluded_strikes:
+            return False
+        sym = str(symbol or "NIFTY").strip().upper()
+        s_clean = re.sub(r"[^\d.]", "", str(strike))
+        try:
+            stk = f"{float(s_clean):g}" if s_clean else "0"
+        except Exception:
+            stk = str(strike)
+        ot = str(opt_type or "").strip().upper()
+        exp = str(expiry or "").strip().upper()
+
+        if f"{sym}|{stk}|{ot}|{exp}" in self.excluded_strikes:
+            return True
+        if f"{sym}|{stk}|{ot}|" in self.excluded_strikes:
+            return True
+        if f"{sym}|ALL|ALL|{exp}" in self.excluded_strikes:
+            return True
+        return False
+
+    def exclude_strike(self, symbol, strike, opt_type, expiry=""):
+        sym = str(symbol or "NIFTY").strip().upper()
+        s_clean = re.sub(r"[^\d.]", "", str(strike))
+        try:
+            stk = f"{float(s_clean):g}" if s_clean else "0"
+        except Exception:
+            stk = str(strike)
+        ot = str(opt_type or "").strip().upper()
+        exp = str(expiry or "").strip().upper()
+
+        if stk == "0" or not stk:
+            key = f"{sym}|ALL|ALL|{exp}"
+        else:
+            key = f"{sym}|{stk}|{ot}|{exp}"
+
+        with self.lock:
+            self.excluded_strikes.add(key)
+            self.save_excluded_strikes()
+        return key
+
+    def restore_strike(self, key=""):
+        with self.lock:
+            if key:
+                norm = self._normalize_strike_key(key)
+                self.excluded_strikes.discard(norm)
+                self.excluded_strikes.discard(str(key))
+            self.save_excluded_strikes()
+
+    def clear_excluded_strikes(self):
+        with self.lock:
+            self.excluded_strikes.clear()
+            self.save_excluded_strikes()
 
     def prepare(self, exchange, symbol, expiries, n_strikes):
         """
@@ -4037,6 +3993,7 @@ class FeedEngine:
         if isinstance(expiries, str):
             expiries = [expiries]
         self._prep_args = (exchange, symbol, list(expiries), n_strikes)
+        self.current_expiry = expiries[0] if expiries else ""
 
         cfg    = EXCHANGE_CONFIG.get(exchange, EXCHANGE_CONFIG["NFO"])
         step   = get_symbol_step(symbol, exchange)
@@ -4513,47 +4470,6 @@ class FeedEngine:
         print(f"[NEW DAY] {today_date}: cleared {prev} strike states ({len(kept)} open-trade state(s) kept)")
         return True
 
-    _OPEN_TRADE_STATUSES = ("Active", "Target 1 Hit", "Target 2 Hit", "Target 3 Hit", "Target 4 Hit")
-
-    def _eod_exit_price(self, symbol, st, token):
-        """The 15:00 square-off price of a strike: the 14:59 one-minute close from Dhan, or the
-        last live price when Dhan has no candles."""
-        try:
-            bars = dhan_minute_bars(symbol, st.expiry, st.strike, st.opt_type, datetime.now().strftime("%Y-%m-%d"))
-            b = [x for x in bars if x[0].time() < EOD_SQUARE_OFF_TIME]
-            if b:
-                return b[-1][4]
-        except Exception as e:
-            print(f"[EOD] 1-min candles for {st.opt_type} {st.strike} unavailable ({e}); using last price")
-        return _safe_float(self.live_data.get(token, {}).get("ltp", 0))
-
-    def eod_close_day(self, symbol: str):
-        """15:45 day close: every trade the dashboard still shows as live but the trade log never
-        got is recorded at its 15:00 price, then today's trades leave the dashboard so it shows
-        only the next session's plan. The trade log and the sheet keep everything."""
-        meta_by_key = {(m["opt_type"], m["strike"], m.get("expiry", "")): t for t, m in self.token_to_meta.items()}
-        with self.lock:
-            states = list({id(s): s for s in self.strategy_states.values()}.values())
-        added = 0
-        for st in states:
-            if st.trade_status not in self._OPEN_TRADE_STATUSES or not st.entry_time:
-                continue
-            tok = meta_by_key.get((st.opt_type, st.strike, st.expiry or ""), "")
-            if self.forward_tracker.record_unlogged(st, symbol, st.expiry or "", self._eod_exit_price(symbol, st, tok)):
-                added += 1
-        if added:
-            print(f"[EOD] Recorded {added} dashboard trade(s) that were never written live")
-        with self.lock:
-            self.strategy_states.clear()
-            self.forward_tracker._closed_today = []
-            self._dash_reset_date = datetime.now().strftime("%Y-%m-%d")
-        self._last_ft_sync_ts = 0.0
-        self.sync_forward_test_to_sheet()
-        print("[EOD] ✅ Today's trades cleared from the dashboard (kept in the trade log and the sheet)")
-        if self.status_cb:
-            try: self.status_cb(f"🌙 Day closed — {added} missed trade(s) recorded, dashboard cleared for tomorrow", "#58a6ff")
-            except Exception: pass
-
     def build_next_day_levels(self, symbol: str):
         """After the close (15:45): the next session's strike levels, built from today's candle,
         for the current AND the next expiry, then eod_planner.py, which takes its strike levels
@@ -4563,10 +4479,6 @@ class FeedEngine:
             if getattr(self, "_next_levels_date", None) == today:
                 return
             self._next_levels_date = today
-        try:
-            self.eod_close_day(symbol)
-        except Exception as e:
-            print(f"[EOD] day close error: {e}")
         try:
             print(f"\n[EOD] ⏰ 15:45 → Calculating NEXT-DAY levels for {symbol}...")
             _mtf = get_tv_multi_timeframe_pivots(symbol, force_refresh=True)
@@ -4615,11 +4527,7 @@ class FeedEngine:
         symbol = symbol or "NIFTY"
         try:
             if not Session.auth_token or not Session.feed_token:
-                try:
-                    Session.login()
-                except Exception as le:
-                    # Levels come from Dhan first; an Angel outage must not stop the mapping
-                    print(f"[STRIKE MAPPER] Angel login failed ({Session.last_error or le}); using Dhan")
+                Session.login()
             if Session.scrip_df is None:
                 Session.load_scrip()
             df = Session.scrip_df
@@ -5040,7 +4948,6 @@ class FeedEngine:
 
         def _data(wsapp, message):
             if gen == self._ws_gen:
-                self._last_angel_tick = time.time()
                 self.on_data(wsapp, message)
 
         def _err(wsapp, error=None, *a):
@@ -5109,16 +5016,15 @@ class FeedEngine:
                     pass
 
                 # Every 3rd failed attempt, refresh the login: an expired JWT/feed token
-                # makes every reconnect fail until the session is renewed. With no session at
-                # all (login failed at startup) every attempt tries to log in.
-                if self._ws_fail_count % 3 == 0 or not Session.auth_token:
+                # makes every reconnect fail until the session is renewed.
+                if self._ws_fail_count % 3 == 0:
                     try:
                         print("[WS] 🔑 Refreshing Angel One session before reconnect...")
                         Session.login()
                     except Exception as le:
                         print(f"[WS] Session refresh failed: {le}")
 
-                self._last_tick_time = self._last_angel_tick = time.time()
+                self._last_tick_time = time.time()
                 try:
                     self.sws = self._new_ws()
                     print("[WS] 🚀 Reconnect thread spawned.")
@@ -5135,7 +5041,7 @@ class FeedEngine:
             if not self.token_list:
                 continue
             now = time.time()
-            no_tick = now - self._last_angel_tick   # Dhan backup ticks must not hide a dead Angel socket
+            no_tick = now - self._last_tick_time
             last_pong = getattr(self.sws, "last_pong_timestamp", None) if self.sws else None
             pong_age = (now - last_pong) if last_pong else None
             if self._ws_session_open():
@@ -5150,117 +5056,13 @@ class FeedEngine:
                     self._schedule_reconnect(reason="watchdog heartbeat lost")
 
     def start_ws(self):
-        self._last_tick_time = self._last_angel_tick = time.time()
+        self._last_tick_time = time.time()
         self._ws_fail_count = 0
         self._reconnect_pending = False
-        try:
-            self.sws = self._new_ws()
-        except Exception as e:
-            # No Angel session (login failed): the watchdog keeps retrying, Dhan feeds prices meanwhile
-            print(f"[WS] Angel WebSocket could not start ({Session.last_error or e}); retrying in the background")
-            self.sws = None
+        self.sws = self._new_ws()
         if not self._ws_watchdog_thread or not self._ws_watchdog_thread.is_alive():
             self._ws_watchdog_thread = threading.Thread(target=self._ws_watchdog_loop, daemon=True)
             self._ws_watchdog_thread.start()
-        if not self._dhan_backup_thread or not self._dhan_backup_thread.is_alive():
-            self._dhan_backup_thread = threading.Thread(target=self._dhan_backup_loop, daemon=True)
-            self._dhan_backup_thread.start()
-
-    # ── Dhan backup prices ─────────────────────────────────
-    # Angel index token -> Dhan index security ID (segment IDX_I)
-    _DHAN_INDEX_IDS = {"99926000": 13, "99926009": 25, "99926037": 27, "99926074": 442,
-                       "99919000": 51, "1": 51}
-    _DHAN_SEGMENTS  = {1: "NSE_EQ", 2: "NSE_FNO", 3: "BSE_EQ", 5: "MCX_COMM", 7: "BSE_FNO"}
-    DHAN_TAKEOVER_S = 20     # seconds without an Angel tick in market hours before Dhan takes over
-
-    def _dhan_backup_request(self):
-        """({segment: [security ids]}, {(segment, id): angel token}) for every subscribed token.
-        F&O and stock tokens are exchange tokens, the same numbers Dhan uses."""
-        index_tokens = {t for c in EXCHANGE_CONFIG.values() for t in c.get("spot_tokens", {}).values()}
-        req, back = {}, {}
-        for item in self.token_list:
-            seg = self._DHAN_SEGMENTS.get(item.get("exchangeType"))
-            for tok in item.get("tokens", []):
-                tok = str(tok)
-                if tok in self._DHAN_INDEX_IDS:
-                    s, sid = "IDX_I", self._DHAN_INDEX_IDS[tok]
-                elif seg and tok.isdigit() and tok not in index_tokens:
-                    s, sid = seg, int(tok)
-                else:
-                    continue       # an index Dhan has no known ID for: never guess
-                req.setdefault(s, []).append(sid)
-                back[(s, str(sid))] = tok
-        return req, back
-
-    def _dhan_backup_poll(self):
-        """One round of Dhan quotes for every subscribed contract, fed in as ticks. Returns how many."""
-        req, back = self._dhan_backup_request()
-        items = [(s, i) for s, ids in req.items() for i in ids]
-        if not items:
-            return 0
-        ad = _dhan_data_login()
-        n = 0
-        for k in range(0, len(items), 1000):          # Dhan: up to 1000 contracts a call, 1 call a second
-            if k:
-                time.sleep(1.1)
-            part = {}
-            for s, i in items[k:k + 1000]:
-                part.setdefault(s, []).append(i)
-            data = (ad._req("POST", "/marketfeed/quote", part) or {}).get("data") or {}
-            for s, rows in data.items():
-                if not isinstance(rows, dict):
-                    continue
-                for sid, q in rows.items():
-                    tok = back.get((s, str(sid)))
-                    if tok and isinstance(q, dict) and q.get("last_price"):
-                        self.on_data(None, dhan_quote_to_tick(tok, q))
-                        n += 1
-        return n
-
-    def _set_data_source(self, src, alert=""):
-        changed = src != self.data_source
-        self.data_source, self.feed_alert = src, alert
-        if not changed:
-            return
-        print(f"[FEED] Live prices from {src}" + (f": {alert}" if alert else ""))
-        if alert:
-            trigger_immediate_alert("⚠️ LiveOptionChain data problem", alert)
-            threading.Thread(target=lambda: subprocess.run(
-                ["afplay", "-v", "0.8", "/System/Library/Sounds/Sosumi.aiff"], capture_output=True),
-                daemon=True).start()
-        else:
-            trigger_immediate_alert("LiveOptionChain", "Angel One live prices are back", sound=False)
-        if self.status_cb:
-            try: self.status_cb(alert or "● Angel One live prices are back", "#f85149" if alert else "#3fb950")
-            except Exception: pass
-
-    def _dhan_backup_loop(self):
-        """When Angel sends no prices in market hours (login refused, Angel unreachable, socket
-        dead) poll the same contracts from Dhan so levels, entries and exits keep running. Angel
-        takes over again as soon as its ticks come back."""
-        while self.running:
-            time.sleep(1.5)
-            if not self.running:
-                break
-            if not self.token_list or not self._ws_session_open():
-                if self.data_source != "ANGEL":
-                    self._set_data_source("ANGEL")
-                continue
-            silent = time.time() - self._last_angel_tick
-            if silent < self.DHAN_TAKEOVER_S:
-                if self.data_source != "ANGEL":
-                    self._set_data_source("ANGEL")
-                continue
-            why = Session.last_error or f"no Angel prices for {int(silent)}s"
-            try:
-                n = self._dhan_backup_poll()
-                if not n:
-                    raise RuntimeError("Dhan returned no prices")
-                self._set_data_source("DHAN", f"ANGEL ONE DOWN ({why}). Live prices now come from Dhan.")
-            except Exception as e:
-                self._set_data_source("NONE", f"NO LIVE PRICES: Angel One down ({why}) and Dhan backup "
-                                              f"failed ({str(e)[:100]}). No trades are being taken.")
-                time.sleep(5)
 
     def stop_ws(self):
         self.running = False
@@ -5271,33 +5073,6 @@ class FeedEngine:
 
 
     # ── Google Sheets ──────────────────────────────────────
-    def setup_sheet_safe(self, symbol, strikes, retry_every=60):
-        """Set up the Google Sheet without ever stopping trading. If Google can't be reached,
-        the live feed and orders start anyway (sheet writes are skipped while self.ws is None)
-        and the sheet setup keeps retrying in the background until it works or the feed stops."""
-        self._sheet_setup_gen = gen = getattr(self, "_sheet_setup_gen", 0) + 1   # a later START replaces any old retry
-        try:
-            self.setup_sheet(symbol, strikes)
-            return True
-        except Exception as e:
-            self.ws = None   # a half-done setup must not be written to
-            print(f"[SHEET] Google Sheet setup failed ({str(e)[:160]}); trading continues, "
-                  f"retrying the sheet every {retry_every}s")
-
-        def _retry():
-            while True:
-                time.sleep(retry_every)
-                if self._sheet_setup_gen != gen or not getattr(self, "running", False):
-                    return
-                try:
-                    self.setup_sheet(symbol, strikes)
-                    print("[SHEET] Google Sheet connected again")
-                    return
-                except Exception as e:
-                    print(f"[SHEET] Google Sheet still unreachable ({str(e)[:120]}); next try in {retry_every}s")
-        threading.Thread(target=_retry, daemon=True, name="sheet-setup-retry").start()
-        return False
-
     def setup_sheet(self, symbol, strikes):
         """Set up Google Sheet with 21 columns including all Fibonacci Pivots on both CE and PE."""
         gc          = get_gspread_client()
@@ -5419,10 +5194,6 @@ class FeedEngine:
                     if not dp_ws:
                         dp_ws = spreadsheet.add_worksheet(title="Daily PnL", rows=400, cols=len(DAILY_PNL_HEADERS))
                     self.daily_pnl_sheet = dp_ws
-                    _tsl_ws = next((x for x in spreadsheet.worksheets() if x.title == "TSL Study"), None)
-                    if not _tsl_ws:
-                        _tsl_ws = spreadsheet.add_worksheet(title="TSL Study", rows=600, cols=len(tsl_study.HEADERS))
-                    self.tsl_study_sheet = _tsl_ws
                     self.side_sheets = {}
                     for _side in ("BUY", "SELL"):
                         _title = f"{_side} Trades"
@@ -5663,37 +5434,6 @@ class FeedEngine:
             self._dp_last_sig, self._dp_last_ts = sig, time.time()
         except Exception as e:
             print(f"[DAILY PNL] sheet update note: {e}")
-
-    def _sync_tsl_study_sheet(self):
-        """'TSL Study' tab: one row per closed trade (targets reached and when, peak, outcome with
-        Target-then-SL flagged, shadow trailing-SL results). Data only. Rewritten in one write,
-        and only when the study file has changed (a trade closed), so it costs no calls per tick."""
-        ws = getattr(self, "tsl_study_sheet", None)
-        if not ws:
-            return
-        try:
-            j = tsl_study.TslJournal(tsl_study.journal_path(FORWARD_TEST_FILE))
-            try:
-                sig = os.path.getmtime(j.filepath)
-            except OSError:
-                sig = None
-            if sig is None or sig == getattr(self, "_tsl_last_sig", None):
-                return
-            rows = j.rows()
-            n = len(tsl_study.HEADERS)
-            grid = ([[tsl_study.banner(rows) + f"  |  Updated: {datetime.now():%Y-%m-%d %H:%M:%S}"] + [''] * (n - 1),
-                     tsl_study.HEADERS] + rows)
-            if ws.row_count < len(grid) + 10:
-                ws.add_rows(len(grid) + 10 - ws.row_count)
-            if ws.col_count < n:
-                ws.add_cols(n - ws.col_count)
-            ws.update(values=grid, range_name="A1", value_input_option="USER_ENTERED")
-            prev = getattr(self, "_tsl_last_len", None)
-            if prev is not None and prev > len(grid):
-                ws.batch_clear([f"A{len(grid) + 1}:{gspread.utils.rowcol_to_a1(prev, n)}"])
-            self._tsl_last_len, self._tsl_last_sig = len(grid), sig
-        except Exception as e:
-            print(f"[TSL STUDY] sheet update note: {e}")
 
     def _do_sync_ft_sheet(self):
         """Actual sheet sync logic (runs in background thread)."""
@@ -5989,7 +5729,6 @@ class FeedEngine:
                     print(f"[FT SHEET] clear-below note: {_clr_err}")
             self._ft_last_grid_len = len(grid)
             self._sync_daily_pnl_sheet(active_mem)
-            self._sync_tsl_study_sheet()
 
             # ── Step 6: Apply colour formatting (atomic batch call to preserve quota) ──
             try:
@@ -6310,21 +6049,18 @@ class FeedEngine:
 
                     # ── Dual State Machine tracking (BUY on S2/S1, SELL on R2/R1) ──
                     exp = meta.get("expiry", "")
-                    now_day = datetime.now().strftime("%Y-%m-%d")
                     with self.lock:
                         buy_key  = (opt_type, strike, exp, "BUY") if exp else (opt_type, strike, "BUY")
                         sell_key = (opt_type, strike, exp, "SELL") if exp else (opt_type, strike, "SELL")
                         st_buy   = self.strategy_states.get(buy_key)
                         if not st_buy:
                             st_buy = StrategyStrikeState(opt_type, strike, expiry=exp, mode="BUY")
-                            if getattr(self, '_dash_reset_date', None) != now_day:   # day closed: don't bring today's trades back
-                                self.forward_tracker.seed_state(st_buy, symbol)
+                            self.forward_tracker.seed_state(st_buy, symbol)
                             self.strategy_states[buy_key] = st_buy
                         st_sell  = self.strategy_states.get(sell_key)
                         if not st_sell:
                             st_sell = StrategyStrikeState(opt_type, strike, expiry=exp, mode="SELL")
-                            if getattr(self, '_dash_reset_date', None) != now_day:   # day closed: don't bring today's trades back
-                                self.forward_tracker.seed_state(st_sell, symbol)
+                            self.forward_tracker.seed_state(st_sell, symbol)
                             self.strategy_states[sell_key] = st_sell
 
                         legacy_key = (opt_type, strike, exp) if exp else (opt_type, strike)
@@ -6338,6 +6074,8 @@ class FeedEngine:
                     # first trade, or the saved candle) must never look like a sweep.
                     live_tick = bool(token in snapshot and d.get("s_live")
                                      and d.get("s_date") == now_tick.strftime("%Y-%m-%d"))
+                    _buy_was_waiting = (st_buy.trade_status == "Waiting")
+                    _buy_recorded = False
                     if live_tick:
                         sm_high = d.get("s_high", 0) or ltp
                         sm_low  = d.get("s_low", 0) or ltp
@@ -6396,16 +6134,15 @@ class FeedEngine:
                     is_focus_strike = bool(trade_tf) and (is_15m_focus or is_1h_focus)
                     if mapped_strikes_mgr and mapped_strikes_mgr.is_restricted_mode():
                         is_focus_strike = is_focus_strike and mapped_strikes_mgr.is_strike_active(symbol, strike, opt_type)
+                    if self.is_strike_excluded(symbol, strike, opt_type, exp):
+                        is_focus_strike = False
                     mkt_open = is_live_market_open(now_tick)
 
                     # ── Evaluate SELL Entry ──
                     fp_sell = getattr(st_sell, "frozen_pivots", None) or opt_piv
                     if (sell_entry["entry"] and mkt_open and is_focus_strike and live_tick
                             and at_entry_price(ltp, st_sell.entry_price, "SELL")):
-                        # An R3 rejection (R2 swept) sells from up near R3: the zone reaches R3 then,
-                        # so every SELL the dashboard shows as live is also recorded.
-                        _top = fp_sell.get("R3", 0) if st_sell.trigger_level == "R3" else 0
-                        in_sell_zone = (fp_sell["S2"] * 0.95 <= ltp <= (_top or fp_sell["R2"]) * 1.05)
+                        in_sell_zone = (fp_sell["S2"] * 0.95 <= ltp <= fp_sell["R2"] * 1.05)
                         if in_sell_zone:
                             lvl = st_sell.trigger_level
                             exp_tag = f" {exp}" if exp else ""
@@ -6484,9 +6221,9 @@ class FeedEngine:
                     # ── Evaluate BUY Entry ──
                     fp_buy = getattr(st_buy, "frozen_pivots", None) or opt_piv
                     if (buy_entry["entry"] and mkt_open and is_focus_strike and live_tick
-                            and at_entry_price(ltp, st_buy.entry_price, "BUY")):
-                        _bot = fp_buy.get("S3", 0) if st_buy.trigger_level == "S3" else 0   # S3 reclaim (S2 swept)
-                        in_buy_zone = ((_bot or fp_buy["S2"]) * 0.95 <= ltp <= fp_buy["R2"] * 1.05)
+                            and buy_entry_ok(ltp, st_buy.entry_price, st_buy.sl,
+                                             st_buy.targets[0] if st_buy.targets else 0.0)):
+                        in_buy_zone = (fp_buy["S2"] * 0.95 <= ltp <= fp_buy["R2"] * 1.05)
                         if in_buy_zone:
                             lvl = st_buy.trigger_level
                             re_lbl = f" [RE-ENTRY #{st_buy.entry_count} New LL SL]" if st_buy.sl_hit_count > 0 else ""
@@ -6514,6 +6251,7 @@ class FeedEngine:
                                 expiry=exp, levels=strike_levels_tf(strike, f15_focus, f1h_focus),
                                 bid=_b_val, ask=_a_val
                             )
+                            _buy_recorded = bool(_new_trade)
                             if _new_trade:   # alert only when a trade was actually recorded
                                 self.alert_mgr.send_alert_once(
                                     symbol, opt_type, strike, sig_act, ltp,
@@ -6561,6 +6299,12 @@ class FeedEngine:
                                 )
                             except Exception as _adv_buy_err:
                                 print(f"[ADV STRATEGY] buy eval error: {_adv_buy_err}")
+
+                    # A BUY the state machine confirmed on this tick but that was not recorded (strike
+                    # not traded, price outside the zone, or the tracker refused it) must not leave the
+                    # strike stuck as "Active" with no trade: go back to watching the break.
+                    if _buy_was_waiting and st_buy.trade_status == "Active" and not _buy_recorded:
+                        st_buy.unconfirm_buy()
 
                     # ── Advance Strategy Dedicated Evaluation (Monthly Expiry & 1H Structure Only) ──
                     if mkt_open and live_tick and is_monthly_exp and is_1h_structure:
@@ -7727,14 +7471,6 @@ class ControlPanel:
                                   font=(GUI_FONT, 9), anchor="w")
         self.status_lbl.pack(fill="x", padx=8, pady=3)
 
-        # 1b. Red alert banner: shown only while live prices or the Google Sheet are failing
-        self._alert_holder = tk.Frame(r, bg="#0d1117")
-        self._alert_holder.pack(side="bottom", fill="x", padx=16)
-        self.alert_banner = tk.Label(self._alert_holder, text="", bg="#b62324", fg="#ffffff",
-                                     font=(GUI_FONT, 12, "bold"), anchor="w", justify="left",
-                                     wraplength=1100, padx=10, pady=6)
-        r.after(3000, self._refresh_alert_banner)
-
         # 2. Main Live Scanner Start / Stop Action Buttons (PROMINENT, PINNED AT BOTTOM)
         bf = tk.Frame(r, bg="#0d1117")
         bf.pack(side="bottom", fill="x", padx=16, pady=4)
@@ -8776,6 +8512,8 @@ class ControlPanel:
             key = (w.get("type", "CE"), w.get("strike", 0), w.get("expiry", "-"), w.get("side", "BUY"))
             if key in seen:
                 continue
+            if feed.is_strike_excluded(sym, w.get("strike", 0), w.get("type", "CE"), w.get("expiry", "")):
+                continue
             if _allowed_exp is not None and (w.get("expiry", "") or "").strip() not in _allowed_exp:
                 continue
             fl = dash_row_flags(w, ce_15m, pe_15m, ce_1h, pe_1h, p_15m, p_1h, p_exact)
@@ -9126,30 +8864,6 @@ class ControlPanel:
     def _set_status(self,msg,color="#3fb950"):
         self.status_var.set(msg)
         self.status_lbl.config(fg=color)
-
-    def _alert_text(self):
-        """What the red banner says now ("" = all healthy)."""
-        msgs = []
-        if feed.running and feed.feed_alert:
-            msgs.append(f"⚠️ {feed.feed_alert}")
-        elif not Session.auth_token and Session.last_error:
-            msgs.append(f"⚠️ ANGEL ONE LOGIN FAILED: {Session.last_error} (retrying every minute)")
-        if SHEETS_HEALTH["err"] and time.time() - SHEETS_HEALTH["at"] < 180:
-            msgs.append(f"⚠️ GOOGLE SHEET WRITE FAILED: {SHEETS_HEALTH['err']} (retrying on the next sync)")
-        return "\n".join(msgs)
-
-    def _refresh_alert_banner(self):
-        try:
-            msg = self._alert_text()
-            if msg:
-                self.alert_banner.config(text=msg)
-                if not self.alert_banner.winfo_manager():
-                    self.alert_banner.pack(fill="x", pady=(2, 2))
-            elif self.alert_banner.winfo_manager():
-                self.alert_banner.pack_forget()
-        except Exception as e:
-            print(f"[UI] alert banner error: {e}")
-        self.root.after(2000, self._refresh_alert_banner)
 
     # ═══════════════════════════════════════════════════════
     # LIVE ORDERS — slim bar + Settings window
@@ -9553,8 +9267,8 @@ class ControlPanel:
                 print(f"[START] Got {len(strikes)} strikes, ATM~{atm}")
 
                 print("[START] Setting up Google Sheet...")
-                feed.setup_sheet_safe(symbol, strikes)
-                print("[START] Starting WebSocket...")
+                feed.setup_sheet(symbol, strikes)
+                print("[START] Sheet setup done, starting WebSocket...")
 
                 feed.start_ws()
                 print("[START] WebSocket connecting...")
@@ -9605,13 +9319,7 @@ class ControlPanel:
 # ═══════════════════════════════════════════════════════════
 if __name__=="__main__":
     print("Logging in to Angel One...")
-    try:
-        Session.login()
-    except Exception as e:
-        # Never stop the app over an Angel outage: prices come from Dhan until the login works
-        print(f"⚠️  Angel One login failed: {Session.last_error or e}")
-        print("   Starting anyway — live prices from Dhan; the Angel login is retried every minute")
-        Session.login_in_background()
+    Session.login()
     print("Loading instrument list (cached once per day)...")
     Session.load_scrip()
 

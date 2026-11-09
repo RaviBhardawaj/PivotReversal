@@ -78,8 +78,8 @@ assert st.entry_price==330.8 and st.sl==336.2, (st.entry_price, st.sl)
 assert app.at_entry_price(seq[-1][1], st.entry_price, "SELL")
 print("D real R2 sweep -> SELL below the confirmation candle low 330.80, SL HH 336.20: OK")
 
-# E. price already far below the entry level: no chase, wait for the level
-seq2=seq[:-2]+[(at(9,25,8),318.0,hi,318.0),(at(9,25,9),317.0,hi,317.0)]
+# E. after the retest, price already far below the entry level: no chase, wait for the level
+seq2=seq[:-1]+[(at(9,25,8),318.0,hi,318.0),(at(9,25,9),317.0,hi,317.0)]   # retest at 331.0, then a 13-pt drop
 st=run(seq2)
 assert st.trade_status=="Waiting" and "come back to entry" in st.signal, (st.state, st.signal)
 FakeDT.v=at(9,26); st.update_tick(330.6,PIV,at(9,26),opt_high=hi,opt_low=317.0)

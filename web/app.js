@@ -1961,10 +1961,10 @@
           const res = await fetch('/api/mapped-strikes/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ strike_id: id })
+            body: JSON.stringify({ strike_id: id, id: id })
           });
           const resp = await res.json();
-          if (resp.status === 'success' && resp.config) {
+          if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
             state.mappedConfig = resp.config;
             updateMappedStrikesSummary(state.mappedConfig);
             renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
@@ -2012,7 +2012,7 @@
           body: JSON.stringify({ symbol: sym, lots })
         });
         const resp = await res.json();
-        if (resp.status === 'success' && resp.config) {
+        if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
           state.mappedConfig = resp.config;
           updateMappedStrikesSummary(state.mappedConfig);
           renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
@@ -2038,7 +2038,7 @@
           })
         });
         const resp = await res.json();
-        if (resp.status === 'success' && resp.config) {
+        if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
           state.mappedConfig = resp.config;
           updateMappedStrikesSummary(state.mappedConfig);
           renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
@@ -2059,7 +2059,7 @@
           headers: { 'Content-Type': 'application/json' }
         });
         const resp = await res.json();
-        if (resp.status === 'success' && resp.config) {
+        if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
           state.mappedConfig = resp.config;
           updateMappedStrikesSummary(state.mappedConfig);
           renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);
@@ -2097,7 +2097,7 @@
           })
         });
         const resp = await res.json();
-        if (resp.status === 'success' && resp.config) {
+        if ((resp.status === 'success' || resp.status === 'ok') && resp.config) {
           state.mappedConfig = resp.config;
           updateMappedStrikesSummary(state.mappedConfig);
           renderMappedStrikesTable(state.mappedConfig, state.lastWatchItems);

@@ -1792,11 +1792,11 @@ async def add_mapped_strike(item: MappedStrikeItem):
 
 @app.post("/api/mapped-strikes/delete")
 async def delete_mapped_strike(payload: Dict[str, str]):
-    item_id = payload.get("id", "")
+    item_id = payload.get("id") or payload.get("strike_id") or ""
     if not mapped_strikes_mgr:
         raise HTTPException(status_code=500, detail="Mapped strikes manager not initialized")
     ok = mapped_strikes_mgr.delete_strike(item_id)
-    return {"status": "ok" if ok else "not_found", "config": mapped_strikes_mgr.get_config()}
+    return {"status": "success" if ok else "not_found", "config": mapped_strikes_mgr.get_config()}
 
 
 @app.post("/api/mapped-strikes/import-focus")

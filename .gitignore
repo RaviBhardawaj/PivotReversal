@@ -10,6 +10,11 @@ Dhan API.txt
 dhan_token.json
 .dhan_token
 *.log
+pivotrecordsheet-*.json
+*.backup*
+*.bak*
+_replay*/
+apply_s2_fix*.sh
 
 # ── Runtime state, caches and market data ─────────
 order_state.json

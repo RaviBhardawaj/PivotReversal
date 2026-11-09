@@ -1311,22 +1311,14 @@ def select_focus_strikes_from_pivots(pivots: dict, step: int = 50, tf_label: str
     if ce3 == ce2 and ce2 > 0: ce3 = ce2 + step
     if pe3 == pe2 and pe2 > 0: pe3 = max(pe2 - step, step)
 
-    # Pivot (P) strike — traded on BOTH CE and PE alongside the R1/R2 (CE) and S1/S2 (PE) strikes
+    # Pivot (P) strike — exactly ONE single nearest strike for SELL
     p_stk = snap(p)
-    # Strikes either side of P (e.g. P=22622 → 22600 / 22650). If P sits exactly on a strike,
-    # use one strike below and one above. Both are traded on CE and PE like P_STRIKE.
-    if p:
-        p_lo = int(math.floor(p / step) * step)
-        p_hi = int(math.ceil(p / step) * step)
-        if p_lo == p_hi:
-            p_lo, p_hi = p_lo - step, p_hi + step
-    else:
-        p_lo = p_hi = 0
-    p_strikes = sorted({x for x in (p_lo, p_stk, p_hi) if x > 0})
+    p_lo = p_hi = p_stk
+    p_strikes = [p_stk] if p_stk > 0 else []
 
-    # "all_4" = the traded/subscribed set: R1, R2, P zone, S1, S2 strikes (name kept for compatibility)
-    all_4 = sorted(list({s for s in (ce1, ce2, pe1, pe2, *p_strikes) if s > 0}))
-    all_6 = sorted(list({s for s in (ce1, ce2, ce3, pe1, pe2, pe3, *p_strikes) if s > 0}))
+    # Traded/focused set: strictly R2 (CE2), S2 (PE2), and single P strike (no extra nearby or R1/S1 in focus)
+    all_4 = sorted(list({s for s in (ce2, pe2, p_stk) if s > 0}))
+    all_6 = sorted(list({s for s in (ce2, pe2, p_stk) if s > 0}))
 
     return {
         "timeframe": tf_label,
@@ -1335,8 +1327,8 @@ def select_focus_strikes_from_pivots(pivots: dict, step: int = 50, tf_label: str
         "P_STRIKE": p_stk,
         "P_LOW": p_lo, "P_HIGH": p_hi,
         "p_strikes": p_strikes,
-        "ce_strikes": [s for s in (ce1, ce2, ce3) if s > 0],
-        "pe_strikes": [s for s in (pe1, pe2, pe3) if s > 0],
+        "ce_strikes": [ce2] if ce2 > 0 else ([ce1] if ce1 > 0 else []),
+        "pe_strikes": [pe2] if pe2 > 0 else ([pe1] if pe1 > 0 else []),
         "all_4": all_4,
         "all_6": all_6,
         "P": p, "R1": r1, "R2": r2, "R3": r3, "S1": s1, "S2": s2, "S3": s3
@@ -8272,20 +8264,18 @@ class ControlPanel:
 
         sel_filters = self._dash_selected_filters() if hasattr(self, "dash_filter_vars") else {}
 
-        # 15M Focus: exactly 2 CE + 2 PE
-        ce_15m = [s for s in f15.get("ce_strikes", [f15.get("CE1"), f15.get("CE2")]) if s and s > 0][:2]
-        pe_15m = [s for s in f15.get("pe_strikes", [f15.get("PE1"), f15.get("PE2")]) if s and s > 0][:2]
-        focus_15m_strikes = set(ce_15m + pe_15m + list(f15.get("p_strikes") or ([f15["P_STRIKE"]] if f15.get("P_STRIKE") else [])))
+        # 15M Focus: R2 (CE2), S2 (PE2), and single nearest P strike
+        ce_15m = [f15.get("CE2")] if f15.get("CE2") else ([s for s in f15.get("ce_strikes", []) if s > 0][-1:] or [])
+        pe_15m = [f15.get("PE2")] if f15.get("PE2") else ([s for s in f15.get("pe_strikes", []) if s > 0][-1:] or [])
+        p_15m = [f15.get("P_STRIKE")] if f15.get("P_STRIKE") else []
 
-        # 1H Focus: exactly 2 CE + 2 PE
-        ce_1h = [s for s in f1h.get("ce_strikes", [f1h.get("CE1"), f1h.get("CE2")]) if s and s > 0][:2]
-        pe_1h = [s for s in f1h.get("pe_strikes", [f1h.get("PE1"), f1h.get("PE2")]) if s and s > 0][:2]
-        focus_1h_strikes = set(ce_1h + pe_1h + list(f1h.get("p_strikes") or ([f1h["P_STRIKE"]] if f1h.get("P_STRIKE") else [])))
+        # 1H Focus: R2 (CE2), S2 (PE2), and single nearest P strike
+        ce_1h = [f1h.get("CE2")] if f1h.get("CE2") else ([s for s in f1h.get("ce_strikes", []) if s > 0][-1:] or [])
+        pe_1h = [f1h.get("PE2")] if f1h.get("PE2") else ([s for s in f1h.get("pe_strikes", []) if s > 0][-1:] or [])
+        p_1h = [f1h.get("P_STRIKE")] if f1h.get("P_STRIKE") else []
 
-        all_focus_strikes = focus_15m_strikes | focus_1h_strikes
-        p_15m = set(f15.get("p_strikes") or ([f15["P_STRIKE"]] if f15.get("P_STRIKE") else []))
-        p_1h  = set(f1h.get("p_strikes") or ([f1h["P_STRIKE"]] if f1h.get("P_STRIKE") else []))
-        # Only the strike nearest each P is coloured / marked 🔷 (its neighbours trade but look normal)
+        all_focus_strikes = set(ce_15m + pe_15m + p_15m + ce_1h + pe_1h + p_1h)
+        # Only the strike nearest each P is coloured / marked 🔷
         p_exact = {x for x in (f15.get("P_STRIKE"), f1h.get("P_STRIKE")) if x}
 
         # ── Ensure all focus strikes (both CE and PE for 15M and 1H) are always present in watch ──
@@ -8383,48 +8373,52 @@ class ControlPanel:
 
         ce_on_support = ce_sup_15m
 
-        nearby_set = getattr(feed, "nearby_pivot_strikes", set())
+        # ── Focus strikes as per exact rule: max 15M R2/S2, 1H R2/S2, and single P strike for SELL ──
         needed_focus = []
-        for s in ce_15m: needed_focus.append(("CE", s, True, s in ce_1h, False))
-        for s in pe_15m: needed_focus.append(("PE", s, True, s in pe_1h, False))
-        for s in ce_1h:
-            if s not in ce_15m: needed_focus.append(("CE", s, False, True, False))
-        for s in pe_1h:
-            if s not in pe_15m: needed_focus.append(("PE", s, False, True, False))
-        for s in sorted(nearby_set):
-            if s not in ce_15m and s not in ce_1h:
-                needed_focus.append(("CE", s, False, False, True))
-            if s not in pe_15m and s not in pe_1h:
-                needed_focus.append(("PE", s, False, False, True))
-        # P-level strikes are traded on both CE and PE
-        _have = {(ot, stk) for ot, stk, _, _, _ in needed_focus}
-        for s in sorted(p_15m | p_1h):
-            for _ot in ("CE", "PE"):
-                if (_ot, s) not in _have:
-                    needed_focus.append((_ot, s, s in p_15m, s in p_1h, False))
+        if ce_15m:
+            s_ce = ce_15m[-1]
+            needed_focus.append(("CE", s_ce, True, (ce_1h and s_ce == ce_1h[-1]), "SELL", "R2"))
+        if pe_15m:
+            s_pe = pe_15m[-1]
+            needed_focus.append(("PE", s_pe, True, (pe_1h and s_pe == pe_1h[-1]), "BUY", "S2"))
+
+        # 1H R2 & S2 (if different from 15M)
+        if ce_1h:
+            s_ce_1h = ce_1h[-1]
+            if not ce_15m or s_ce_1h != ce_15m[-1]:
+                needed_focus.append(("CE", s_ce_1h, False, True, "SELL", "R2"))
+        if pe_1h:
+            s_pe_1h = pe_1h[-1]
+            if not pe_15m or s_pe_1h != pe_15m[-1]:
+                needed_focus.append(("PE", s_pe_1h, False, True, "BUY", "S2"))
+
+        # P-level: strictly ONE strike for SELL in 15M and 1H
+        p_strikes_all = sorted({s for s in (p_15m + p_1h) if s and s > 0})
+        for s in p_strikes_all:
+            needed_focus.append(("CE", s, s in p_15m, s in p_1h, "SELL", "P"))
+            needed_focus.append(("PE", s, s in p_15m, s in p_1h, "SELL", "P"))
 
         # ── Ensure only strategy-required focus strikes are present in watch ──
-        needed_focus_set = {(ot, stk) for ot, stk, _, _, _ in needed_focus}
+        needed_focus_set = {(ot, stk) for ot, stk, _, _, _, _ in needed_focus}
         watch = [w for w in watch if (w.get("type"), w.get("strike")) in needed_focus_set]
-        existing_keys = {(w.get("type"), w.get("strike"), w.get("expiry", "-")) for w in watch}
+        existing_keys = {(w.get("type"), w.get("strike"), w.get("expiry", "-"), w.get("side", "")) for w in watch}
 
         curr_exp = (self.expiry_var.get() or "").strip()
         next_exp = (self.next_exp_var.get() or "").strip()
-        exp_filt = self.expiry_filter_var.get() if hasattr(self, "expiry_filter_var") else "ALL"
+        use_next = bool(self.use_next_exp.get()) if hasattr(self, "use_next_exp") else False
+        exp_filt = self.expiry_filter_var.get() if hasattr(self, "expiry_filter_var") else "CURRENT"
 
         if exp_filt == "NEXT" and next_exp:
             target_expiries = [next_exp]
-        elif exp_filt == "CURRENT" and curr_exp:
-            target_expiries = [curr_exp]
-        else:
+        elif exp_filt == "ALL" and use_next and next_exp:
             target_expiries = [e for e in [curr_exp, next_exp] if e]
-            if not target_expiries:
-                target_expiries = [curr_exp or "-"]
+        else:
+            target_expiries = [curr_exp] if curr_exp else [next_exp or "-"]
 
         for tgt_exp in target_expiries:
-            for ot, stk, is_15m, is_1h, is_nearby in needed_focus:
-                strike_tag = "[⭐15M & ⏳1H]" if (is_15m and is_1h) else ("[⭐15M Focus]" if is_15m else ("[⏳1H Focus]" if is_1h else ("[📌Nearby Pivot]" if is_nearby else "")))
-                if (ot, stk, tgt_exp) not in existing_keys:
+            for ot, stk, is_15m, is_1h, want_side, lvl_tag in needed_focus:
+                strike_tag = "[⭐15M & ⏳1H]" if (is_15m and is_1h) else ("[⭐15M Focus]" if is_15m else ("[⏳1H Focus]" if is_1h else ""))
+                if (ot, stk, tgt_exp, want_side) not in existing_keys:
                     # Levels of this exact contract only (never another expiry's, never estimated)
                     try:
                         stk_int = int(float(stk))
@@ -8455,47 +8449,49 @@ class ControlPanel:
                         sig_b = f"★ Plan BUY @ {entry_lvl_b}:{entry_val_b:.1f} | LL SL (Waiting)"
                         zone_str_b = f"{strike_tag} Buy Zone".strip()
 
-                        entry_lvl_s = "R2" if r2_val > 1.0 else "R1"
-                        entry_val_s = r2_val if r2_val > 1.0 else r1_val
-                        tgts_s = [r1_val, p_val, s1_val, s2_val, s3_val] if entry_lvl_s == "R2" else [p_val, s1_val, s2_val, s3_val, s3_val * 0.95]
+                        entry_lvl_s = "R2" if r2_val > 1.0 else ("P" if lvl_tag == "P" else "R1")
+                        entry_val_s = r2_val if r2_val > 1.0 else (p_val if lvl_tag == "P" else r1_val)
+                        tgts_s = [r1_val, p_val, s1_val, s2_val, s3_val] if entry_lvl_s == "R2" else [s1_val, s2_val, s3_val, s3_val * 0.95, s3_val * 0.9]
                         sig_s = f"▼ Plan SELL @ {entry_lvl_s}:{entry_val_s:.1f} | HH SL (Waiting)"
                         zone_str_s = f"{strike_tag} Sell Area".strip()
 
-                        watch.append({
-                            "side": "BUY", "type": ot, "strike": stk, "ltp": ltp_val,
-                            "high": s_info.get("prev_h", ltp_val), "low": s_info.get("prev_l", ltp_val),
-                            "oi": s_info.get("oi", 0), "vol": s_info.get("vol", 0), "zone": zone_str_b, "expiry": exp_val,
-                            "is_15m": is_15m, "is_1h": is_1h, "is_nearby": is_nearby,
-                            "s3": s3_val, "s2": s2_val, "s1": s1_val, "p": p_val, "r1": r1_val, "r2": r2_val, "r3": r3_val,
-                            "category": "CE_SUP" if ot == "CE" else "PE_SUP",
-                            "status": sig_b, "m5_state": "⏳ Waiting", "trade_status": "Pending",
-                            "ll": s_info.get("prev_l", 0.0), "hh": s_info.get("prev_h", 0.0), "sl": 0.0,
-                            "entry_price": entry_val_b, "targets": tgts_b, "target": tgts_b[0] if tgts_b else 0.0,
-                            "t1": tgts_b[0] if len(tgts_b) > 0 else 0.0, "t2": tgts_b[1] if len(tgts_b) > 1 else 0.0,
-                            "t3": tgts_b[2] if len(tgts_b) > 2 else 0.0, "t4": tgts_b[3] if len(tgts_b) > 3 else 0.0,
-                            "t5": tgts_b[4] if len(tgts_b) > 4 else 0.0,
-                            "plan_s2": s2_val, "plan_s1": s1_val, "plan_p": p_val, "plan_r1": r1_val, "plan_r2": r2_val,
-                            "plan_buy_zone": f"BUY {entry_lvl_b}={entry_val_b:.1f} | T1:{tgts_b[0]:.1f} P:{p_val:.1f}",
-                            "plan_sell_zone": f"SELL R2={r2_val:.1f} | T1:{r1_val:.1f} P:{p_val:.1f}",
-                        })
-                        watch.append({
-                            "side": "SELL", "type": ot, "strike": stk, "ltp": ltp_val,
-                            "high": s_info.get("prev_h", ltp_val), "low": s_info.get("prev_l", ltp_val),
-                            "oi": s_info.get("oi", 0), "vol": s_info.get("vol", 0), "zone": zone_str_s, "expiry": exp_val,
-                            "is_15m": is_15m, "is_1h": is_1h, "is_nearby": is_nearby,
-                            "s3": s3_val, "s2": s2_val, "s1": s1_val, "p": p_val, "r1": r1_val, "r2": r2_val, "r3": r3_val,
-                            "category": "PE_RES" if ot == "PE" else "CE_RES",
-                            "status": sig_s, "m5_state": "⏳ Waiting", "trade_status": "Pending",
-                            "ll": s_info.get("prev_l", 0.0), "hh": s_info.get("prev_h", 0.0), "sl": 0.0,
-                            "entry_price": entry_val_s, "targets": tgts_s, "target": tgts_s[0] if tgts_s else 0.0,
-                            "t1": tgts_s[0] if len(tgts_s) > 0 else 0.0, "t2": tgts_s[1] if len(tgts_s) > 1 else 0.0,
-                            "t3": tgts_s[2] if len(tgts_s) > 2 else 0.0, "t4": tgts_s[3] if len(tgts_s) > 3 else 0.0,
-                            "t5": tgts_s[4] if len(tgts_s) > 4 else 0.0,
-                            "plan_s2": s2_val, "plan_s1": s1_val, "plan_p": p_val, "plan_r1": r1_val, "plan_r2": r2_val,
-                            "plan_buy_zone": f"BUY {entry_lvl_b}={entry_val_b:.1f} | T1:{tgts_b[0]:.1f} P:{p_val:.1f}",
-                            "plan_sell_zone": f"SELL R2={r2_val:.1f} | T1:{r1_val:.1f} P:{p_val:.1f}",
-                        })
-                        existing_keys.add((ot, stk, tgt_exp))
+                        if want_side == "BUY":
+                            watch.append({
+                                "side": "BUY", "type": ot, "strike": stk, "ltp": ltp_val,
+                                "high": s_info.get("prev_h", ltp_val), "low": s_info.get("prev_l", ltp_val),
+                                "oi": s_info.get("oi", 0), "vol": s_info.get("vol", 0), "zone": zone_str_b, "expiry": exp_val,
+                                "is_15m": is_15m, "is_1h": is_1h, "is_nearby": False,
+                                "s3": s3_val, "s2": s2_val, "s1": s1_val, "p": p_val, "r1": r1_val, "r2": r2_val, "r3": r3_val,
+                                "category": "CE_SUP" if ot == "CE" else "PE_SUP",
+                                "status": sig_b, "m5_state": "⏳ Waiting", "trade_status": "Pending",
+                                "ll": s_info.get("prev_l", 0.0), "hh": s_info.get("prev_h", 0.0), "sl": 0.0,
+                                "entry_price": entry_val_b, "targets": tgts_b, "target": tgts_b[0] if tgts_b else 0.0,
+                                "t1": tgts_b[0] if len(tgts_b) > 0 else 0.0, "t2": tgts_b[1] if len(tgts_b) > 1 else 0.0,
+                                "t3": tgts_b[2] if len(tgts_b) > 2 else 0.0, "t4": tgts_b[3] if len(tgts_b) > 3 else 0.0,
+                                "t5": tgts_b[4] if len(tgts_b) > 4 else 0.0,
+                                "plan_s2": s2_val, "plan_s1": s1_val, "plan_p": p_val, "plan_r1": r1_val, "plan_r2": r2_val,
+                                "plan_buy_zone": f"BUY {entry_lvl_b}={entry_val_b:.1f} | T1:{tgts_b[0]:.1f} P:{p_val:.1f}",
+                                "plan_sell_zone": f"SELL R2={r2_val:.1f} | T1:{r1_val:.1f} P:{p_val:.1f}",
+                            })
+                        else:
+                            watch.append({
+                                "side": "SELL", "type": ot, "strike": stk, "ltp": ltp_val,
+                                "high": s_info.get("prev_h", ltp_val), "low": s_info.get("prev_l", ltp_val),
+                                "oi": s_info.get("oi", 0), "vol": s_info.get("vol", 0), "zone": zone_str_s, "expiry": exp_val,
+                                "is_15m": is_15m, "is_1h": is_1h, "is_nearby": False,
+                                "s3": s3_val, "s2": s2_val, "s1": s1_val, "p": p_val, "r1": r1_val, "r2": r2_val, "r3": r3_val,
+                                "category": "PE_RES" if ot == "PE" else "CE_RES",
+                                "status": sig_s, "m5_state": "⏳ Waiting", "trade_status": "Pending",
+                                "ll": s_info.get("prev_l", 0.0), "hh": s_info.get("prev_h", 0.0), "sl": 0.0,
+                                "entry_price": entry_val_s, "targets": tgts_s, "target": tgts_s[0] if tgts_s else 0.0,
+                                "t1": tgts_s[0] if len(tgts_s) > 0 else 0.0, "t2": tgts_s[1] if len(tgts_s) > 1 else 0.0,
+                                "t3": tgts_s[2] if len(tgts_s) > 2 else 0.0, "t4": tgts_s[3] if len(tgts_s) > 3 else 0.0,
+                                "t5": tgts_s[4] if len(tgts_s) > 4 else 0.0,
+                                "plan_s2": s2_val, "plan_s1": s1_val, "plan_p": p_val, "plan_r1": r1_val, "plan_r2": r2_val,
+                                "plan_buy_zone": f"BUY {entry_lvl_b}={entry_val_b:.1f} | T1:{tgts_b[0]:.1f} P:{p_val:.1f}",
+                                "plan_sell_zone": f"SELL R2={r2_val:.1f} | T1:{r1_val:.1f} P:{p_val:.1f}",
+                            })
+                        existing_keys.add((ot, stk, tgt_exp, want_side))
         # ── Multi-select filters (side / type / timeframe / level / state) + expiry ──
         seen = set()
         display_watch = []

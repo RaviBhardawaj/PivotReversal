@@ -49,9 +49,6 @@ get_symbol_step = engine.get_symbol_step
 get_symbol_lot_size = engine.get_symbol_lot_size
 EXCHANGE_CONFIG = engine.EXCHANGE_CONFIG
 _safe_float = engine._safe_float
-advanced_engine = getattr(engine, "advanced_engine", None)
-if not advanced_engine:
-    from advanced_strategy import advanced_engine
 
 try:
     from mapped_strikes_manager import mapped_strikes_mgr
@@ -1026,10 +1023,6 @@ def get_dashboard_payload(requested_sym: str = None, requested_exp: str = None, 
         "expiries": expiries_list,
         "active_trades": active_trades,
         "closed_trades": list(reversed(closed_with_cum)),
-        "advanced_strategy": advanced_engine.get_summary_stats() if advanced_engine else {},
-        "advanced_active_trades": advanced_engine.get_active_trades() if advanced_engine else [],
-        "advanced_closed_trades": advanced_engine.get_closed_trades() if advanced_engine else [],
-        "advanced_rejections": advanced_engine.get_rejections(25) if advanced_engine else [],
         "mapped_strikes_config": mapped_strikes_mgr.get_config() if mapped_strikes_mgr else {}
     }
 
@@ -1658,60 +1651,6 @@ async def load_other_symbols_to_plan(req: OtherSymbolsRequest):
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-# ── Advanced Strategy REST Endpoints ─────────────────────────
-@app.get("/api/advanced-strategy/summary")
-async def get_advanced_strategy_summary():
-    """Returns overall performance and status for the Advanced Version strategy."""
-    if not advanced_engine:
-        return {"error": "Advanced Strategy Engine not initialized"}
-    return advanced_engine.get_summary_stats()
-
-@app.get("/api/advanced-strategy/trades")
-async def get_advanced_strategy_trades():
-    """Returns active and closed trades for the Advanced Version."""
-    if not advanced_engine:
-        return {"active": [], "closed": [], "summary": {}}
-    return {
-        "active": advanced_engine.get_active_trades(),
-        "closed": advanced_engine.get_closed_trades(),
-        "summary": advanced_engine.get_summary_stats()
-    }
-
-@app.get("/api/advanced-strategy/rejections")
-async def get_advanced_strategy_rejections(limit: int = 50):
-    """Returns recent candidate rejections and evaluation reasons."""
-    if not advanced_engine:
-        return {"rejections": []}
-    return {
-        "rejections": advanced_engine.get_rejections(limit)
-    }
-
-@app.get("/api/advanced-strategy/plan")
-async def get_advanced_strategy_plan():
-    """Returns Advance Next-Day Plan setups enriched with live LTP."""
-    if not advanced_engine:
-        return {"setups": []}
-    plan = advanced_engine.get_next_day_plan()
-    if not plan or not plan.get("setups"):
-        plan = advanced_engine.build_next_day_plan()
-    setups = plan.get("setups", [])
-    enriched = []
-    for s in setups:
-        s_dict = dict(s)
-        ot = s.get("type", "CE")
-        stk = int(float(s.get("strike", 0)))
-        if hasattr(feed, "get_strike_ltp"):
-            live_v = feed.get_strike_ltp(ot, stk, s.get("expiry"))
-            if live_v > 0:
-                s_dict["ltp"] = round(live_v, 2)
-        enriched.append(s_dict)
-    return {
-        "plan_id": plan.get("strategy_id", "ADVANCED_PIVOT_REVERSAL"),
-        "target_session_date": plan.get("target_session_date", ""),
-        "setups": enriched
-    }
-
 
 # ── Mapped Strikes & Custom Lots API ───────────────────────────
 class MappedStrikeItem(BaseModel):

@@ -30,7 +30,6 @@ STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=
 
 NEXT_DAY_MODES = [
     ("PLAN", "📋 Next-day plan setups"),
-    ("ADVANCE", "🛡️ Advance strategy plan"),
     ("15M", "⭐ 15M intraday (2 CE + 2 PE)"),
     ("1H", "⏳ 1H structure (2 CE + 2 PE)"),
     ("BOTH", "🎯 Both 15M & 1H focus"),
@@ -436,16 +435,7 @@ class GlassDashboard:
                  _fmt(stp.get("target_1")), _fmt(stp.get("target_2")), _fmt(stp.get("target_3")),
                  _fmt(stp.get("target_4")), str(stp.get("rr", "-"))] + lv(sd), ot)
 
-        if mode == "ADVANCE":
-            eng = self.app.advanced_engine
-            adv = eng.get_next_day_plan()
-            if not adv or not adv.get("setups"):
-                m_exp = getattr(feed, "monthly_expiry", "") or feed.get_monthly_expiry(sym)
-                adv = eng.build_next_day_plan(sym, m_exp, strikes_dict=strikes_dict, mtf_pivots=mtf_all, daily_focus=focus)
-            for stp in (adv or {}).get("setups", []):
-                plan_setup_row(stp.get("focus_group", "Advance"), stp, stp.get("pivots") or {},
-                               stp.get("ll_price"), stp.get("hh_price"))
-        elif mode == "PLAN" and nd_plan.get("setups"):
+        if mode == "PLAN" and nd_plan.get("setups"):
             for stp in nd_plan.get("setups", []):
                 sl = _f(stp.get("sl"))
                 plan_setup_row(f"Plan ({stp.get('timeframe', 'Intraday')})", stp,

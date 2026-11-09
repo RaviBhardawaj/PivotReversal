@@ -7,7 +7,9 @@ for STRATEGY_ID = "ADVANCED_PIVOT_REVERSAL".
 import os
 import csv
 import json
+import re
 import time
+from collections import deque
 from datetime import datetime, time as dt_time
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -39,6 +41,9 @@ class AdvancedStrategyTracker:
     Calculates Gross P&L, Estimated Charges, Net P&L, Points, and MFE.
     """
 
+    REJECTIONS_KEPT = 500
+    REJECTION_REPEAT_S = 300
+
     def __init__(
         self,
         csv_file: str = ADVANCED_CSV_FILE,
@@ -52,7 +57,12 @@ class AdvancedStrategyTracker:
         self.active_trades: Dict[str, Dict[str, Any]] = {}  # trade_id -> trade dict
         self._active_by_key: Dict[Tuple, str] = {}         # (symbol, opt_type, strike, expiry, action) -> trade_id
         self._closed_today: List[Dict[str, Any]] = []
-        self._rejections_today: List[Dict[str, Any]] = []
+        # Only the latest rejections are kept in memory, and each candidate's rejection is written to
+        # the CSV only when its reason changes or every REJECTION_REPEAT_S seconds. Logging every tick
+        # grew advanced_strategy_rejections.csv to 1.7 GB in a day and kept the whole day in RAM.
+        self._rejections_today = deque(maxlen=self.REJECTIONS_KEPT)
+        self._rejections_count = 0
+        self._last_rejection: Dict[Tuple, Tuple[str, float]] = {}
         self._sl_hit_count: Dict[Tuple, int] = {}
         self._closed_keys_today: set = set()
 
@@ -175,7 +185,21 @@ class AdvancedStrategyTracker:
         reason: str,
         details: Dict[str, Any] = None
     ):
-        """Record candidate rejection for auditing and dashboard inspection."""
+        """Record candidate rejection for auditing and dashboard inspection.
+
+        The same candidate is rejected on every tick, so a repeat of the same reason (numbers aside)
+        is skipped until REJECTION_REPEAT_S seconds have passed.
+        """
+        now = time.time()
+        r_key = (symbol, opt_type, strike, expiry, action, setup_type)
+        r_kind = re.sub(r"[-+]?\d[\d.,]*", "#", str(reason))
+        last = self._last_rejection.get(r_key)
+        if last and last[0] == r_kind and now - last[1] < self.REJECTION_REPEAT_S:
+            return
+        if len(self._last_rejection) > 20000:
+            self._last_rejection.clear()
+        self._last_rejection[r_key] = (r_kind, now)
+        self._rejections_count += 1
         entry = {
             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Symbol": symbol,
@@ -619,7 +643,7 @@ class AdvancedStrategyTracker:
         return list(self._closed_today)
 
     def get_rejections(self, limit: int = 50) -> List[Dict[str, Any]]:
-        return self._rejections_today[-limit:]
+        return list(self._rejections_today)[-limit:] if limit > 0 else []
 
     def get_summary_stats(self) -> Dict[str, Any]:
         """Computes win/loss, points, P&L for Advanced Version (STRICTLY INTRADAY)."""
@@ -653,5 +677,5 @@ class AdvancedStrategyTracker:
             "open_points": open_pts,
             "open_gross_pnl": open_gross,
             "open_net_pnl": open_net,
-            "rejections_count": len(self._rejections_today)
+            "rejections_count": self._rejections_count
         }

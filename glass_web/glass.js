@@ -140,9 +140,8 @@ let localFilters = null;
 const pref = (k, d) => { try { const v = localStorage.getItem("glass." + k); return v === null ? d : v; } catch (e) { return d; } };
 const setPref = (k, v) => { try { localStorage.setItem("glass." + k, v); } catch (e) {} };
 let wSort = pref("sort2", "entry"), wFull = pref("full", "0") === "1";
-$("w-sort").value = wSort; $("w-full").checked = wFull;
+$("w-sort").value = wSort;
 $("w-sort").addEventListener("change", (e) => { wSort = e.target.value; setPref("sort2", wSort); if (S) renderDash(S); });
-$("w-full").addEventListener("change", (e) => { wFull = e.target.checked; setPref("full", wFull ? "1" : "0"); if (S) renderDash(S); });
 
 function filterState(s) {
   if (localFilters && held("filters")) return localFilters;
@@ -311,16 +310,27 @@ function renderDash(s) {
   const ev = filterState(s).expiry_view;
   $("w-exp").textContent = ev === "ALL" ? "all expiries" : ev === "NEXT" ? `${s.next_expiry || "next"} expiry` : `${s.current_expiry || "current"} expiry`;
 
-  // Compact columns by default; "All columns" adds the rest of the launcher's columns.
-  const base = [
-    ["☑", "c"], ["Strike", "l"], ["Expiry", "l"], ["Side", "l"], ["LTP", ""], ["Setup", "l"], ["Entry", ""], ["SL", ""],
-    ["T1", ""], ["T2", ""], ["T3", ""], ["Levels S2 · S1 · P · R1 · R2", ""], ["Order", "l"], ["Signal", "l"],
-  ];
-  const extra = wFull ? ["Status", "OI", "Vol", "LL", "HH", "S3", "R3", "T4", "T5", "Trading Zone"].filter((c) => cols.includes(c)) : [];
-  const plan = showPlan ? PLAN.filter((c) => cols.includes(c)) : [];
-  const heads = base.concat(extra.map((c) => [c, /Trading Zone|Status/.test(c) ? "l" : ""]), plan.map((c) => [c, /Signal|vs/.test(c) ? "l" : ""]));
+  // Same columns, same order as the Python launcher's dashboard (plan columns on request).
+  const LCOLS = ["Expiry", "Type", "Strike", "Side", "LTP", "OI", "Vol", "Trading Zone", "S3", "S2", "S1", "P", "R1", "R2", "R3",
+    "5M State", "LL", "HH", "Signal", "SL", "Entry", "T1", "T2", "T3", "T4", "T5", "Status", "Order"];
+  const dcols = LCOLS.filter((c) => !cols.length || cols.includes(c)).concat(showPlan ? PLAN.filter((c) => cols.includes(c)) : []);
+  const LEFTC = new Set(["Expiry", "Type", "Strike", "Side", "Trading Zone", "5M State", "Signal", "Status", "Order", "Plan Signal", "vs Plan"]);
+  const GROUPS = [["Contract", ["Expiry", "Type", "Strike", "Side", "LTP", "OI", "Vol", "Trading Zone"]], ["Strike pivots", LV],
+    ["5M setup", ["5M State", "LL", "HH", "Signal"]], ["Trade plan", ["SL", "Entry", "T1", "T2", "T3", "T4", "T5"]],
+    ["Status", ["Status", "Order"]], ["Today's plan", PLAN]];
+  const grpOf = (c) => (GROUPS.find(([, cs]) => cs.includes(c)) || ["", []])[0];
+  let grow = `<tr class="grp"><th class="c"></th>`;
+  for (let j = 0; j < dcols.length;) {
+    const g = grpOf(dcols[j]); let n = 0;
+    while (j < dcols.length && grpOf(dcols[j]) === g) { j++; n++; }
+    grow += `<th colspan="${n}" class="c g-${esc(g.split(" ")[0].replace(/'/g, "").toLowerCase())}">${esc(g)}</th>`;
+  }
+  grow += "</tr>";
+  const heads = [["☑", "c"]].concat(dcols.map((c) => [c, (LEFTC.has(c) ? "l" : "") + (LV.includes(c) ? " lv-h" : "")]));
   const sig = heads.map((h) => h[0]).join("|");
-  const head = "<tr>" + heads.map(([c, cl], j) => j === 0 ? `<th class="c"><input type="checkbox" id="dash-chk-all" title="Select all"></th>` : `<th class="${cl}">${esc(c)}</th>`).join("") + "</tr>";
+  const PIN = Math.min(4, heads.length);   // checkbox, Expiry, Type, Strike stay in view while scrolling right
+  const pinCls = (j) => (j < PIN ? ` pin p${j}` : "");
+  const head = grow + "<tr>" + heads.map(([c, cl], j) => j === 0 ? `<th class="c pin p0"><input type="checkbox" id="dash-chk-all" title="Select all"></th>` : `<th class="${cl}${pinCls(j)}">${esc(c)}</th>`).join("") + "</tr>";
   if ($("d-head").dataset.k !== head) { $("d-head").dataset.k = head; $("d-head").innerHTML = head; }
 
   let list = infos.slice();
@@ -336,29 +346,35 @@ function renderDash(s) {
   const live = new Set(list.map((i) => i.r.k));
   for (const k of [...dashSelectedKeys.keys()]) if (!live.has(k)) dashSelectedKeys.delete(k);
 
+  const lvCls = {S3: "lvl-s", S2: "lvl-s", S1: "lvl-s", P: "lvl-p", R1: "lvl-r", R2: "lvl-r", R3: "lvl-r"};
   const items = list.map((i) => {
     const v = i.v, k = i.r.k;
-    const lv = ["S2", "S1", "P", "R1", "R2"].map((c) => { const x = fnum(v[c]); return x > 0 ? x.toFixed(1) : "-"; }).join(" · ");
     const gapTxt = i.gap === null || i.trade ? "" : `<span class="sub${GlassSort.isNear(i) ? " near" : ""}">${signed(i.gap, 1)}% vs entry</span>`;
-    const cells = [
-      {h: `<input type="checkbox" class="dash-row-chk" data-key="${esc(k)}"${dashSelectedKeys.has(k) ? " checked" : ""}> <button class="del" title="Delete this strike: removed, no new entries today" data-del="${esc(k)}">🗑</button>`, c: "c"},
-      {h: contractCell(i, false), c: "l"},
-      {h: esc(v.Expiry || "-"), c: "l small"},
-      {h: `<span class="tag ${i.buy ? "buy" : "sell"}">${i.buy ? "BUY" : "SELL"}</span>`, c: "l"},
-      {h: `<b>${f2(i.ltp)}</b>${gapTxt}`, tick: i.ltp},
-      {h: statusPill(i), c: "l"},
-      {h: esc(v.Entry || "-")}, {h: esc(v.SL || "-")},
-      {h: esc(v.T1 || "-")}, {h: esc(v.T2 || "-")}, {h: esc(v.T3 || "-")},
-      {h: `<span class="lvls">${lv}</span>`},
-      {h: esc(v.Order || "-"), c: "l small"},
-      {h: esc(v.Signal || ""), c: "l sig", title: v.Signal || ""},
-    ].concat(extra.map((c) => ({h: esc(v[c] ?? ""), c: /Trading Zone|Status/.test(c) ? "l small" : ""})),
-             plan.map((c) => ({h: esc(v[c] ?? ""), c: /Signal|vs/.test(c) ? "l small" : ""})));
+    const cell = (c) => {
+      const x = v[c] ?? "";
+      switch (c) {
+        case "Expiry": return {h: esc(x || "-"), c: "l small"};
+        case "Type": return {h: `<span class="tag ${x === "PE" ? "pe" : "ce"}">${esc(x)}</span>`, c: "l"};
+        case "Strike": return {h: `<span class="stk">${esc(strikeNum(x))}</span>` + (i.isP ? `<span class="tag p">P</span>` : "") +
+          (i.is15 ? `<span class="tag tf">15M</span>` : "") + (i.is1h ? `<span class="tag tf">1H</span>` : ""), c: "l"};
+        case "Side": return {h: `<span class="tag ${i.buy ? "buy" : "sell"}">${i.buy ? "BUY" : "SELL"}</span>`, c: "l"};
+        case "LTP": return {h: `<b>${f2(i.ltp)}</b>${gapTxt}`, tick: i.ltp};
+        case "Trading Zone": return {h: esc(String(x).replace(/\[[^\]]*\]\s*/g, "")), c: "l small zone", title: x};
+        case "5M State": return {h: statusPill(i), c: "l"};
+        case "Signal": return {h: esc(x), c: "l sig", title: x};
+        case "Status": case "Order": case "Plan Signal": case "vs Plan": return {h: esc(x || "-"), c: "l small"};
+        default: return {h: esc(x || "-"), c: lvCls[c] || (/^T\d$/.test(c) ? "tgt" : c === "SL" ? "slc" : c === "Entry" ? "ent" : "")};
+      }
+    };
+    const cells0 = [{h: `<input type="checkbox" class="dash-row-chk" data-key="${esc(k)}"${dashSelectedKeys.has(k) ? " checked" : ""}> <button class="del" title="Delete this strike: removed, no new entries today" data-del="${esc(k)}">🗑</button>`, c: "c"}]
+      .concat(dcols.map(cell));
+    const cells = cells0.map((c, j) => (j < PIN ? {...c, c: `${c.c || ""} pin p${j}`} : c));
     return {key: k, cls: i.tag, cells};
   });
   syncRows($("d-body"), items, sig,
     `<tr class="empty"><td colspan="${heads.length}">${s.feed_running ? "No rows match the filters" : "Start the live scanner to fill the dashboard"}</td></tr>`);
   $("d-maxoi").textContent = s.max_oi || "";
+  pinColumns(PIN);
 
   const allChk = $("dash-chk-all");
   if (allChk) {
@@ -366,6 +382,15 @@ function renderDash(s) {
     allChk.indeterminate = !allChk.checked && list.some((i) => dashSelectedKeys.has(i.r.k));
   }
   renderBulk(s);
+}
+
+function pinColumns(n) {
+  // left offsets for the pinned columns, measured from the header (only when widths change)
+  const ths = [...document.querySelectorAll("#d-head tr:last-child th")].slice(0, n);
+  let left = 0; const t = $("d-table"); const w = [];
+  ths.forEach((th, j) => { w.push(left); left += th.offsetWidth; });
+  const key = w.join(",");
+  if (t.dataset.pin !== key) { t.dataset.pin = key; w.forEach((x, j) => t.style.setProperty(`--p${j}`, x + "px")); }
 }
 
 function renderBulk(s) {

@@ -310,14 +310,14 @@ function renderDash(s) {
   const ev = filterState(s).expiry_view;
   $("w-exp").textContent = ev === "ALL" ? "all expiries" : ev === "NEXT" ? `${s.next_expiry || "next"} expiry` : `${s.current_expiry || "current"} expiry`;
 
-  // Same columns, same order as the Python launcher's dashboard (plan columns on request).
-  const LCOLS = ["Expiry", "Type", "Strike", "Side", "LTP", "OI", "Vol", "Trading Zone", "S3", "S2", "S1", "P", "R1", "R2", "R3",
-    "5M State", "LL", "HH", "Signal", "SL", "Entry", "T1", "T2", "T3", "T4", "T5", "Status", "Order"];
+  // The launcher's columns, with the trade plan (SL, Entry, T1-T5, Status) right after Vol.
+  const LCOLS = ["Expiry", "Type", "Strike", "Side", "LTP", "OI", "Vol", "SL", "Entry", "T1", "T2", "T3", "T4", "T5", "Status",
+    "Trading Zone", "S3", "S2", "S1", "P", "R1", "R2", "R3", "5M State", "LL", "HH", "Signal", "Order"];
   const dcols = LCOLS.filter((c) => !cols.length || cols.includes(c)).concat(showPlan ? PLAN.filter((c) => cols.includes(c)) : []);
   const LEFTC = new Set(["Expiry", "Type", "Strike", "Side", "Trading Zone", "5M State", "Signal", "Status", "Order", "Plan Signal", "vs Plan"]);
-  const GROUPS = [["Contract", ["Expiry", "Type", "Strike", "Side", "LTP", "OI", "Vol", "Trading Zone"]], ["Strike pivots", LV],
-    ["5M setup", ["5M State", "LL", "HH", "Signal"]], ["Trade plan", ["SL", "Entry", "T1", "T2", "T3", "T4", "T5"]],
-    ["Status", ["Status", "Order"]], ["Today's plan", PLAN]];
+  const GROUPS = [["Contract", ["Expiry", "Type", "Strike", "Side", "LTP", "OI", "Vol"]],
+    ["Trade plan", ["SL", "Entry", "T1", "T2", "T3", "T4", "T5", "Status"]], ["Strike pivots", ["Trading Zone"].concat(LV)],
+    ["5M setup", ["5M State", "LL", "HH", "Signal"]], ["Broker", ["Order"]], ["Today's plan", PLAN]];
   const grpOf = (c) => (GROUPS.find(([, cs]) => cs.includes(c)) || ["", []])[0];
   let grow = `<tr class="grp"><th class="c"></th>`;
   for (let j = 0; j < dcols.length;) {

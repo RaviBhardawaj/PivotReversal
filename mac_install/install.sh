@@ -4,13 +4,15 @@
 # Installs: advanced strategy removed (fixes the startup crash), faster dashboards,
 # current-expiry orders only, strike deletes that stick until Restore, and the redesigned
 # glass dashboard (live trades panel, current-expiry watchlist), and unfilled smart-limit
-# entries chased (step to the ask, then MARKET).
+# entries chased (step to the ask, then MARKET), and the S1 continuation BUY (17 Nov):
+# the S2 structure is also traded at S1 when price pulls back only to S1 and S2 is untouched.
+# At the end it replays the last 5 trading days (old rule vs new) into ~/Desktop/replay_s1_continuation.md.
 # Every replaced file is backed up first; advanced_strategy* files are moved to the backup.
 set -e
 APP="${APP:-$HOME/Downloads/Pivot Reversal Strategy}"
 BRANCH="${BRANCH:-main}"
 BASE="https://raw.githubusercontent.com/RaviBhardawaj/PivotReversal/$BRANCH"
-FILES="Options-angel_live-ok.py brokers/engine.py brokers/smart_execution.py backfill_missed_entries.py deleted_strikes.py glass_dashboard.py web_server.py web/app.js glass_web/glass.js glass_web/glass_sort.js glass_web/glass.css glass_web/index.html tests/test_backfill_expiries.py tests/test_eod_plan_expiries.py tests/test_next_day_levels.py tests/test_next_expiry_gate.py tests/test_glass_current_expiry.py tests/test_engine.py tests/test_adapters.py"
+FILES="Options-angel_live-ok.py replay_s1_continuation.py tests/test_s1_continuation.py brokers/engine.py brokers/smart_execution.py backfill_missed_entries.py deleted_strikes.py glass_dashboard.py web_server.py web/app.js glass_web/glass.js glass_web/glass_sort.js glass_web/glass.css glass_web/index.html tests/test_backfill_expiries.py tests/test_eod_plan_expiries.py tests/test_next_day_levels.py tests/test_next_expiry_gate.py tests/test_glass_current_expiry.py tests/test_engine.py tests/test_adapters.py"
 
 cd "$APP" || { echo "Folder not found: $APP"; exit 1; }
 echo "Updating: $APP"
@@ -55,4 +57,10 @@ if curl -s -o /dev/null -m 5 "http://127.0.0.1:${GLASS_DASHBOARD_PORT:-8780}/"; 
   echo "Dashboard is up: http://127.0.0.1:${GLASS_DASHBOARD_PORT:-8780}/"
 else
   echo "Dashboard still loading; check the Glass Dashboard Terminal window."
+fi
+
+# 4. Replay the S1 continuation rule on the last 5 trading days (read-only: no trades, no orders).
+if [ "${SKIP_REPLAY:-0}" != "1" ]; then
+  echo "Replaying the last 5 trading days, old rule vs S1 continuation (a few minutes)..."
+  "$PY" replay_s1_continuation.py 2>&1 | grep -v "^\[S1 CONT\]" | tail -60 || echo "Replay did not finish (the app itself is updated)."
 fi

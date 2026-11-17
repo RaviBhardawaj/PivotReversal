@@ -1,6 +1,8 @@
 #!/bin/bash
 # One-step update for the Pivot Reversal app on the Mac.
 #   curl -fsSL https://raw.githubusercontent.com/RaviBhardawaj/PivotReversal/main/mac_install/install.sh | bash
+# If raw.githubusercontent.com is blocked by the ISP, use the repo archive instead (SRC = unpacked folder):
+#   T=$(mktemp -d) && curl -fsSL https://codeload.github.com/RaviBhardawaj/PivotReversal/tar.gz/refs/heads/main | tar -xz -C "$T" --strip-components=1 && SRC="$T" bash "$T/mac_install/install.sh"
 # Installs: advanced strategy removed (fixes the startup crash), faster dashboards,
 # current-expiry orders only, strike deletes that stick until Restore, and the redesigned
 # glass dashboard (live trades panel, current-expiry watchlist), and unfilled smart-limit
@@ -21,7 +23,11 @@ echo "Updating: $APP"
 TMP="$(mktemp -d)"
 for f in $FILES; do
   mkdir -p "$TMP/$(dirname "$f")"
-  curl -fsSL "$BASE/$f" -o "$TMP/$f" || { echo "Download failed: $f. Nothing was changed."; exit 1; }
+  if [ -n "$SRC" ]; then
+    cp "$SRC/$f" "$TMP/$f" || { echo "Missing in download: $f. Nothing was changed."; exit 1; }
+  else
+    curl -fsSL "$BASE/$f" -o "$TMP/$f" || { echo "Download failed: $f. Nothing was changed."; exit 1; }
+  fi
 done
 PY="$(command -v python3)"
 for p in /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 /Library/Frameworks/Python.framework/Versions/3.11/bin/python3; do [ -x "$p" ] && PY="$p" && break; done

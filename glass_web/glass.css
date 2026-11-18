@@ -169,3 +169,25 @@ tr:hover .del{color:var(--r2);border-color:rgba(248,113,113,.4)}.del:hover{backg
 .dash td.pin,.dash th.pin{position:sticky;z-index:2;background:#0f1528}.dash thead th.pin{z-index:3;background:#111729}
 .dash .p0{left:var(--p0,0)}.dash .p1{left:var(--p1,0)}.dash .p2{left:var(--p2,0)}.dash .p3{left:var(--p3,0);box-shadow:inset -1px 0 0 var(--line2)}
 tr.active_buy td.p0{box-shadow:inset 3px 0 0 var(--g)}tr.active_sell td.p0{box-shadow:inset 3px 0 0 var(--r)}
+
+/* Watchlist strike ladder: fixed order, moving spot line, ATM/ITM/OTM, NEW and gone rows */
+.legend{margin:2px 0 8px;line-height:1.9}
+.mny{display:inline-block;margin-left:5px;padding:0 5px;border-radius:5px;font-size:9.5px;font-weight:700;letter-spacing:.3px;border:1px solid var(--line2);color:var(--mut);vertical-align:1px}
+.mny.atm{color:#0b1020;background:var(--c);border-color:var(--c)}
+.mny.itm{color:#fde68a;border-color:rgba(251,191,36,.45)}
+.mny.otm{color:var(--mut)}
+.tag.new{background:rgba(167,139,250,.2);border-color:var(--p);color:#ddd6fe}
+.spotchip{padding:0 6px;border-radius:5px;background:rgba(34,211,238,.14);color:var(--c);border:1px dashed rgba(34,211,238,.6)}
+tr.spotrow td{padding:3px 10px!important;background:rgba(34,211,238,.08)!important;border-top:1px dashed rgba(34,211,238,.7);border-bottom:1px dashed rgba(34,211,238,.7);font-size:11px;color:var(--c)}
+td.spotline{display:table-cell}
+td.spotline span{display:inline-block;min-width:180px}
+td.spotline .sp-mid{font-weight:700;text-align:center;min-width:220px;color:#e0fbff}
+td.spotline .sp-dn{text-align:right}
+tr.atmrow td{border-top:1px solid rgba(34,211,238,.25);border-bottom:1px solid rgba(34,211,238,.25)}
+tr.nearrow td.p0{box-shadow:inset 3px 0 0 var(--y)}
+tr.fresh td{animation:freshglow 2.4s ease-out 1}
+@keyframes freshglow{0%{background:rgba(167,139,250,.35)}100%{background:transparent}}
+tr.gone td{opacity:.38}
+tr.gone td .stk{text-decoration:line-through}
+.gonelbl{display:inline-block;padding:0 6px;border-radius:5px;font-size:9.5px;border:1px dashed var(--line2);color:var(--mut)}
+.dim{color:var(--dim)}

@@ -1533,6 +1533,8 @@ def trigger_immediate_alert(title: str, message: str, sound: bool = True):
     _alert_history[message] = now
 
     def _notify():
+        if sys.platform != "darwin":
+            return      # desktop banners are macOS only; the dashboards show every alert anyway
         try:
             safe_title = title.replace('"', '\\"')
             safe_msg   = message.replace('"', '\\"')

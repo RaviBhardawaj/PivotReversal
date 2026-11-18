@@ -6,7 +6,7 @@ Glass Dashboard — the project's own web dashboard, run as a separate app.
     → http://127.0.0.1:8780/
 
 It does not open or need the Tk launcher window. It loads the strategy engine from
-Options-angel_live-ok.py (as web_server.py does), logs in to Angel One, and runs the launcher's
+Options-angel_live-ok.py, logs in to Angel One, and runs the launcher's
 control logic without a window (headless_tk.py), so the scanner, reversal rows, filters,
 next-day plan and order engine behave exactly as in the launcher. Nothing is copied or changed.
 

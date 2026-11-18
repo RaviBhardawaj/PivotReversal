@@ -1,0 +1,12 @@
+# Python 3.10+ (3.12 recommended). Install with:  python3 -m pip install -r requirements.txt
+smartapi-python>=1.4.8      # Angel One SmartAPI: login, live feed (WebSocket), historical candles, orders
+logzero                     # used by smartapi-python
+websocket-client            # used by smartapi-python
+pyotp                       # TOTP logins (Angel One, Dhan)
+python-dotenv               # reads .env
+requests
+pandas
+gspread                     # Google Sheet log (optional: the app runs without the sheet)
+gspread-formatting
+google-auth
+google-auth-oauthlib

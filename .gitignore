@@ -42,3 +42,9 @@ advanced_strategy_open.json
 advanced_strategy_open.json.tmp
 token.pickle.*
 service_account.json
+
+# ── Local Python environment made by run.sh / run.bat ──
+.venv/
+venv/
+_backup_*/
+deleted_strikes.json

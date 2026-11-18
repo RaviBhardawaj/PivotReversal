@@ -8,7 +8,7 @@ here. The page shows the same feed, strategy state, reversal rows and order engi
 would, and its buttons call the same handlers, so nothing here re-implements the strategy.
 
 The server binds to 127.0.0.1 only and uses the standard library only (no new packages).
-The existing web_server.py dashboard and the Tk launcher are separate and are not touched.
+It is the project's only web dashboard; the Tk launcher is separate and is not touched.
 """
 
 import json

@@ -83,7 +83,7 @@ class _R:
     status_code=200
     def json(self): return {"accessToken":"NEWTOKEN","dhanClientId":"1100"}
 DM.requests.post=lambda url,params=None,headers=None,timeout=None: (posted.append((url,params)),_R())[1]
-d3=DhanAdapter({"DHAN_CLIENT_ID":"1100","DHAN_PIN":"123456","DHAN_TOTP_SECRET":"JBSWY3DPEHPK3PXP","DHAN_ACCESS_TOKEN":"OLD"},log=lambda *a:None,cache_dir=tmp)
+d3=DhanAdapter({"DHAN_CLIENT_ID":"1100","DHAN_PIN":"123456","DHAN_TOTP_SECRET":"JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP","DHAN_ACCESS_TOKEN":"OLD"},log=lambda *a:None,cache_dir=tmp)
 calls=[]
 def fl(b,p):
     tok=d3._http.sent[-1][3]["access-token"]; calls.append(tok)
@@ -91,7 +91,7 @@ def fl(b,p):
 d3._http=FakeHTTP({("GET","/fundlimit"):fl})
 check(d3.login()=="1100" and calls==["OLD","NEWTOKEN"], f"dhan token refresh {calls}")
 check(posted[0][0]=="https://auth.dhan.co/app/generateAccessToken" and posted[0][1]["pin"]=="123456" and len(posted[0][1]["totp"])==6, "dhan auth call")
-d4=DhanAdapter({"DHAN_CLIENT_ID":"1100","DHAN_PIN":"1","DHAN_TOTP_SECRET":"JBSWY3DPEHPK3PXP"},log=lambda *a:None,cache_dir=tmp)
+d4=DhanAdapter({"DHAN_CLIENT_ID":"1100","DHAN_PIN":"1","DHAN_TOTP_SECRET":"JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"},log=lambda *a:None,cache_dir=tmp)
 d4._http=FakeHTTP({("GET","/fundlimit"):fl})
 check(d4.login()=="1100", "dhan login with no saved token")
 print("dhan ok")

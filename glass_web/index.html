@@ -55,10 +55,15 @@
     <div class="row">
       <span class="small" id="d-info"></span>
       <label class="small" for="w-sort">Sort</label>
-      <select id="w-sort" class="auto sm"><option value="entry">Entry on / near entry first</option><option value="strike">Strike order</option><option value="setup">Setups first</option><option value="near">Closest to entry</option></select>
+      <select id="w-sort" class="auto sm"><option value="ladder">Strike ladder (fixed order)</option><option value="entry">Entry on / near entry first</option><option value="setup">Setups first</option><option value="near">Closest to entry</option></select>
     </div>
   </div>
   <div class="filters" id="d-filters"></div>
+  <div class="legend small" id="w-legend">Strikes stay in a fixed order (low to high) while the price moves.
+    The <span class="spotchip">spot line</span> moves between them, and each strike shows where it is:
+    <span class="mny atm">ATM</span> <span class="mny itm">1 ITM</span> <span class="mny otm">2 OTM</span>.
+    <span class="tag new">NEW</span> = just added by the strategy · <span class="gonelbl">gone</span> = dropped out, fades after 2 min ·
+    yellow edge = LTP within 5% of entry.</div>
   <div class="bulk" id="bulk" hidden>
     <span class="small mono" id="dash-sel-count">0 selected</span>
     <button class="btn stop sm" id="dash-del-selected">🗑 Delete selected (<span id="dash-del-num">0</span>)</button>

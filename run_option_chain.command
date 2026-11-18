@@ -63,7 +63,7 @@ check_pkg() {
     "$PYTHON" -c "import $import_name" 2>/dev/null
 }
 
-check_pkg SmartApi      || MISSING="$MISSING smart-api-python"
+check_pkg SmartApi      || MISSING="$MISSING smartapi-python"
 check_pkg dotenv        || MISSING="$MISSING python-dotenv"
 check_pkg gspread       || MISSING="$MISSING gspread"
 check_pkg gspread_formatting || MISSING="$MISSING gspread-formatting"
@@ -76,7 +76,7 @@ if [ -n "$MISSING" ]; then
     echo "  ⚠️  Missing packages:$MISSING"
     echo "  Installing now (this takes ~30 seconds the first time)..."
     echo ""
-    "$PYTHON" -m pip install $MISSING --quiet --no-warn-script-location
+    "$PYTHON" -m pip install -r requirements.txt --quiet --no-warn-script-location
     echo "  ✅ Packages installed!"
     echo ""
 fi

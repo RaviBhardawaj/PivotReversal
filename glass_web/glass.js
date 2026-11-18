@@ -139,9 +139,9 @@ const LV = ["S3", "S2", "S1", "P", "R1", "R2", "R3"], PLAN = ["Plan S2", "Plan P
 let localFilters = null;
 const pref = (k, d) => { try { const v = localStorage.getItem("glass." + k); return v === null ? d : v; } catch (e) { return d; } };
 const setPref = (k, v) => { try { localStorage.setItem("glass." + k, v); } catch (e) {} };
-let wSort = pref("sort2", "entry"), wFull = pref("full", "0") === "1";
+let wSort = pref("sort3", "ladder"), wFull = pref("full", "0") === "1";
 $("w-sort").value = wSort;
-$("w-sort").addEventListener("change", (e) => { wSort = e.target.value; setPref("sort2", wSort); if (S) renderDash(S); });
+$("w-sort").addEventListener("change", (e) => { wSort = e.target.value; setPref("sort3", wSort); if (S) renderDash(S); });
 
 function filterState(s) {
   if (localFilters && held("filters")) return localFilters;
@@ -207,7 +207,7 @@ function rowInfo(r) {
   const move = entry > 0 && ltp > 0 ? (buy ? ltp - entry : entry - ltp) : null;
   const gap = entry > 0 && ltp > 0 ? (ltp - entry) / entry * 100 : null;   // LTP vs planned entry
   const zone = String(v["Trading Zone"] || "");
-  return {v, tag, status, buy, hits, isSL, live, trade, closed, setup, entry, ltp, sl, tg, move, gap,
+  return {v, tag, status, strike: parseFloat(strikeNum(v.Strike)), type: v.Type, buy, hits, isSL, live, trade, closed, setup, entry, ltp, sl, tg, move, gap,
     is15: /15M/.test(zone), is1h: /1H/.test(zone), isP: /🔷/.test(String(v.Strike)) || /🔷P/.test(zone)};
 }
 
@@ -251,6 +251,7 @@ function syncRows(tbody, items, sig, emptyHTML) {
     it.cells.forEach((c, j) => {
       const td = e.tr.children[j];
       if (e.c[j] !== c.c) { e.c[j] = c.c; td.className = c.c || ""; }
+      if (c.span && td.colSpan !== c.span) td.colSpan = c.span;
       if (e.h[j] !== c.h) {
         e.h[j] = c.h; td.innerHTML = c.h;
         if (c.tick !== undefined && e.n[j] !== undefined && c.tick !== e.n[j]) {
@@ -301,6 +302,7 @@ function renderLive(s, infos) {
 }
 
 let dashSelectedKeys = new Map();    // row key -> {strike, type, expiry}
+const rowTracker = GlassSort.makeTracker();   // NEW / recently-left strikes in the watchlist
 
 function renderDash(s) {
   const cols = s.columns || [];
@@ -334,7 +336,11 @@ function renderDash(s) {
   if ($("d-head").dataset.k !== head) { $("d-head").dataset.k = head; $("d-head").innerHTML = head; }
 
   let list = infos.slice();
-  if (wSort === "entry") {
+  const spot = Number((s.spot || {}).price) || 0;
+  const step = GlassSort.strikeStep(infos.map((i) => i.strike));
+  if (wSort === "ladder" || wSort === "strike") {
+    list = GlassSort.ladder(list);
+  } else if (wSort === "entry") {
     list = GlassSort.entryFirst(list);
   } else if (wSort === "setup") {
     const rank = (i) => (i.trade && !i.closed ? 0 : i.setup ? 1 : i.trade ? 3 : 2);
@@ -347,32 +353,52 @@ function renderDash(s) {
   for (const k of [...dashSelectedKeys.keys()]) if (!live.has(k)) dashSelectedKeys.delete(k);
 
   const lvCls = {S3: "lvl-s", S2: "lvl-s", S1: "lvl-s", P: "lvl-p", R1: "lvl-r", R2: "lvl-r", R3: "lvl-r"};
-  const items = list.map((i) => {
-    const v = i.v, k = i.r.k;
-    const gapTxt = i.gap === null || i.trade ? "" : `<span class="sub${GlassSort.isNear(i) ? " near" : ""}">${signed(i.gap, 1)}% vs entry</span>`;
+  // Remember what was on screen: a strike the strategy just added is marked NEW for a minute,
+  // one that left the focus list stays two minutes, faded, so nothing jumps in or out unseen.
+  const ctx = [(s.spot || {}).symbol, ev, s.current_expiry, JSON.stringify(filterState(s).filters), !!s.feed_running].join("|");
+  const {fresh, ghosts} = rowTracker.step(list.map((i) => ({key: i.r.k, i})), Date.now(), ctx);
+  const ladderView = wSort === "ladder" || wSort === "strike";
+  let shown = list.concat(ghosts.map((g) => Object.assign({}, g.i, {ghost: true})));
+  if (ladderView) shown = GlassSort.ladder(shown);
+
+  const rowItemOf = (i) => {
+    const v = i.v, k = i.r.k, isNew = fresh.has(k);
+    const mny = GlassSort.moneyness(i.type, i.strike, spot, step);
+    const mnyTag = mny ? `<span class="mny ${mny.cls}" title="Where this strike is vs the live price">${mny.label}</span>` : "";
+    const gapTxt = i.gap === null || i.trade || i.ghost ? "" : `<span class="sub${GlassSort.isNear(i) ? " near" : ""}">${signed(i.gap, 1)}% vs entry</span>`;
     const cell = (c) => {
       const x = v[c] ?? "";
       switch (c) {
         case "Expiry": return {h: esc(x || "-"), c: "l small"};
         case "Type": return {h: `<span class="tag ${x === "PE" ? "pe" : "ce"}">${esc(x)}</span>`, c: "l"};
         case "Strike": return {h: `<span class="stk">${esc(strikeNum(x))}</span>` + (i.isP ? `<span class="tag p">P</span>` : "") +
-          (i.is15 ? `<span class="tag tf">15M</span>` : "") + (i.is1h ? `<span class="tag tf">1H</span>` : ""), c: "l"};
+          (i.is15 ? `<span class="tag tf">15M</span>` : "") + (i.is1h ? `<span class="tag tf">1H</span>` : "") +
+          (isNew && !i.ghost ? `<span class="tag new" title="Added to the focus list in the last minute">NEW</span>` : "") + mnyTag, c: "l"};
         case "Side": return {h: `<span class="tag ${i.buy ? "buy" : "sell"}">${i.buy ? "BUY" : "SELL"}</span>`, c: "l"};
-        case "LTP": return {h: `<b>${f2(i.ltp)}</b>${gapTxt}`, tick: i.ltp};
+        case "LTP": return i.ghost ? {h: `<span class="dim">${f2(i.ltp)}</span>`} : {h: `<b>${f2(i.ltp)}</b>${gapTxt}`, tick: i.ltp};
         case "Trading Zone": return {h: esc(String(x).replace(/\[[^\]]*\]\s*/g, "")), c: "l small zone", title: x};
-        case "5M State": return {h: statusPill(i), c: "l"};
+        case "5M State": return i.ghost ? {h: `<span class="st">⤳ Left the focus list</span>`, c: "l"} : {h: statusPill(i), c: "l"};
         case "Signal": return {h: esc(x), c: "l sig", title: x};
         case "Status": case "Order": case "Plan Signal": case "vs Plan": return {h: esc(x || "-"), c: "l small"};
         default: return {h: esc(x || "-"), c: lvCls[c] || (/^T\d$/.test(c) ? "tgt" : c === "SL" ? "slc" : c === "Entry" ? "ent" : "")};
       }
     };
-    const cells0 = [{h: `<input type="checkbox" class="dash-row-chk" data-key="${esc(k)}"${dashSelectedKeys.has(k) ? " checked" : ""}> <button class="del" title="Delete this strike: removed, no new entries today" data-del="${esc(k)}">🗑</button>`, c: "c"}]
-      .concat(dcols.map(cell));
-    const cells = cells0.map((c, j) => (j < PIN ? {...c, c: `${c.c || ""} pin p${j}`} : c));
-    return {key: k, cls: i.tag, cells};
-  });
+    const first = i.ghost
+      ? {h: `<span class="gonelbl" title="The strategy no longer watches this strike (price moved away). It disappears in 2 minutes.">gone</span>`, c: "c"}
+      : {h: `<input type="checkbox" class="dash-row-chk" data-key="${esc(k)}"${dashSelectedKeys.has(k) ? " checked" : ""}> <button class="del" title="Delete this strike: removed, no new entries today" data-del="${esc(k)}">🗑</button>`, c: "c"};
+    const cells = [first].concat(dcols.map(cell)).map((c, j) => (j < PIN ? {...c, c: `${c.c || ""} pin p${j}`} : c));
+    const cls = i.ghost ? "gone" : [i.tag, isNew ? "fresh" : "", GlassSort.isNear(i) ? "nearrow" : "", mny && mny.cls === "atm" ? "atmrow" : ""].filter(Boolean).join(" ");
+    return {key: k, cls, cells};
+  };
+  const items = shown.map(rowItemOf);
+  if (ladderView && items.length && spot > 0) {
+    const sym = esc((s.spot || {}).symbol || "Spot");
+    items.splice(GlassSort.spotSlot(shown, spot), 0, {key: "__spot", cls: "spotrow", cells: [{span: heads.length, c: "l spotline",
+      h: `<span class="sp-up">▲ CE in the money</span><span class="sp-mid">${sym} ${num(spot)}</span><span class="sp-dn">PE in the money ▼</span>`}]});
+  }
   syncRows($("d-body"), items, sig,
     `<tr class="empty"><td colspan="${heads.length}">${s.feed_running ? "No rows match the filters" : "Start the live scanner to fill the dashboard"}</td></tr>`);
+  $("w-legend").hidden = !ladderView;
   $("d-maxoi").textContent = s.max_oi || "";
   pinColumns(PIN);
 
@@ -411,6 +437,7 @@ async function deleteItems(items, label) {
   if (!ok) return false;
   const r = await api("/api/strikes/delete-multiple", {strikes: items.map((it) => ({strike: it.strike, opt_type: it.type, expiry: it.expiry}))});
   if (r.ok === false) { toast(r.error || "Delete failed", true); return false; }
+  rowTracker.forget((g) => items.some((it) => strikeNum(g.i.v.Strike) === String(it.strike) && g.i.v.Type === it.type));
   toast(`🗑 ${r.message || "Deleted"}`);
   poll();
   return true;

@@ -3458,6 +3458,11 @@ def get_gspread_client():
                 try:
                     creds.refresh(Request())
                 except Exception as e:
+                    _es = str(e)
+                    if any(k in _es for k in ("Max retries", "Network is unreachable", "NewConnectionError",
+                                              "timed out", "Name or service not known", "nodename nor servname")):
+                        # No internet to Google: the login is fine, keep it and let the caller retry later
+                        raise
                     print(f"[GOOGLE] Saved login refused ({str(e)[:80]}); opening the Google login again")
                     try:
                         os.replace(token_file, token_file + ".expired")
@@ -9018,9 +9023,27 @@ class ControlPanel:
                 strikes = sorted(set(filter_df["strike"].astype(float).div(100).astype(int)))
                 print(f"[START] Got {len(strikes)} strikes, ATM~{atm}")
 
+                print(f"[START] S1 continuation BUY is {'ON' if S1_CONTINUATION_BUY else 'OFF'} (17 Nov rule)")
                 print("[START] Setting up Google Sheet...")
-                feed.setup_sheet(symbol, strikes)
-                print("[START] Sheet setup done, starting WebSocket...")
+                try:
+                    feed.setup_sheet(symbol, strikes)
+                    print("[START] Sheet setup done, starting WebSocket...")
+                except Exception as _sheet_err:
+                    # Google unreachable must never stop the price feed: start the WebSocket
+                    # now and keep retrying the Sheet in the background.
+                    print(f"[START] Google Sheet unavailable ({str(_sheet_err)[:120]}); "
+                          "starting the live feed without it, retrying every 60s")
+                    def _retry_sheet(sym=symbol, stks=strikes):
+                        while feed.running and feed.ws is None:
+                            time.sleep(60)
+                            if not feed.running:
+                                return
+                            try:
+                                feed.setup_sheet(sym, stks)
+                                print("[SHEET] Google Sheet connected again")
+                            except Exception as _re:
+                                print(f"[SHEET] Still can't reach Google ({str(_re)[:80]}); retrying in 60s")
+                    threading.Thread(target=_retry_sheet, daemon=True).start()
 
                 feed.start_ws()
                 print("[START] WebSocket connecting...")

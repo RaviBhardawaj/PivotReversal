@@ -8,7 +8,7 @@
 # glass dashboard (live trades panel, current-expiry watchlist), and unfilled smart-limit
 # entries chased (step to the ask, then MARKET), and the S1 continuation BUY (17 Nov):
 # the S2 structure is also traded at S1 when price pulls back only to S1 and S2 is untouched.
-# At the end it replays the last 5 trading days (old rule vs new) into ~/Desktop/replay_s1_continuation.md.
+# With RUN_REPLAY=1 it also replays the last 5 trading days (old rule vs new) into ~/Desktop/replay_s1_continuation.md.
 # Every replaced file is backed up first; advanced_strategy* files are moved to the backup.
 set -e
 APP="${APP:-$HOME/Downloads/Pivot Reversal Strategy}"
@@ -49,7 +49,16 @@ done
 rm -rf "$TMP"
 echo "Installed. Old files are in: $APP/$BK"
 
-# 3. Restart the dashboard.
+# 3. Restart the scanner app if it is running, so the new code is the one in use.
+#    run.sh restarts it on its own (with the feed auto-started) a few seconds after it stops.
+if pgrep -f "Options-angel_live-ok.py" >/dev/null; then
+  pkill -f "Options-angel_live-ok.py" || true
+  echo "Restarted the scanner app (run.sh brings it back in about 5 seconds with the feed on)."
+else
+  echo "The scanner app is not running. Start it as usual: bash run.sh"
+fi
+
+# Restart the dashboard.
 if pgrep -f "glass_server.py" >/dev/null || pgrep -f "run_glass_dashboard.command" >/dev/null; then
   # The run_glass_dashboard window restarts the server on its own after 5 s with the new files.
   pkill -f "glass_server.py" || true
@@ -66,7 +75,7 @@ else
 fi
 
 # 4. Replay the S1 continuation rule on the last 5 trading days (read-only: no trades, no orders).
-if [ "${SKIP_REPLAY:-0}" != "1" ]; then
+if [ "${RUN_REPLAY:-0}" = "1" ]; then   # off by default (it loads the Mac); RUN_REPLAY=1 to run it
   echo "Replaying the last 5 trading days, old rule vs S1 continuation (a few minutes)..."
   "$PY" replay_s1_continuation.py 2>&1 | grep -v "^\[S1 CONT\]" | tail -60 || echo "Replay did not finish (the app itself is updated)."
 fi

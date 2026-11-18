@@ -51,8 +51,8 @@ echo "Installed. Old files are in: $APP/$BK"
 
 # 3. Restart the scanner app if it is running, so the new code is the one in use.
 #    run.sh restarts it on its own (with the feed auto-started) a few seconds after it stops.
-if pgrep -f "Options-angel_live-ok.py" >/dev/null; then
-  pkill -f "Options-angel_live-ok.py" || true
+if pgrep -f "[Pp]ython.*Options-angel_live-ok.py" >/dev/null; then
+  pkill -f "[Pp]ython.*Options-angel_live-ok.py" || true
   echo "Restarted the scanner app (run.sh brings it back in about 5 seconds with the feed on)."
 else
   echo "The scanner app is not running. Start it as usual: bash run.sh"

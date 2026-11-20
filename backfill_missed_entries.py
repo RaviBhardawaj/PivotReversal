@@ -74,13 +74,16 @@ with open(csv_path, newline="") as f:
     for r in _csv.DictReader(f):
         existing.add((r.get("Date"), r.get("Symbol"), r.get("Type"), str(r.get("Strike")), r.get("Expiry"), r.get("Action")))
 
-# trade ids already in the CSV / open snapshot: SYMBOL_TYPE_STRIKE_EXPIRY_YYYYMMDD_...
+# BUY trade ids already in the CSV / open snapshot: SYMBOL_TYPE_STRIKE_EXPIRY_YYYYMMDD_...
+# (a SELL on the same contract does not block a missed BUY: the id has no side, so check Action)
 existing_ids = set()
 with open(csv_path, newline="") as f:
     for r in _csv.DictReader(f):
-        existing_ids.add(str(r.get("Trade_ID", "")))
+        if r.get("Action") == "BUY":
+            existing_ids.add(str(r.get("Trade_ID", "")))
 for t in list(getattr(ft, "active_trades", {}).values()):
-    existing_ids.add(str(t.get("Trade_ID", "")))
+    if t.get("Action") == "BUY":
+        existing_ids.add(str(t.get("Trade_ID", "")))
 
 def tf_of(stk):
     f15 = f1h = set()
@@ -126,7 +129,7 @@ for OPT, stk, EXPIRY in jobs:
     key = (DAY, SYMBOL, OPT, str(stk), EXPIRY, "BUY")
     id_prefix = f"{SYMBOL}_{OPT}_{stk}_{EXPIRY}_{DAY.replace('-', '')}"
     if key in existing or any(i.startswith(id_prefix) for i in existing_ids):
-        print(f"{EXPIRY} {stk} {OPT}: a trade already exists for {DAY} - skipped")
+        print(f"{EXPIRY} {stk} {OPT}: a BUY already exists for {DAY} - skipped")
         continue
     piv = next((s for s in cache.values()
                 if s.get("opt_type") == OPT and int(s["strike"]) == stk and s.get("expiry") == EXPIRY), None)
@@ -169,7 +172,7 @@ for OPT, stk, EXPIRY in jobs:
                       token=str(next((k for k, s in cache.items() if s is piv), "")), exchange="NFO",
                       expiry=EXPIRY)
     if not tr:
-        print(f"{stk} {OPT}: tracker refused the entry")
+        print(f"{stk} {OPT}: tracker refused the entry (a trade on this contract is still open, e.g. a SELL)")
         continue
     tr["Order_ID"] = "BACKFILLED: rule replay of the day's 1-min candles"
     ft._save_snapshot()

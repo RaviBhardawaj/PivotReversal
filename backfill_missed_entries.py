@@ -15,6 +15,7 @@ then start the app again. Without --apply it works on a scratch copy and changes
     python3 backfill_missed_entries.py 2026-11-09 auto            # every 15M/1H strike, CE+PE, CURRENT expiry
     python3 backfill_missed_entries.py 2026-11-09 auto --apply    # only (dry run / for real)
     python3 backfill_missed_entries.py 2026-11-09 auto --next     # also the next expiry (only when asked)
+    python3 backfill_missed_entries.py 2026-11-20 auto --only=CE --level=S1 --apply   # only CE entries from S1
 """
 import importlib.util, json, os, shutil, sys, tempfile
 from datetime import datetime as _real_dt
@@ -26,6 +27,9 @@ sys.path.insert(0, HERE)
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 APPLY = "--apply" in sys.argv
 WITH_NEXT = "--next" in sys.argv          # next-expiry trades only when asked for; far expiries never
+_opt = lambda name: next((a.split("=", 1)[1].upper() for a in sys.argv if a.startswith(f"--{name}=")), "")
+ONLY_TYPE = _opt("only")                   # --only=CE / --only=PE: one option type
+ONLY_LEVEL = _opt("level")                 # --level=S1 / S2 / S3: only entries from that level
 AUTO = len(args) == 2 and args[1].lower() == "auto"
 if len(args) < 3 and not AUTO:
     sys.exit(__doc__)
@@ -112,7 +116,10 @@ if AUTO:
                    and s.get("expiry") in ALLOWED})
 else:
     jobs = [(OPT, stk, EXPIRY) for stk in STRIKES]
-print(f"{len(jobs)} contracts to replay")
+if ONLY_TYPE:
+    jobs = [j for j in jobs if j[0] == ONLY_TYPE]
+print(f"{len(jobs)} contracts to replay" + (f" ({ONLY_TYPE} only)" if ONLY_TYPE else "")
+      + (f", entries from {ONLY_LEVEL} only" if ONLY_LEVEL else ""))
 
 for OPT, stk, EXPIRY in jobs:
     TF = tf_of(stk) or "15M Intraday"
@@ -149,6 +156,9 @@ for OPT, stk, EXPIRY in jobs:
             break
     if entry_i is None:
         print(f"{stk} {OPT}: rule never fired on {DAY} - no entry")
+        continue
+    if ONLY_LEVEL and st.trigger_level != ONLY_LEVEL:
+        print(f"{stk} {OPT}: first entry was from {st.trigger_level}, not {ONLY_LEVEL} - skipped")
         continue
 
     t_entry = bars[entry_i][0].replace(tzinfo=None)

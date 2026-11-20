@@ -504,6 +504,12 @@ SELL_SETUP_STATES = ("SWEEP_R2", "RECLAIM_R2", "RETEST_R2", "TRADING_IN_FAVOR_SE
 # S3/R3 levels take over from S2/R2 once price has gone this fraction of the way from S2 to S3
 # (BUY: S2 swept and not held) or from R2 to R3 (SELL: R2 broken and price pushing on to R3).
 S3_FALL_FRACTION = 0.5
+# S1 continuation BUY (AJ, 17 Nov): when S2 > 0.05 the buy level is S2, but price sometimes
+# pulls back only to S1, takes the S1 liquidity, reclaims it and continues up without ever
+# reaching S2. With this on, the same sweep / reclaim / close-above candle / retest / break
+# structure is traded at S1 as long as S2 has not been touched today. A touch of S2 (within
+# the 1% near-touch band) drops a half-formed S1 setup and hands over to the normal S2 setup.
+S1_CONTINUATION_BUY = True
 
 
 class StrategyStrikeState:
@@ -812,14 +818,57 @@ class StrategyStrikeState:
                         self.sweep_bucket = -1
                         self.frozen_s2 = self.frozen_s1 = 0.0
                         self.frozen_pivots = {}
-            active_lvl = "S1" if use_s1_for_buy else ("S3" if use_s3_for_buy else "S2")
-            if use_s1_for_buy:
+            # S1 continuation: S2 is a real level (> 0.05) but price only came back to S1.
+            # Same structure as S2, traded at S1, only while S2 is untouched today (day low and
+            # LTP stay above the S2 near-touch band) and only as a pull-back: price must have
+            # traded above S1 (beyond its 1% band) before dipping into it. A dip from below S1 is
+            # not an S1 liquidity sweep. A touch of S2 drops the S1 setup; S2 takes over.
+            use_s1_cont = False
+            if S1_CONTINUATION_BUY and not use_s1_for_buy and not use_s3_for_buy and s1 > s2 > 0.05:
+                s2_band = s2 * 1.01
+                s2_touched = (ltp <= s2_band) or (0 < valid_low <= s2_band)
+                s1_running = (self.trigger_level == "S1" and self.state not in ("WAITING", "CONFIRMED_BUY"))
+                if s1_running:
+                    if s2_touched:
+                        print(f"[S1 CONT] {self.opt_type} {self.strike} {self.expiry} {now.strftime('%H:%M:%S')}: "
+                              f"S2 {s2:.2f} touched (LTP {ltp:.2f}, low {valid_low:.2f}) — S1 setup dropped, S2 takes over")
+                        self.state = "WAITING"
+                        self.trigger_level = "S2"
+                        self.ll = 0.0
+                        self.retest_done = False
+                        self.retest_low = self.retest_high = 0.0
+                        self.conf_high = self.conf_low = 0.0
+                        self.sweep_bucket = -1
+                        self.frozen_s1 = 0.0
+                        self.frozen_pivots = {}
+                    else:
+                        use_s1_cont = True       # an S1 setup is already running: stay on it
+                elif self.state == "WAITING":
+                    self.frozen_s1 = 0.0
+                    cur_lo = c["low"] if c.get("low", 0) > 0 else ltp
+                    came_from_above = valid_high > s1 * 1.01
+                    in_s1_zone = (ltp <= s1 * 1.01 or cur_lo <= s1)
+                    if not s2_touched and came_from_above and in_s1_zone:
+                        use_s1_cont = True
+                        print(f"[S1 CONT] {self.opt_type} {self.strike} {self.expiry} {now.strftime('%H:%M:%S')}: "
+                              f"pull-back into S1 {s1:.2f} (LTP {ltp:.2f}), S2 {s2:.2f} untouched — watching S1 structure")
+                    elif in_s1_zone and ltp > s2_band:
+                        # price is at S1 but the S1 rule is not used: say why, once per reason
+                        why = ("S2 already touched today (low %.2f, S2 %.2f)" % (valid_low, s2) if s2_touched
+                               else "price never traded above S1 +1%% before this dip (day high %.2f, S1 %.2f)" % (valid_high, s1))
+                        logged = getattr(self, "_s1_skip_logged", set())
+                        if why.split(" (")[0] not in logged:
+                            logged.add(why.split(" (")[0]); self._s1_skip_logged = logged
+                            print(f"[S1 CONT] {self.opt_type} {self.strike} {self.expiry} {now.strftime('%H:%M:%S')}: "
+                                  f"at S1 {s1:.2f} (LTP {ltp:.2f}) but no S1 setup: {why}")
+            active_lvl = "S1" if (use_s1_for_buy or use_s1_cont) else ("S3" if use_s3_for_buy else "S2")
+            if use_s1_for_buy or use_s1_cont:
                 fs_sup = self.frozen_s1 if self.frozen_s1 > 0 else s1
             elif use_s3_for_buy:
                 fs_sup = self.frozen_s3 if self.frozen_s3 > 0 else s3
             else:
                 fs_sup = self.frozen_s2 if self.frozen_s2 > 0 else s2
-            sup_thresh = s1 if use_s1_for_buy else (s3 if use_s3_for_buy else s2)
+            sup_thresh = s1 if (use_s1_for_buy or use_s1_cont) else (s3 if use_s3_for_buy else s2)
 
             # Cascade: if S2 > 0.05 and price does NOT sustain S1 (breaks below S1), it sweeps down into S2
             # If price also does NOT sustain S2 (breaks below S2), it cascades into S3 as extreme support
@@ -845,12 +894,13 @@ class StrategyStrikeState:
                 # the reclaim candle must close AFTER this sweep; any older confirmation is void
                 self.sweep_bucket = c["bucket"]
                 self.conf_high = self.conf_low = 0.0
-                note = f" (S2={s2:.2f}<=0.05)" if use_s1_for_buy else ""
+                note = f" (S2={s2:.2f}<=0.05)" if use_s1_for_buy else (f" (continuation, S2 {s2:.2f} untouched)" if use_s1_cont else "")
                 re_tag = f" [Re-entry New LL:{self.ll:.2f}]" if self.sl_hit_count > 0 else f" [LL:{self.ll:.2f}]"
                 self.signal = f"★ {self.opt_type} SWEEP {active_lvl}{note}{re_tag} — Awaiting Reclaim & Candle Close"
 
             # Step 2: Support Reclaimed — Await Candle Close Confirmation
-            elif (self.state == f"SWEEP_{active_lvl}" or (self.state == "WAITING" and valid_low < sup_thresh and ltp < r1)) and ltp >= fs_sup:
+            # (an S1 continuation needs a sweep the app watched: an older day low under S1 is not one)
+            elif (self.state == f"SWEEP_{active_lvl}" or (self.state == "WAITING" and not use_s1_cont and valid_low < sup_thresh and ltp < r1)) and ltp >= fs_sup:
                 self.state         = f"RECLAIM_{active_lvl}"
                 self.trigger_level = active_lvl
                 if self.ll == 0:
@@ -917,6 +967,15 @@ class StrategyStrikeState:
                 if start_favor and not _levels_up:
                     self.signal = f"★ {self.opt_type} {active_lvl} Confirmation high {_ep0:.2f} is above every target level — no room, no trade"
                     start_favor = False
+                elif start_favor and use_s1_cont and _ep0 >= _fp0.get('P', p):
+                    # an S1 continuation is a buy near S1 with P as the first target; a candle that
+                    # already ran to P leaves no S1 trade (risk to the LL is too wide for the room left)
+                    self.signal = f"★ {self.opt_type} S1 continuation: confirmation high {_ep0:.2f} is already at/above P — no trade"
+                    if not getattr(self, "_chase_logged", False):
+                        self._chase_logged = True
+                        print(f"[S1 CONT] {self.opt_type} {self.strike} {self.expiry} {now.strftime('%H:%M:%S')}: "
+                              f"confirmation high {_ep0:.2f} at/above P {_fp0.get('P', p):.2f} — skipped")
+                    start_favor = False
                 elif start_favor and not buy_entry_ok(ltp, _ep0, self.ll, _t1 if _levels_up else 0.0):
                     # price has run away from the entry: no chasing; wait for it to come back
                     self.signal = f"★ {self.opt_type} {active_lvl} Broke confirmation high — waiting for price to come back to entry {_ep0:.2f} (LTP {ltp:.2f})"
@@ -965,7 +1024,7 @@ class StrategyStrikeState:
                     self.entry_sl     = effective_sl
                     self.targets      = [t1, t2, t3, t4, t5]
                     mkt_ctx = "Mkt Bullish ↑" if self.opt_type == "CE" else "Mkt Bearish ↓"
-                    s2_tag = " (S2<=0.05)" if use_s1_for_buy else ""
+                    s2_tag = " (S2<=0.05)" if use_s1_for_buy else (" (S1 continuation, S2 untouched)" if use_s1_cont else "")
                     re_tag = " [RE-ENTRY with New LL SL]" if self.sl_hit_count > 0 else ""
                     self.signal       = f"★ BUY {self.opt_type}{re_tag} [{mkt_ctx} | {active_lvl} Reclaim Confirmed{s2_tag} | Entry:{entry_px:.2f} | New LL SL:{effective_sl:.2f} | T1:{t1:.1f} T2:{t2:.1f} T3:{t3:.1f} T4:{t4:.1f} T5:{t5:.1f}]"
                     self.trade_status = "Active"
@@ -3408,6 +3467,11 @@ def get_gspread_client():
                 try:
                     creds.refresh(Request())
                 except Exception as e:
+                    _es = str(e)
+                    if any(k in _es for k in ("Max retries", "Network is unreachable", "NewConnectionError",
+                                              "timed out", "Name or service not known", "nodename nor servname")):
+                        # No internet to Google: the login is fine, keep it and let the caller retry later
+                        raise
                     print(f"[GOOGLE] Saved login refused ({str(e)[:80]}); opening the Google login again")
                     try:
                         os.replace(token_file, token_file + ".expired")
@@ -6204,7 +6268,7 @@ class FeedEngine:
                         if is_s1_buy:
                             _b_lvl = "S1"
                             _b_ep  = round(st_buy.entry_price if st_buy.entry_price > 0 else st_buy.conf_high if st_buy.conf_high > 0 else (st_buy.frozen_s1 or opt_piv.get("S1", 0)), 2)
-                            signal_buy = f"★ BUY {opt_type} [Entry@S1:{_b_ep:.1f} | LL SL (S2<=0)]"
+                            signal_buy = f"★ BUY {opt_type} [Entry@S1:{_b_ep:.1f} | LL SL ({'S2<=0' if _s2_raw <= 0.05 else 'S1 cont'})]"
                         else:
                             _b_lvl = "S2"
                             _b_ep  = round(st_buy.entry_price if st_buy.entry_price > 0 else st_buy.conf_high if st_buy.conf_high > 0 else (st_buy.frozen_s2 or _s2_raw), 2)
@@ -6299,8 +6363,9 @@ class FeedEngine:
                         is_s1_buy = (opt_piv.get('S2', 0) <= 0.05 or disp_s2_b <= 0.05 or st_buy.trigger_level == "S1")
                         if is_s1_buy:
                             calc_ep_b = round(st_buy.entry_price if st_buy.entry_price > 0 else st_buy.conf_high if st_buy.conf_high > 0 else (st_buy.frozen_s1 if st_buy.frozen_s1 > 0 else disp_s1_b), 2)
-                            zone_text = f"{strike_tag} Buy Zone Above S1 ({calc_ep_b:.1f}) [S2<=0]".strip()
-                            plan_buy_zone = f"BUY S1={disp_s1_b:.1f} (S2<=0) | T1:{disp_p_b:.1f} T2:{disp_r1_b:.1f}"
+                            _s1_why = "S2<=0" if (opt_piv.get('S2', 0) <= 0.05 or disp_s2_b <= 0.05) else "S1 cont"
+                            zone_text = f"{strike_tag} Buy Zone Above S1 ({calc_ep_b:.1f}) [{_s1_why}]".strip()
+                            plan_buy_zone = f"BUY S1={disp_s1_b:.1f} ({_s1_why}) | T1:{disp_p_b:.1f} T2:{disp_r1_b:.1f}"
                             tgts_b = list(st_buy.targets) if st_buy.targets else [disp_p_b, disp_r1_b, disp_r2_b, disp_r3_b, round(disp_r3_b * 1.05, 2)]
                         else:
                             calc_ep_b = round(st_buy.entry_price if st_buy.entry_price > 0 else st_buy.conf_high if st_buy.conf_high > 0 else (st_buy.frozen_s2 if st_buy.frozen_s2 > 0 else disp_s2_b), 2)
@@ -8290,7 +8355,7 @@ class ControlPanel:
                 is_s1_buy = (s2_raw <= 0.05 or "S1" in m5_t or "S1" in sig_t)
                 planned_ep = round(s1_raw if is_s1_buy else s2_raw, 2)
                 lvl_label = "S1" if is_s1_buy else "S2"
-                s2_note = " [S2<=0]" if is_s1_buy else ""
+                s2_note = (" [S2<=0]" if s2_raw <= 0.05 else " [S1 cont]") if is_s1_buy else ""
                 sl_str = display_sl(trade_st, m5_t, sl_v, True, planned_ep, ll=ll_v, entry_sl=w.get("entry_sl", 0))
             else:
                 planned_ep = round(w.get("r2", 0) if w.get("r2", 0) > 1.0 else w.get("r1", 0), 2)
@@ -8967,9 +9032,27 @@ class ControlPanel:
                 strikes = sorted(set(filter_df["strike"].astype(float).div(100).astype(int)))
                 print(f"[START] Got {len(strikes)} strikes, ATM~{atm}")
 
+                print(f"[START] S1 continuation BUY is {'ON' if S1_CONTINUATION_BUY else 'OFF'} (17 Nov rule)")
                 print("[START] Setting up Google Sheet...")
-                feed.setup_sheet(symbol, strikes)
-                print("[START] Sheet setup done, starting WebSocket...")
+                try:
+                    feed.setup_sheet(symbol, strikes)
+                    print("[START] Sheet setup done, starting WebSocket...")
+                except Exception as _sheet_err:
+                    # Google unreachable must never stop the price feed: start the WebSocket
+                    # now and keep retrying the Sheet in the background.
+                    print(f"[START] Google Sheet unavailable ({str(_sheet_err)[:120]}); "
+                          "starting the live feed without it, retrying every 60s")
+                    def _retry_sheet(sym=symbol, stks=strikes):
+                        while feed.running and feed.ws is None:
+                            time.sleep(60)
+                            if not feed.running:
+                                return
+                            try:
+                                feed.setup_sheet(sym, stks)
+                                print("[SHEET] Google Sheet connected again")
+                            except Exception as _re:
+                                print(f"[SHEET] Still can't reach Google ({str(_re)[:80]}); retrying in 60s")
+                    threading.Thread(target=_retry_sheet, daemon=True).start()
 
                 feed.start_ws()
                 print("[START] WebSocket connecting...")

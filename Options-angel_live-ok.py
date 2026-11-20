@@ -847,11 +847,20 @@ class StrategyStrikeState:
                     self.frozen_s1 = 0.0
                     cur_lo = c["low"] if c.get("low", 0) > 0 else ltp
                     came_from_above = valid_high > s1 * 1.01
-                    if (not s2_touched and came_from_above
-                            and (ltp <= s1 * 1.01 or cur_lo <= s1)):
+                    in_s1_zone = (ltp <= s1 * 1.01 or cur_lo <= s1)
+                    if not s2_touched and came_from_above and in_s1_zone:
                         use_s1_cont = True
                         print(f"[S1 CONT] {self.opt_type} {self.strike} {self.expiry} {now.strftime('%H:%M:%S')}: "
                               f"pull-back into S1 {s1:.2f} (LTP {ltp:.2f}), S2 {s2:.2f} untouched — watching S1 structure")
+                    elif in_s1_zone and ltp > s2_band:
+                        # price is at S1 but the S1 rule is not used: say why, once per reason
+                        why = ("S2 already touched today (low %.2f, S2 %.2f)" % (valid_low, s2) if s2_touched
+                               else "price never traded above S1 +1%% before this dip (day high %.2f, S1 %.2f)" % (valid_high, s1))
+                        logged = getattr(self, "_s1_skip_logged", set())
+                        if why.split(" (")[0] not in logged:
+                            logged.add(why.split(" (")[0]); self._s1_skip_logged = logged
+                            print(f"[S1 CONT] {self.opt_type} {self.strike} {self.expiry} {now.strftime('%H:%M:%S')}: "
+                                  f"at S1 {s1:.2f} (LTP {ltp:.2f}) but no S1 setup: {why}")
             active_lvl = "S1" if (use_s1_for_buy or use_s1_cont) else ("S3" if use_s3_for_buy else "S2")
             if use_s1_for_buy or use_s1_cont:
                 fs_sup = self.frozen_s1 if self.frozen_s1 > 0 else s1

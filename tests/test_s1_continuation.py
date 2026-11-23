@@ -1,4 +1,5 @@
-"""S1 continuation BUY (AJ, 17 Nov): price pulls back only to S1, takes the S1 liquidity,
+"""S1-first BUY (AJ, 17 + 23 Nov): S1 is the first buy try with the S2 structure; S2 is the second try.
+Original note (17 Nov): price pulls back only to S1, takes the S1 liquidity,
 reclaims and continues up without touching S2 -> the same sweep / close-above candle / retest /
 break structure is traded at S1. Run: python3 tests/test_s1_continuation.py"""
 import sys, os, types, importlib.util
@@ -49,7 +50,7 @@ st=run(PIV,OPEN+SWEEP+RETEST+BREAK)
 assert st.state=="CONFIRMED_BUY" and st.trade_status=="Active" and st.trigger_level=="S1", (st.state,st.signal)
 assert st.entry_price==CH and st.sl==round(S1*0.97,2), (st.entry_price,st.sl)
 assert st.targets[:4]==[P,R1,R2,R3], st.targets
-assert "S1 continuation" in st.signal, st.signal
+assert "S1 first try" in st.signal, st.signal
 print("1 S1 pull-back, S2 untouched: BUY @ %.2f SL(LL) %.2f targets %s: OK"%(st.entry_price,st.sl,st.targets))
 
 # 1b. the main loop's entry check accepts it as an S1 reclaim
@@ -70,11 +71,16 @@ st=run(PIV,EARLY+[(t,p) for t,p in SWEEP+RETEST+BREAK])
 assert st.trigger_level!="S1" and not (st.trade_status=="Active" and st.trigger_level=="S1"), (st.state,st.trigger_level,st.signal)
 print("3 S2 already touched today: no S1 continuation entry: OK")
 
-# 4. price never traded above S1 (rising from S1-S2 into S1): not a sweep of S1 liquidity
+# 4. S1 first (23 Nov): price below S1 from the open (never above it) still trades the S1 structure
 BELOW=[(at(9,16),S1*0.95),(at(9,20),S1*0.96),(at(9,25),S1*0.97)]
 st=run(PIV,BELOW+[(at(9,30,10),S1*0.985),(at(9,31),S1*0.975),(at(9,33),S1*1.004),(at(9,34),S1*1.009),(at(9,35),S1*1.006),(at(9,36),S1*1.008),(at(9,37),S1*1.016)])
-assert st.trade_status=="Waiting" and st.trigger_level!="S1", (st.state,st.trigger_level,st.signal)
-print("4 never above S1 first: no S1 continuation entry: OK")
+assert st.trade_status=="Active" and st.trigger_level=="S1", (st.state,st.trigger_level,st.signal)
+print("4 S1 is the first try even when price was under S1 from the open: OK")
+
+# 4b. while waiting with S2 untouched the plan shown is S1
+st=run(PIV,OPEN)
+assert st.state=="WAITING" and st.trigger_level=="S1", (st.state,st.trigger_level)
+print("4b waiting plan is S1 while S2 is untouched: OK")
 
 # 5. switch off -> old behaviour (waits for S2)
 app.S1_CONTINUATION_BUY=False
@@ -90,11 +96,11 @@ st=run(PIV,[(at(9,25),S2*1.05),(at(9,30,10),S2*0.97),(at(9,31),S2*0.955),(at(9,3
 assert st.state=="CONFIRMED_BUY" and st.trigger_level=="S2" and st.targets[0]==S1, (st.state,st.trigger_level,st.targets)
 print("6 S2 setup unchanged: OK")
 
-# 7. no room: candle high already above P -> no trade
+# 7. same as S2: a confirmation high above P still enters, with T1 = the next level above (R1)
 st=run(PIV,[(at(9,16),P*1.05),(at(9,25),S1*1.03),(at(9,30,10),S1*0.99),(at(9,31),S1*0.98),(at(9,32),P*1.01),(at(9,34),S1*1.01),
             (at(9,35),S1*1.005),(at(9,36),P*1.02)])
-assert st.trade_status=="Waiting", (st.state,st.signal)
-print("7 confirmation high already at P: no S1 continuation trade: OK")
+assert st.trade_status=="Active" and st.targets[0]==R1, (st.state,st.targets,st.signal)
+print("7 confirmation high above P: enters like S2 does, T1 = R1: OK")
 
 # 8. one-way down after the S1 trade starts is the normal SL; strike state machine does not stack a 2nd S1 entry
 st=run(PIV,OPEN+SWEEP+RETEST+BREAK+[(at(9,40),S1*1.05),(at(9,45),S1*0.99),(at(9,50),S1*1.03)])

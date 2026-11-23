@@ -3704,9 +3704,42 @@ def angel_daily_candles(exch: str, token: str, days: int = 20, now: datetime = N
     AG8004 'Invalid API Key') it logs in again once; on the rate limit it waits and retries.
     Raises with Angel's message when no data comes back."""
     now = now or datetime.now()
-    params = {"exchange": exch, "symboltoken": str(token), "interval": "ONE_DAY",
-              "fromdate": (now - timedelta(days=days)).strftime("%Y-%m-%d 09:15"),
-              "todate": now.strftime("%Y-%m-%d %H:%M")}
+    return [(str(x[0])[:10],) + tuple(x[1:5]) for x in angel_candles(
+        exch, token, "ONE_DAY", (now - timedelta(days=days)).strftime("%Y-%m-%d 09:15"),
+        now.strftime("%Y-%m-%d %H:%M"))]
+
+
+def angel_intraday_day(exch: str, token: str, day: date):
+    """One trading day's candle rebuilt from Angel One's 1-minute candles (09:15-15:30 trades):
+    (YYYY-MM-DD, o, h, l, c), or None when the contract did not trade that day. The backup for
+    Dhan's 1-minute candles (Dhan answers DH-902 without its paid Data APIs plan)."""
+    d = day.isoformat()
+    bars = [b for b in angel_candles(exch, token, "ONE_MINUTE", f"{d} 09:15", f"{d} 15:30")
+            if str(b[0])[:10] == d and "09:15" <= str(b[0])[11:16] < "15:30"]
+    if not bars:
+        return None
+    return (d, bars[0][1], max(b[2] for b in bars), min(b[3] for b in bars), bars[-1][4])
+
+
+_MARKET_DAY = {}
+
+
+def angel_market_traded(exch: str, day: date) -> bool:
+    """Did the exchange trade on day? Checked on the index's own 1-minute candles (NIFTY for
+    NSE/NFO, SENSEX for BSE/BFO), so an option with no Angel bars is told apart from a holiday."""
+    key = (exch in ("BFO", "BSE"), day.isoformat())
+    if key not in _MARKET_DAY:
+        ix_exch, ix_tok = ("BSE", "99919000") if key[0] else ("NSE", "99926000")
+        d = day.isoformat()
+        _MARKET_DAY[key] = bool(angel_candles(ix_exch, ix_tok, "ONE_MINUTE", f"{d} 09:15", f"{d} 10:15"))
+    return _MARKET_DAY[key]
+
+
+def angel_candles(exch: str, token: str, interval: str, fromdate: str, todate: str) -> list:
+    """Raw candles [(timestamp, o, h, l, c), ...] of one contract from Angel One's historical API
+    (relogin once on a stale session, wait on the rate limit). Raises with Angel's message."""
+    params = {"exchange": exch, "symboltoken": str(token), "interval": interval,
+              "fromdate": fromdate, "todate": todate}
     relogged, last = False, ""
     for attempt in range(5):
         try:
@@ -3719,7 +3752,7 @@ def angel_daily_candles(exch: str, token: str, days: int = 20, now: datetime = N
             out = []
             for x in r["data"]:
                 try:
-                    out.append((str(x[0])[:10], float(x[1]), float(x[2]), float(x[3]), float(x[4])))
+                    out.append((str(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4])))
                 except Exception:
                     pass
             return out
@@ -3834,12 +3867,34 @@ def official_strike_candle(exch: str, token: str, instrument: str, mode: str, no
             return c, src, day
         if mode == "next" and now.weekday() < 5 and now.time() < dt_time(15, 30):
             return None, "today's candle is not complete yet", day
-        try:
-            c = dhan_intraday_day(exch, token, day, instrument)
-        except Exception as e:
-            return None, f"no candle for {day} yet ({e})", day
-        if c:
-            return c, "Dhan 1-min", day
+        # Rebuild the day from 1-minute candles: Dhan first, Angel One as the backup
+        c, why = None, []
+        got = False
+        for name, fn in (("Dhan", lambda: dhan_intraday_day(exch, token, day, instrument)),
+                         ("Angel", lambda: angel_intraday_day(exch, token, day))):
+            if time.time() - _SRC_DOWN[name] < _src_down_for(name):
+                why.append(f"{name}: skipped ({_SRC_WHY.get(name) or 'failed recently'})")
+                continue
+            try:
+                c = fn()
+                got = True
+            except Exception as e:
+                _note_src_failure(name, e)
+                why.append(f"{name}: {e}")
+                continue
+            if c:
+                return c, f"{name} 1-min", day
+            if name == "Angel":
+                # Angel has no bars for this contract: a holiday only if the index did not trade
+                try:
+                    if angel_market_traded(exch, day):
+                        return None, f"no candle for {day} yet (Angel has no 1-minute data for this contract)", day
+                except Exception as e:
+                    return None, f"no candle for {day} yet (Angel holiday check: {e})", day
+            break                                     # no trades that day: market holiday
+        if not got:
+            daily = src if not rows else f"{src} daily candles have no {day}"
+            return None, f"no candle for {day} yet ({daily}; 1-min: {'; '.join(why)})", day
         day = prev_weekday(day)                       # no trades that day: market holiday
     return None, "no candle found", day
 
@@ -3861,6 +3916,30 @@ def set_level_source(v: str):
     write_json_file(_DATA_SETTINGS_FILE, d)
 
 
+_SRC_WHY = {"Dhan": "", "Angel": ""}           # why a source is being skipped
+_NO_PLAN_SKIP = 1800                            # Dhan without its Data APIs plan: retry every 30 min
+
+
+def _src_down_for(name: str) -> int:
+    """How long a failed source is skipped: 30 minutes when Dhan says the account has no
+    Data APIs plan (DH-902, it will not change within the day), otherwise 2 minutes."""
+    return _NO_PLAN_SKIP if "DH-902" in (_SRC_WHY.get(name) or "") else 120
+
+
+def _note_src_failure(name: str, e):
+    """Skip a source for a while on errors that will not clear strike by strike (login / key
+    refused, no data plan); rate throttles and single-contract gaps do not trip it."""
+    up = str(e).upper()
+    if any(k in up for k in ("INVALID API KEY", "AG8004", "AG8001", "DH-901", "DH-902", "401", "UNAUTHORIZED")):
+        first = time.time() - _SRC_DOWN[name] >= _src_down_for(name)
+        _SRC_DOWN[name] = time.time()
+        _SRC_WHY[name] = ("DH-902 no Data APIs plan on the Dhan account" if "DH-902" in up
+                          else str(e)[:120])
+        if first:
+            print(f"[STRIKE MAPPER] {name} historical data unavailable ({_SRC_WHY[name]}) — "
+                  f"using {'Angel One' if name == 'Dhan' else 'Dhan'} for strike levels")
+
+
 def _source_fns(exch, token, instrument, now):
     return {"Dhan": lambda: dhan_daily_candles(exch, token, instrument, now=now),
             "Angel": lambda: angel_daily_candles(exch, token, now=now)}
@@ -3874,8 +3953,8 @@ def strike_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now:
     fns = _source_fns(exch, token, instrument, now)
     errs = []
     for i, name in enumerate(order):
-        if time.time() - _SRC_DOWN[name] < 120:
-            errs.append(f"{name}: skipped (failed in the last 2 minutes)")
+        if time.time() - _SRC_DOWN[name] < _src_down_for(name):
+            errs.append(f"{name}: skipped ({_SRC_WHY.get(name) or 'failed recently'})")
             continue
         try:
             rows = fns[name]()
@@ -3883,10 +3962,7 @@ def strike_daily_candles(exch: str, token: str, instrument: str = "OPTIDX", now:
                 return rows, name
             errs.append(f"{name}: no candles")
         except Exception as e:
-            err_up = str(e).upper()
-            # Only trip 2-minute broker skip on persistent auth failures, not on rate throttles or single-strike contract gaps
-            if any(k in err_up for k in ("INVALID API KEY", "AG8004", "AG8001", "DH-901", "401", "UNAUTHORIZED")):
-                _SRC_DOWN[name] = time.time()
+            _note_src_failure(name, e)
             errs.append(f"{name}: {e}")
     raise RuntimeError("; ".join(errs))
 
@@ -4449,7 +4525,7 @@ class FeedEngine:
                         continue
                     if time.time() - getattr(self, "_last_1min_refresh", 0) > 900:
                         with self.lock:
-                            rebuilt = any(isinstance(v, dict) and v.get("source") == "Dhan 1-min"
+                            rebuilt = any(isinstance(v, dict) and v.get("source") in ("Dhan 1-min", "Angel 1-min")
                                           for v in self.strike_pivots.values())
                         if rebuilt:
                             self._last_1min_refresh = time.time()
@@ -4648,7 +4724,7 @@ class FeedEngine:
             cached = cd.get("strikes", {}) if (cd.get("basis_key") == basis_key and cd.get("symbol") == symbol) else {}
 
             # Check if any cached tokens are provisional 1-minute data that can be upgraded when market is not in session
-            provisional_tokens = [t for t in tokens if cached.get(t, {}).get("source") == "Dhan 1-min"]
+            provisional_tokens = [t for t in tokens if cached.get(t, {}).get("source") in ("Dhan 1-min", "Angel 1-min")]
             has_provisional = bool(provisional_tokens) and not _in_session
 
             # Reuse a complete set: always during market hours (levels are locked), otherwise
@@ -7875,6 +7951,27 @@ class ControlPanel:
         self._set_status(f"● {len(expiries)} expiries for {sym}")
         self._refresh_display()
 
+    def _request_missing_levels(self, sym, expiries):
+        """Fetch the levels of focus strikes that have none yet, in the background, at most
+        once a minute per expiry (the dashboard refreshes far more often than that)."""
+        if not expiries:
+            return
+        last = getattr(self, "_missing_lv_req", {})
+        self._missing_lv_req = last
+        now = time.time()
+        for exp in expiries:
+            if not exp or exp == "-" or now - last.get((sym, exp), 0) < 60:
+                continue
+            last[(sym, exp)] = now
+            print(f"[STRIKE MAPPER] Focus strike(s) of {sym} {exp} have no levels yet — fetching now")
+
+            def _run(e=exp):
+                try:
+                    feed.fetch_and_map_all_strikes(sym, expiry=e, force_fetch=False)
+                except Exception as err:
+                    print(f"[STRIKE MAPPER] Missing-level fetch notice: {err}")
+            threading.Thread(target=_run, daemon=True, name="missing-levels").start()
+
     def _apply_expiry_gate(self):
         """Next Expiry unticked => only current-expiry trades/orders are generated."""
         allowed = allowed_entry_expiries(self.expiry_var.get(), self.next_exp_var.get(),
@@ -8074,14 +8171,22 @@ class ControlPanel:
             mtime = os.path.getmtime(cache_file) if os.path.exists(cache_file) else 0
         except OSError:
             mtime = 0
-        if not hasattr(self, "_cached_strikes") or getattr(self, "_cached_strikes_mtime", -1) != mtime:
+        _sess_day = pivot_session_date().isoformat()
+        if (not hasattr(self, "_cached_strikes") or getattr(self, "_cached_strikes_mtime", -1) != mtime
+                or getattr(self, "_cached_strikes_day", None) != _sess_day):
             self._cached_strikes_mtime = mtime
+            self._cached_strikes_day = _sess_day
             if os.path.exists(cache_file):
                 try:
                     with open(cache_file, "r") as cf:
                         _cj = json.load(cf)
+                    # Only levels built for THIS session; an older file's levels belong to
+                    # other strikes / another day and must never stand in for today's.
+                    if str(_cj.get("date", "")) == _sess_day:
                         self._cached_strikes = _cj.get("strikes", {})
-                        self._cached_nearest_exp = _cj.get("expiry", "")
+                    else:
+                        self._cached_strikes = {}
+                    self._cached_nearest_exp = _cj.get("expiry", "")
                 except Exception:
                     self._cached_strikes = getattr(self, "_cached_strikes", {})
             else:
@@ -8201,6 +8306,7 @@ class ControlPanel:
             if not target_expiries:
                 target_expiries = [curr_exp or "-"]
 
+        _missing_lv = set()
         for tgt_exp in target_expiries:
             for ot, stk, is_15m, is_1h, is_nearby in needed_focus:
                 strike_tag = "[⭐15M & ⏳1H]" if (is_15m and is_1h) else ("[⭐15M Focus]" if is_15m else ("[⏳1H Focus]" if is_1h else ("[📌Nearby Pivot]" if is_nearby else "")))
@@ -8276,6 +8382,28 @@ class ControlPanel:
                             "plan_sell_zone": f"SELL R2={r2_val:.1f} | T1:{r1_val:.1f} P:{p_val:.1f}",
                         })
                         existing_keys.add((ot, stk, tgt_exp))
+                    else:
+                        # Focus strike whose levels are not loaded yet: still list it (marked
+                        # "levels pending") so every exact 15M/1H strike is visible, and fetch
+                        # its levels now instead of waiting for the next watchdog pass.
+                        ltp_val = _live_ltp(ot, stk_int, tgt_exp)
+                        for _side in ("BUY", "SELL"):
+                            watch.append({
+                                "side": _side, "type": ot, "strike": stk, "ltp": ltp_val,
+                                "high": 0.0, "low": 0.0, "oi": 0, "vol": 0, "expiry": tgt_exp,
+                                "zone": f"{strike_tag} Levels pending".strip(),
+                                "is_15m": is_15m, "is_1h": is_1h, "is_nearby": is_nearby,
+                                "s3": 0.0, "s2": 0.0, "s1": 0.0, "p": 0.0, "r1": 0.0, "r2": 0.0, "r3": 0.0,
+                                "category": ("CE_SUP" if ot == "CE" else "PE_SUP") if _side == "BUY"
+                                            else ("PE_RES" if ot == "PE" else "CE_RES"),
+                                "status": "⏳ Levels pending", "m5_state": "⏳ Waiting",
+                                "trade_status": "Levels pending", "no_levels": True,
+                                "ll": 0.0, "hh": 0.0, "sl": 0.0, "entry_price": 0.0,
+                                "targets": [], "target": 0.0,
+                            })
+                        existing_keys.add((ot, stk, tgt_exp))
+                        _missing_lv.add(tgt_exp)
+        self._request_missing_levels(sym, _missing_lv)
         # ── Multi-select filters (side / type / timeframe / level / state) + expiry ──
         seen = set()
         display_watch = []
@@ -8410,7 +8538,9 @@ class ControlPanel:
                 strike_tag = f"[🔷P] {strike_tag}".strip()
 
             # Fast-decision signals & statuses for rapid execution
-            if trade_st == "Active":
+            if w.get("no_levels"):
+                disp_signal = "⏳ Levels pending — fetching this strike's S/P/R levels"
+            elif trade_st == "Active":
                 disp_signal = f"🟢 LIVE LONG @ {ep_v:.2f} | SL: {sl_str} | T1: {t1_str}" if is_buy else f"🔴 LIVE SHORT @ {ep_v:.2f} | SL: {sl_str} | T1: {t1_str}"
             elif "Target 1" in trade_st:
                 disp_signal = f"🎯 T1 HIT (+50% Booked) | SL: {sl_str} -> T2: {t2_str}"
@@ -8427,7 +8557,9 @@ class ControlPanel:
             else:
                 disp_signal = f"▼ Plan SELL @ R2:{planned_ep:.1f} | HH SL (Watch R2 Sweep)"
 
-            if is_buy:
+            if w.get("no_levels"):
+                disp_zone = f"{strike_tag} Levels pending".strip()
+            elif is_buy:
                 disp_zone = f"{strike_tag} Buy Zone Above {lvl_label} ({planned_ep:.1f}){s2_note}".strip()
             else:
                 disp_zone = f"{strike_tag} Sell Area Below R2 ({planned_ep:.1f})".strip()
@@ -8518,13 +8650,13 @@ class ControlPanel:
                 oi_disp,
                 vol_disp,
                 disp_zone,
-                f"{w.get('s3', 0.0):.2f}",
-                f"{w.get('s2', 0.0):.2f}",
-                f"{w.get('s1', 0.0):.2f}",
-                f"{w.get('p', 0.0):.2f}",
-                f"{w.get('r1', 0.0):.2f}",
-                f"{w.get('r2', 0.0):.2f}",
-                f"{w.get('r3', 0.0):.2f}",
+                ("-" if w.get("no_levels") else f"{w.get('s3', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('s2', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('s1', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('p', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('r1', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('r2', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('r3', 0.0):.2f}"),
                 disp_m5,
                 ll_str,
                 hh_str,

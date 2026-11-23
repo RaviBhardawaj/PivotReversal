@@ -198,4 +198,43 @@ r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
 assert not any(t in f.strike_pivots for t in m) and f._pivot_jobs[("NIFTY","13OCT2026")]
 print("N no data: strikes wait, nothing stale used: OK")
 state["empty"] = set()
+# O) Dhan without its Data APIs plan (DH-902) and Angel's daily candle not out yet ->
+#    the day is rebuilt from Angel's 1-minute candles; Dhan is skipped after the first refusal
+class NoPlanDhan:
+    n = 0
+    def daily_candles(s, *a, **k): NoPlanDhan.n += 1; raise RuntimeError("Dhan historical error DH-902: This API requires a Data APIs Plan. Current plan: Free Plan")
+    def intraday_day_ohlc(s, *a, **k): NoPlanDhan.n += 1; raise RuntimeError("Dhan historical error DH-902: This API requires a Data APIs Plan")
+_real_ac = app.angel_candles
+mins = {"traded": True, "calls": 0}
+def fake_ac(exch, token, interval, fromdate, todate):
+    d = fromdate[:10]
+    if interval == "ONE_DAY":
+        today = FakeDT.v.strftime("%Y-%m-%d")
+        return [tuple(candle(token, x)[:5]) for x in DAYS if x < today and x != "2026-10-08"]   # 08 Oct not published
+    mins["calls"] += 1
+    if token in ("99926000", "99919000"):
+        return [(f"{d}T09:15:00+05:30", 1, 1, 1, 1)] if mins["traded"] else []
+    if token in state["empty"] or not mins["traded"]:
+        return []
+    c = candle(token, d)
+    return [(f"{d}T09:15:00+05:30", c[1], c[2], c[1], c[1]), (f"{d}T12:00:00+05:30", c[1], c[2], c[3], c[4]),
+            (f"{d}T15:29:00+05:30", c[4], c[4], c[4], c[4]), (f"{d}T15:30:00+05:30", 999, 999, 0.01, 999)]
+app.angel_candles = fake_ac
+app._DHAN_DATA["ad"] = NoPlanDhan(); app._SRC_DOWN.update(Dhan=0.0, Angel=0.0); app._MARKET_DAY.clear()
+FakeDT.v = datetime(2026,10,9,9,5); f.strike_pivots.clear()
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+assert r and all(s["source"] == "Angel 1-min" and s["candle_date"] == "2026-10-08" for s in r.values()), r
+for t,s in r.items(): check(s,t,"2026-10-08")   # 15:30 bar ignored: same levels as the official candle
+assert NoPlanDhan.n <= 2, NoPlanDhan.n
+print("O Dhan DH-902 + Angel daily late: Angel 1-minute candles, Dhan skipped:", NoPlanDhan.n, "Dhan call(s): OK")
+# P) Angel has no bars for the contracts: the index traded -> wait (no stale levels);
+#    the index did not trade either -> holiday, the day before is used
+state["empty"] = set(meta); app._SRC_DOWN.update(Dhan=0.0, Angel=0.0); app._MARKET_DAY.clear(); f.strike_pivots.clear()
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+assert not any(t in f.strike_pivots for t in m)
+state["empty"] = set(); mins["traded"] = False; app._MARKET_DAY.clear(); f.strike_pivots.clear()
+r = f.fetch_and_map_all_strikes("NIFTY","13OCT2026",force_fetch=True)
+assert r and all(s["candle_date"] == "2026-10-07" and s["source"] == "Angel" for s in r.values()), {s["candle_date"] for s in r.values()}
+print("P no Angel bars: wait while the market traded, holiday skipped: OK")
+app.angel_candles = _real_ac; mins["traded"] = True
 print("STRIKE PIVOT TESTS PASSED")

@@ -10,6 +10,8 @@
 # the S2 structure is also traded at S1 when price pulls back only to S1 and S2 is untouched.
 # 23 Nov: every 15M/1H focus strike is listed even before its levels load ("Levels pending"),
 # its levels are fetched at once, and an older session's strike_pivot_cache.json is never shown.
+# Strike levels no longer depend on Dhan's paid Data APIs plan: on DH-902 the day is rebuilt from
+# Angel One's 1-minute candles (Dhan is skipped for 30 minutes).
 # With RUN_REPLAY=1 it also replays the last 5 trading days (old rule vs new) into ~/Desktop/replay_s1_continuation.md.
 # Every replaced file is backed up first; advanced_strategy* files are moved to the backup.
 set -e

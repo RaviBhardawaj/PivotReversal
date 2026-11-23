@@ -3,7 +3,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/RaviBhardawaj/PivotReversal/main/mac_install/install.sh | bash
 # If raw.githubusercontent.com is blocked by the ISP, use the repo archive instead (SRC = unpacked folder):
 #   T=$(mktemp -d) && curl -fsSL https://codeload.github.com/RaviBhardawaj/PivotReversal/tar.gz/refs/heads/main | tar -xz -C "$T" --strip-components=1 && SRC="$T" bash "$T/mac_install/install.sh"
-# Installs: advanced strategy removed (fixes the startup crash), faster dashboards,
+# Installs (incl. S1-first BUY: S1 first try, S2 second try): advanced strategy removed (fixes the startup crash), faster dashboards,
 # current-expiry orders only, strike deletes that stick until Restore, and the redesigned
 # glass dashboard (live trades panel, current-expiry watchlist), and unfilled smart-limit
 # entries chased (step to the ask, then MARKET), and the S1 continuation BUY (17 Nov):

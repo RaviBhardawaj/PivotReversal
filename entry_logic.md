@@ -45,16 +45,14 @@ When the entry is confirmed:
   - From S2: S1, P, R1, R2, R3.
   - From S1: P, R1, R2, R3, R3 + 5%.
 
-### S1 continuation BUY (AJ, 17 Nov)
-Sometimes price pulls back only to S1, takes the S1 liquidity, reclaims it and continues up without ever reaching S2. The same structure (sweep, reclaim, close-above candle, retest, break of its high) is then traded at **S1**, under these conditions:
-- **S2 untouched today.** The day's low and the live price have stayed above S2 + 1% (the S2 near-touch band). Once S2 is touched, S1 continuation is off for the day and only the normal S2 setup runs.
-- **A real pull-back.** Price must have traded above S1 + 1% earlier in the day before dipping into S1. A climb from below S1 is not an S1 sweep. The dip must be one the app watched live (an older day low under S1 doesn't count).
-- **S2 has priority.** If price touches S2 while an S1 setup is still forming, the S1 setup is dropped and the S2 setup takes over with its own LL.
-- **Near S1 only.** If the confirmation high is already at or above P, there is no S1 trade.
-- **SL** is the S1 sweep LL (above S2). **Targets:** P, R1, R2, R3, R3 + 5%. Chase room, T1 guard and alerts are the same as S2.
-- **No duplicates.** One trade per strike at a time. After an S1 trade hits a target or closes at 3 PM, the strike takes no more BUYs that day. After an S1 SL hit, the one allowed re-entry comes from a fresh S2 sweep, not another S1 entry.
-- Switch: `S1_CONTINUATION_BUY = False` in `Options-angel_live-ok.py` turns it off (back to waiting for S2).
-- Log lines start with `[S1 CONT]`; the dashboard shows the zone as "Buy Zone Above S1 [S1 cont]".
+### S1 first, S2 second try (AJ, 17 + 23 Nov)
+When S2 > 0.05, the **first** buy try is at **S1**, with exactly the S2 structure above (sweep or 1% near-touch, reclaim, first 5-minute candle closing back above S1, retest, break of that candle's high). **S2 is the second try.**
+- **S1 while S2 is untouched.** As long as the day's low and the live price have stayed above S2 + 1%, the buy level is S1 (the dashboard shows the S1 plan).
+- **S2 takes over.** Once price reaches S2 (within 1%), a half-formed S1 setup is dropped and the normal S2 setup runs with its own LL. For the rest of the day the buy level is S2.
+- **After an S1 trade.** If it hits its SL, the one allowed re-entry comes from a fresh S2 sweep (second try), never a second S1 entry. If it hits a target or closes at 3 PM, the strike takes no more BUYs that day.
+- **SL** is the S1 sweep LL (above S2). **Targets:** P, R1, R2, R3, R3 + 5% (levels at/below the entry are skipped, as for S2). Chase room, T1 guard and alerts are the same as S2.
+- Switch: `S1_CONTINUATION_BUY = False` in `Options-angel_live-ok.py` goes back to buying at S2 only.
+- Log lines start with `[S1 FIRST]`; the app prints `S1-first BUY is ON` when it starts.
 
 ## 4. SELL entry, resistance side (mirror image)
 1. **Sweep.** LTP goes above R2, or comes within 1% of it. The highest price is recorded as **HH**.

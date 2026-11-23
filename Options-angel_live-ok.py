@@ -7875,6 +7875,27 @@ class ControlPanel:
         self._set_status(f"● {len(expiries)} expiries for {sym}")
         self._refresh_display()
 
+    def _request_missing_levels(self, sym, expiries):
+        """Fetch the levels of focus strikes that have none yet, in the background, at most
+        once a minute per expiry (the dashboard refreshes far more often than that)."""
+        if not expiries:
+            return
+        last = getattr(self, "_missing_lv_req", {})
+        self._missing_lv_req = last
+        now = time.time()
+        for exp in expiries:
+            if not exp or exp == "-" or now - last.get((sym, exp), 0) < 60:
+                continue
+            last[(sym, exp)] = now
+            print(f"[STRIKE MAPPER] Focus strike(s) of {sym} {exp} have no levels yet — fetching now")
+
+            def _run(e=exp):
+                try:
+                    feed.fetch_and_map_all_strikes(sym, expiry=e, force_fetch=False)
+                except Exception as err:
+                    print(f"[STRIKE MAPPER] Missing-level fetch notice: {err}")
+            threading.Thread(target=_run, daemon=True, name="missing-levels").start()
+
     def _apply_expiry_gate(self):
         """Next Expiry unticked => only current-expiry trades/orders are generated."""
         allowed = allowed_entry_expiries(self.expiry_var.get(), self.next_exp_var.get(),
@@ -8074,14 +8095,22 @@ class ControlPanel:
             mtime = os.path.getmtime(cache_file) if os.path.exists(cache_file) else 0
         except OSError:
             mtime = 0
-        if not hasattr(self, "_cached_strikes") or getattr(self, "_cached_strikes_mtime", -1) != mtime:
+        _sess_day = pivot_session_date().isoformat()
+        if (not hasattr(self, "_cached_strikes") or getattr(self, "_cached_strikes_mtime", -1) != mtime
+                or getattr(self, "_cached_strikes_day", None) != _sess_day):
             self._cached_strikes_mtime = mtime
+            self._cached_strikes_day = _sess_day
             if os.path.exists(cache_file):
                 try:
                     with open(cache_file, "r") as cf:
                         _cj = json.load(cf)
+                    # Only levels built for THIS session; an older file's levels belong to
+                    # other strikes / another day and must never stand in for today's.
+                    if str(_cj.get("date", "")) == _sess_day:
                         self._cached_strikes = _cj.get("strikes", {})
-                        self._cached_nearest_exp = _cj.get("expiry", "")
+                    else:
+                        self._cached_strikes = {}
+                    self._cached_nearest_exp = _cj.get("expiry", "")
                 except Exception:
                     self._cached_strikes = getattr(self, "_cached_strikes", {})
             else:
@@ -8201,6 +8230,7 @@ class ControlPanel:
             if not target_expiries:
                 target_expiries = [curr_exp or "-"]
 
+        _missing_lv = set()
         for tgt_exp in target_expiries:
             for ot, stk, is_15m, is_1h, is_nearby in needed_focus:
                 strike_tag = "[⭐15M & ⏳1H]" if (is_15m and is_1h) else ("[⭐15M Focus]" if is_15m else ("[⏳1H Focus]" if is_1h else ("[📌Nearby Pivot]" if is_nearby else "")))
@@ -8276,6 +8306,28 @@ class ControlPanel:
                             "plan_sell_zone": f"SELL R2={r2_val:.1f} | T1:{r1_val:.1f} P:{p_val:.1f}",
                         })
                         existing_keys.add((ot, stk, tgt_exp))
+                    else:
+                        # Focus strike whose levels are not loaded yet: still list it (marked
+                        # "levels pending") so every exact 15M/1H strike is visible, and fetch
+                        # its levels now instead of waiting for the next watchdog pass.
+                        ltp_val = _live_ltp(ot, stk_int, tgt_exp)
+                        for _side in ("BUY", "SELL"):
+                            watch.append({
+                                "side": _side, "type": ot, "strike": stk, "ltp": ltp_val,
+                                "high": 0.0, "low": 0.0, "oi": 0, "vol": 0, "expiry": tgt_exp,
+                                "zone": f"{strike_tag} Levels pending".strip(),
+                                "is_15m": is_15m, "is_1h": is_1h, "is_nearby": is_nearby,
+                                "s3": 0.0, "s2": 0.0, "s1": 0.0, "p": 0.0, "r1": 0.0, "r2": 0.0, "r3": 0.0,
+                                "category": ("CE_SUP" if ot == "CE" else "PE_SUP") if _side == "BUY"
+                                            else ("PE_RES" if ot == "PE" else "CE_RES"),
+                                "status": "⏳ Levels pending", "m5_state": "⏳ Waiting",
+                                "trade_status": "Levels pending", "no_levels": True,
+                                "ll": 0.0, "hh": 0.0, "sl": 0.0, "entry_price": 0.0,
+                                "targets": [], "target": 0.0,
+                            })
+                        existing_keys.add((ot, stk, tgt_exp))
+                        _missing_lv.add(tgt_exp)
+        self._request_missing_levels(sym, _missing_lv)
         # ── Multi-select filters (side / type / timeframe / level / state) + expiry ──
         seen = set()
         display_watch = []
@@ -8410,7 +8462,9 @@ class ControlPanel:
                 strike_tag = f"[🔷P] {strike_tag}".strip()
 
             # Fast-decision signals & statuses for rapid execution
-            if trade_st == "Active":
+            if w.get("no_levels"):
+                disp_signal = "⏳ Levels pending — fetching this strike's S/P/R levels"
+            elif trade_st == "Active":
                 disp_signal = f"🟢 LIVE LONG @ {ep_v:.2f} | SL: {sl_str} | T1: {t1_str}" if is_buy else f"🔴 LIVE SHORT @ {ep_v:.2f} | SL: {sl_str} | T1: {t1_str}"
             elif "Target 1" in trade_st:
                 disp_signal = f"🎯 T1 HIT (+50% Booked) | SL: {sl_str} -> T2: {t2_str}"
@@ -8427,7 +8481,9 @@ class ControlPanel:
             else:
                 disp_signal = f"▼ Plan SELL @ R2:{planned_ep:.1f} | HH SL (Watch R2 Sweep)"
 
-            if is_buy:
+            if w.get("no_levels"):
+                disp_zone = f"{strike_tag} Levels pending".strip()
+            elif is_buy:
                 disp_zone = f"{strike_tag} Buy Zone Above {lvl_label} ({planned_ep:.1f}){s2_note}".strip()
             else:
                 disp_zone = f"{strike_tag} Sell Area Below R2 ({planned_ep:.1f})".strip()
@@ -8518,13 +8574,13 @@ class ControlPanel:
                 oi_disp,
                 vol_disp,
                 disp_zone,
-                f"{w.get('s3', 0.0):.2f}",
-                f"{w.get('s2', 0.0):.2f}",
-                f"{w.get('s1', 0.0):.2f}",
-                f"{w.get('p', 0.0):.2f}",
-                f"{w.get('r1', 0.0):.2f}",
-                f"{w.get('r2', 0.0):.2f}",
-                f"{w.get('r3', 0.0):.2f}",
+                ("-" if w.get("no_levels") else f"{w.get('s3', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('s2', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('s1', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('p', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('r1', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('r2', 0.0):.2f}"),
+                ("-" if w.get("no_levels") else f"{w.get('r3', 0.0):.2f}"),
                 disp_m5,
                 ll_str,
                 hh_str,
